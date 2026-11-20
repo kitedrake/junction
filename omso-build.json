@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "name": "Junction",
+  "notes": [
+    "Release build of Junction.app (ad-hoc signed) with its audio driver inside, the engine tests and the driver harness, and a self-test that checks the bundled driver loads and the planner, kernel and saving work; then copies Junction.app into /Applications/omso.",
+    "Installing the driver itself is a separate step in the app (administrator password, restarts Core Audio).",
+    "Needs Xcode 26 or newer (macOS 26 SDK)."
+  ],
+  "products": [
+    {
+      "name": "Junction",
+      "configuration": "Release",
+      "steps": [
+        {"name": "Build", "run": ["/bin/sh", "{source}/build.sh"]},
+        {"name": "Test", "run": ["/bin/sh", "{source}/test.sh"], "env": {"TMPDIR": "{tmp}"}},
+        {"name": "Self-test", "run": ["{source}/build/Junction.app/Contents/MacOS/Junction", "--self-test", "{run}/self-test"]}
+      ],
+      "install": [
+        {"copy": "build/Junction.app", "to": "/Applications/omso"}
+      ]
+    }
+  ]
+}

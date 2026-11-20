@@ -1,0 +1,372 @@
+import AppKit
+import JunctionCore
+import Observation
+import SwiftUI
+
+enum Selection: Hashable {
+    case node(UUID)
+    case cable(UUID)
+}
+
+/// The app's state: the graph (saved), what is on the system, the routing plan and how it runs.
+@MainActor @Observable
+final class AppModel {
+    static let shared = AppModel(demo: ProcessInfo.processInfo.environment["JUNCTION_SNAPSHOT"] != nil)
+
+    var graph: Graph {
+        didSet { graphChanged(from: oldValue) }
+    }
+    private(set) var inventory = Inventory()
+    private(set) var plan = RoutingPlan()
+    private(set) var statuses: [UUID: SinkStatus] = [:]
+    var meters: [PortKey: Float] = [:]
+    var selection: Selection?
+    var showInspector = true
+    var showStreamTemplate = false
+    /// A problem to show in an alert (driver install, publishing).
+    var alert: String?
+    private(set) var isInstallingDriver = false
+
+    /// Screenshots and demos: made-up devices, nothing saved, nothing routed.
+    let isDemo: Bool
+    private let store = Store()
+    @ObservationIgnored private var router: Router?
+    @ObservationIgnored private var watcher: HAL.SystemWatcher?
+    @ObservationIgnored private var saveTask: Task<Void, Never>?
+    @ObservationIgnored private var refreshPending = false
+    @ObservationIgnored private var timers: [Timer] = []
+    @ObservationIgnored private var started = false
+
+    init(demo: Bool) {
+        isDemo = demo
+        graph = Graph()
+    }
+
+    // MARK: Life cycle
+
+    func start() {
+        guard !started else { return }
+        started = true
+        if isDemo {
+            Demo.load(into: self)
+            return
+        }
+        if let saved = store.load() {
+            graph = saved
+        } else {
+            graph = Graph()
+        }
+        let router = Router { statuses in
+            Task { @MainActor in AppModel.shared.statuses = statuses }
+        }
+        self.router = router
+        refreshInventory()
+        publishVirtualDevices()
+        watcher = HAL.SystemWatcher(queue: .main) {
+            Task { @MainActor in AppModel.shared.scheduleRefresh() }
+        }
+        timers.append(Timer.scheduledTimer(withTimeInterval: 1.0 / 20, repeats: true) { _ in
+            MainActor.assumeIsolated { AppModel.shared.pollMeters() }
+        })
+        timers.append(Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { _ in
+            MainActor.assumeIsolated { AppModel.shared.refreshInventory() }
+        })
+        replan(force: true)
+    }
+
+    func stop() {
+        timers.forEach { $0.invalidate() }
+        timers.removeAll()
+        router?.stopAll()
+        saveNow()
+    }
+
+    /// Demo mode sets the system picture directly.
+    func setDemoState(inventory: Inventory, statuses: [UUID: SinkStatus], meters: [PortKey: Float]) {
+        self.inventory = inventory
+        self.statuses = statuses
+        self.meters = meters
+        replan(force: true)
+    }
+
+    // MARK: Changes
+
+    private func graphChanged(from old: Graph) {
+        if !isDemo {
+            saveTask?.cancel()
+            saveTask = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(600))
+                guard !Task.isCancelled else { return }
+                self?.saveNow()
+            }
+            if old.virtualDevices != graph.virtualDevices { publishVirtualDevices() }
+        }
+        replan()
+    }
+
+    private func saveNow() {
+        guard !isDemo else { return }
+        do {
+            try store.save(graph)
+        } catch {
+            alert = "Couldn't save the routing setup: \(error.localizedDescription)"
+        }
+    }
+
+    private func replan(force: Bool = false) {
+        let new = Planner.plan(graph, inventory: inventory)
+        guard force || new != plan else { return }
+        plan = new
+        router?.apply(new)
+    }
+
+    private func scheduleRefresh() {
+        guard !refreshPending else { return }
+        refreshPending = true
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(150))
+            refreshPending = false
+            refreshInventory()
+            router?.processesChanged()
+        }
+    }
+
+    func refreshInventory() {
+        guard !isDemo else { return }
+        let fresh = HAL.readInventory()
+        guard fresh != inventory else { return }
+        let driverAppeared = !inventory.driver.isInstalled && fresh.driver.isInstalled
+        inventory = fresh
+        // Remember the current shape of devices on the canvas, for when they are unplugged.
+        var updated = graph
+        for index in updated.nodes.indices {
+            guard case .device(let ref) = updated.nodes[index].kind, let live = fresh.device(ref.uid), live.ref != ref else { continue }
+            updated.nodes[index].kind = .device(live.ref)
+        }
+        if updated != graph { graph = updated }
+        if driverAppeared { publishVirtualDevices() }
+        replan()
+    }
+
+    private func pollMeters() {
+        guard let router, graph.isRoutingOn else {
+            if !meters.isEmpty { meters = [:] }
+            return
+        }
+        let fresh = router.takeMeters()
+        var next: [PortKey: Float] = [:]
+        for key in Set(fresh.keys).union(meters.keys) {
+            let value = max(fresh[key] ?? 0, (meters[key] ?? 0) * 0.72)
+            if value > 0.0005 { next[key] = value }
+        }
+        if next != meters { meters = next }
+    }
+
+    // MARK: Driver
+
+    private func publishVirtualDevices() {
+        guard !isDemo, inventory.driver.isInstalled else { return }
+        let devices = graph.virtualDevices
+        Task.detached {
+            do {
+                try DriverClient.publish(devices)
+            } catch {
+                let message = error.localizedDescription
+                await MainActor.run { AppModel.shared.alert = message }
+            }
+        }
+    }
+
+    var bundledDriverVersion: String? { DriverClient.bundledVersion }
+
+    var driverNeedsUpdate: Bool {
+        guard case .installed(let version) = inventory.driver, let bundled = bundledDriverVersion else { return false }
+        return version != bundled
+    }
+
+    func installDriver() {
+        guard let driver = DriverClient.bundledDriverURL,
+              let script = Bundle.main.url(forResource: "install-driver", withExtension: "sh")
+        else {
+            alert = "This copy of Junction doesn't contain the driver. Build it with build.sh."
+            return
+        }
+        runPrivileged(script: script, arguments: [driver.path], prompt: "Junction wants to install its audio driver.")
+    }
+
+    func uninstallDriver() {
+        guard let script = Bundle.main.url(forResource: "uninstall-driver", withExtension: "sh") else { return }
+        runPrivileged(script: script, arguments: [], prompt: "Junction wants to remove its audio driver.")
+    }
+
+    /// Runs a bundled script as root after macOS asks for an administrator password. Core Audio restarts, so all
+    /// sound stops for a moment.
+    private func runPrivileged(script: URL, arguments: [String], prompt: String) {
+        func literal(_ text: String) -> String {
+            "\"" + text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+        }
+        let words = ([script.path] + arguments).map { "quoted form of \(literal($0))" }.joined(separator: " & \" \" & ")
+        let source = "do shell script \"/bin/sh \" & \(words) with prompt \(literal(prompt)) with administrator privileges"
+        isInstallingDriver = true
+        Task.detached {
+            var error: NSDictionary?
+            NSAppleScript(source: source)?.executeAndReturnError(&error)
+            let message = error?[NSAppleScript.errorMessage] as? String
+            let cancelled = (error?[NSAppleScript.errorNumber] as? Int) == -128
+            try? await Task.sleep(for: .seconds(2))  // coreaudiod restarts
+            await MainActor.run {
+                let model = AppModel.shared
+                model.isInstallingDriver = false
+                if let message, !cancelled { model.alert = message }
+                model.refreshInventory()
+                model.publishVirtualDevices()
+            }
+        }
+    }
+
+    // MARK: Editing
+
+    var info: NodeInfo { NodeInfo(graph: graph, inventory: inventory) }
+
+    func node(_ id: UUID) -> Node? { graph.node(id) }
+
+    @discardableResult
+    func addNode(_ kind: NodeKind, at point: CGPoint? = nil) -> UUID {
+        if case .virtualDevice(let id) = kind, let existing = graph.nodes.first(where: { $0.kind == .virtualDevice(id) }) {
+            selection = .node(existing.id)
+            return existing.id
+        }
+        let spot = point ?? freeSpot(for: kind)
+        let node = Node(kind: kind, x: spot.x, y: spot.y)
+        graph.nodes.append(node)
+        selection = .node(node.id)
+        return node.id
+    }
+
+    /// Sources go on the left, sinks on the right, below what is already there.
+    private func freeSpot(for kind: NodeKind) -> CGPoint {
+        let probe = Node(kind: kind)
+        let ports = info.ports(probe)
+        let column: Double = ports.outputs > 0 && ports.inputs == 0 ? 60 : (ports.inputs > 0 && ports.outputs == 0 ? 760 : 410)
+        let bottom = graph.nodes.filter { abs($0.x - column) < 150 }
+            .map { $0.y + Double(NodeLayout.height(for: info.ports($0))) }.max() ?? 30
+        return CGPoint(x: column, y: bottom + 30)
+    }
+
+    func moveNode(_ id: UUID, to point: CGPoint) {
+        guard let index = graph.nodes.firstIndex(where: { $0.id == id }) else { return }
+        graph.nodes[index].x = max(0, point.x)
+        graph.nodes[index].y = max(0, point.y)
+    }
+
+    func updateNode(_ id: UUID, _ change: (inout Node) -> Void) {
+        guard let index = graph.nodes.firstIndex(where: { $0.id == id }) else { return }
+        change(&graph.nodes[index])
+    }
+
+    func updateCable(_ id: UUID, _ change: (inout Cable) -> Void) {
+        guard let index = graph.cables.firstIndex(where: { $0.id == id }) else { return }
+        change(&graph.cables[index])
+    }
+
+    func removeNode(_ id: UUID) {
+        graph.removeNode(id)
+        if selection == .node(id) { selection = nil }
+    }
+
+    func removeCable(_ id: UUID) {
+        graph.cables.removeAll { $0.id == id }
+        if selection == .cable(id) { selection = nil }
+    }
+
+    func deleteSelection() {
+        switch selection {
+        case .node(let id): removeNode(id)
+        case .cable(let id): removeCable(id)
+        case nil: break
+        }
+    }
+
+    /// Connects two channels; returns why not when it can't.
+    @discardableResult
+    func connect(from: PortRef, to: PortRef) -> Rules.Problem? {
+        if let problem = Rules.check(from: from, to: to, graph: graph, inventory: inventory) { return problem }
+        let cable = Cable(from: from, to: to)
+        graph.cables.append(cable)
+        selection = .cable(cable.id)
+        return nil
+    }
+
+    /// Connects every channel of one node to the next node's channels in order.
+    @discardableResult
+    func connectAll(from source: UUID, to target: UUID) -> Rules.Problem? {
+        let cables = Rules.busCables(from: source, to: target, graph: graph, inventory: inventory)
+        guard !cables.isEmpty else {
+            let outputs = graph.node(source).map { info.ports($0).outputs } ?? 0
+            let inputs = graph.node(target).map { info.ports($0).inputs } ?? 0
+            if outputs == 0 || inputs == 0 { return .noSuchPort }
+            return Rules.check(from: PortRef(node: source, channel: 0), to: PortRef(node: target, channel: 0),
+                               graph: graph, inventory: inventory) ?? .alreadyConnected
+        }
+        graph.cables.append(contentsOf: cables)
+        return nil
+    }
+
+    func disconnectAll(_ node: UUID) {
+        graph.cables.removeAll { $0.from.node == node || $0.to.node == node }
+    }
+
+    // MARK: Virtual devices
+
+    @discardableResult
+    func addVirtualDevice(name: String? = nil, channels: Int = 2) -> VirtualDevice? {
+        guard graph.virtualDevices.count < VirtualDevice.maximumCount else {
+            alert = "Junction can publish up to \(VirtualDevice.maximumCount) virtual devices."
+            return nil
+        }
+        let base = name ?? "Virtual Device"
+        var candidate = base, number = 2
+        while graph.virtualDevices.contains(where: { $0.name == candidate }) {
+            candidate = "\(base) \(number)"
+            number += 1
+        }
+        let device = VirtualDevice(name: candidate, channels: channels)
+        graph.virtualDevices.append(device)
+        addNode(.virtualDevice(device.id))
+        return device
+    }
+
+    func updateVirtualDevice(_ id: UUID, _ change: (inout VirtualDevice) -> Void) {
+        guard let index = graph.virtualDevices.firstIndex(where: { $0.id == id }) else { return }
+        var updated = graph
+        change(&updated.virtualDevices[index])
+        let name = updated.virtualDevices[index].name.trimmingCharacters(in: .whitespaces)
+        updated.virtualDevices[index].name = name.isEmpty ? "Virtual Device" : name
+        let info = NodeInfo(graph: updated, inventory: inventory)
+        updated.pruneCables { info.ports($0) }
+        graph = updated
+    }
+
+    func removeVirtualDevice(_ id: UUID) {
+        graph.removeVirtualDevice(id)
+        if case .node(let node) = selection, graph.node(node) == nil { selection = nil }
+    }
+
+    // MARK: Status for the canvas
+
+    func issues(for node: UUID) -> [String] {
+        var result = plan.issues[node] ?? []
+        if let status = statuses[node], let message = status.message { result.insert(message, at: 0) }
+        return result
+    }
+
+    func isFailing(_ node: UUID) -> Bool { statuses[node]?.state == .failed }
+    func isRunning(_ node: UUID) -> Bool { statuses[node]?.state == .running }
+
+    func level(_ node: UUID, output: Bool, channel: Int) -> Float {
+        meters[PortKey(node: node, isOutput: output, channel: channel)] ?? 0
+    }
+
+    var runningSinkCount: Int { statuses.values.filter { $0.state == .running }.count }
+    var failingSinkCount: Int { statuses.values.filter { $0.state == .failed }.count }
+}

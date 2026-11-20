@@ -1,0 +1,289 @@
+import CoreAudio
+import Foundation
+import JunctionKernel
+
+/// How one sink is doing.
+public struct SinkStatus: Equatable, Sendable {
+    public enum State: Equatable, Sendable { case running, failed }
+    public var state: State
+    public var message: String?
+
+    public init(state: State, message: String? = nil) {
+        self.state = state
+        self.message = message
+    }
+}
+
+/// A node channel for meters: `isOutput` is the node's right side.
+public struct PortKey: Hashable, Sendable {
+    public var node: UUID
+    public var isOutput: Bool
+    public var channel: Int
+
+    public init(node: UUID, isOutput: Bool, channel: Int) {
+        self.node = node
+        self.isOutput = isOutput
+        self.channel = channel
+    }
+}
+
+/// Builds and runs what a RoutingPlan describes: per sink, process taps, a private aggregate device and an IOProc.
+/// All Core Audio work happens on the router's own queue; meters can be read from any thread.
+public final class Router: @unchecked Sendable {
+    public typealias StatusHandler = @Sendable ([UUID: SinkStatus]) -> Void
+
+    private let queue = DispatchQueue(label: "local.junction.router", qos: .userInitiated)
+    private let lock = NSLock()
+    private var runners: [UUID: SinkRunner] = [:]  // mutated on `queue`, under `lock`
+    private var statuses: [UUID: SinkStatus] = [:]  // `queue` only
+    private let onStatus: StatusHandler
+
+    public init(onStatus: @escaping StatusHandler) {
+        self.onStatus = onStatus
+    }
+
+    /// Brings the running sinks in line with the plan: unchanged sinks only get new gains, changed ones are rebuilt.
+    public func apply(_ plan: RoutingPlan) {
+        queue.async { self.applyNow(plan) }
+    }
+
+    /// Stops everything and waits until it has stopped.
+    public func stopAll() {
+        queue.sync { self.applyNow(RoutingPlan()) }
+    }
+
+    /// Re-resolves which processes each tap includes or leaves out (an app started or quit).
+    public func processesChanged() {
+        queue.async {
+            let processes = HAL.audioProcesses()
+            self.lock.lock()
+            let current = Array(self.runners.values)
+            self.lock.unlock()
+            for runner in current { runner.refreshTaps(processes: processes) }
+        }
+    }
+
+    /// Peak levels since the last call, per node channel that is in use.
+    public func takeMeters() -> [PortKey: Float] {
+        lock.lock()
+        defer { lock.unlock() }
+        var result: [PortKey: Float] = [:]
+        for runner in runners.values {
+            for (key, value) in runner.takeMeters() { result[key] = max(result[key] ?? 0, value) }
+        }
+        return result
+    }
+
+    private func applyNow(_ plan: RoutingPlan) {
+        let wanted = Dictionary(plan.sinks.map { ($0.sinkNode, $0) }, uniquingKeysWith: { first, _ in first })
+        for (id, runner) in runners where wanted[id]?.structureKey != runner.plan.structureKey {
+            lock.lock()
+            runners[id] = nil
+            lock.unlock()
+            runner.stop()
+        }
+        statuses = statuses.filter { wanted[$0.key] != nil }
+        var processes: [HAL.AudioProcess]?
+        for sink in plan.sinks {
+            if let runner = runners[sink.sinkNode] {
+                runner.update(gains: sink)
+                continue
+            }
+            if processes == nil, !sink.taps.isEmpty { processes = HAL.audioProcesses() }
+            guard let runner = SinkRunner(plan: sink) else {
+                statuses[sink.sinkNode] = SinkStatus(state: .failed, message: "Out of memory.")
+                continue
+            }
+            do {
+                try runner.start(processes: processes ?? [])
+                lock.lock()
+                runners[sink.sinkNode] = runner
+                lock.unlock()
+                statuses[sink.sinkNode] = SinkStatus(state: .running, message: runner.layoutWarning)
+            } catch {
+                runner.stop()
+                statuses[sink.sinkNode] = SinkStatus(state: .failed, message: error.localizedDescription)
+            }
+        }
+        onStatus(statuses)
+    }
+}
+
+enum RouterError: Error, LocalizedError {
+    case tap(String, OSStatus)
+    case aggregate(OSStatus)
+    case start(OSStatus)
+
+    var errorDescription: String? {
+        switch self {
+        case .tap(let name, let status):
+            "Couldn't capture \(name) (\(HAL.describe(status))). Check System Settings › Privacy & Security › Screen & System Audio Recording."
+        case .aggregate(let status): "Couldn't combine the devices (\(HAL.describe(status)))."
+        case .start(let status):
+            status == kAudioDevicePermissionsError
+                ? "macOS didn't allow audio input. Check System Settings › Privacy & Security › Microphone."
+                : "Couldn't start audio (\(HAL.describe(status)))."
+        }
+    }
+}
+
+/// One sink: its taps, aggregate device, renderer and IOProc.
+final class SinkRunner: @unchecked Sendable {
+    private(set) var plan: SinkPlan
+    private let renderer: OpaquePointer
+    private var aggregate = AudioObjectID(kAudioObjectUnknown)
+    private var procID: AudioDeviceIOProcID?
+    private var taps: [(plan: TapPlan, id: AudioObjectID, uuid: UUID, processes: [AudioObjectID])] = []
+    private(set) var layoutWarning: String?
+
+    init?(plan: SinkPlan) {
+        self.plan = plan
+        let sources = plan.routes.map { UInt32($0.input) }
+        let destinations = plan.routes.map { UInt32($0.output) }
+        let gains = plan.routes.map(\.gain)
+        guard let renderer = jk_renderer_create(UInt32(plan.inputChannels), UInt32(plan.sinkOutputChannels),
+                                                UInt32(plan.routes.count), sources, destinations, gains)
+        else { return nil }
+        self.renderer = renderer
+        jk_renderer_set_master_gain(renderer, plan.masterGain)
+    }
+
+    deinit {
+        jk_renderer_destroy(renderer)
+    }
+
+    func start(processes: [HAL.AudioProcess]) throws {
+        for tap in plan.taps {
+            let (description, members) = Self.describe(tap, processes: processes, uuid: UUID())
+            var id = AudioObjectID(kAudioObjectUnknown)
+            let status = AudioHardwareCreateProcessTap(description, &id)
+            guard status == noErr, id != kAudioObjectUnknown else { throw RouterError.tap(tap.name, status) }
+            taps.append((tap, id, description.uuid, members))
+        }
+
+        var subDevices: [[String: Any]] = []
+        for (index, device) in plan.subDevices.enumerated() {
+            var entry: [String: Any] = [kAudioSubDeviceUIDKey: device.uid]
+            if index > 0 { entry[kAudioSubDeviceDriftCompensationKey] = 1 }
+            subDevices.append(entry)
+        }
+        let tapList: [[String: Any]] = taps.map {
+            [kAudioSubTapUIDKey: $0.uuid.uuidString, kAudioSubTapDriftCompensationKey: 1]
+        }
+        let description: [String: Any] = [
+            kAudioAggregateDeviceNameKey: "Junction · \(plan.name)",
+            kAudioAggregateDeviceUIDKey: HAL.aggregateUIDPrefix + UUID().uuidString,
+            kAudioAggregateDeviceIsPrivateKey: 1,
+            kAudioAggregateDeviceIsStackedKey: 0,
+            kAudioAggregateDeviceMainSubDeviceKey: plan.sinkUID,
+            kAudioAggregateDeviceSubDeviceListKey: subDevices,
+            kAudioAggregateDeviceTapListKey: tapList,
+        ]
+        var aggregate = AudioObjectID(kAudioObjectUnknown)
+        var status = AudioHardwareCreateAggregateDevice(description as CFDictionary, &aggregate)
+        guard status == noErr, aggregate != kAudioObjectUnknown else { throw RouterError.aggregate(status) }
+        self.aggregate = aggregate
+
+        // The aggregate fills in its streams shortly after creation.
+        var inputs = 0, outputs = 0
+        for _ in 0..<25 {
+            inputs = HAL.channelCount(aggregate, kAudioObjectPropertyScopeInput)
+            outputs = HAL.channelCount(aggregate, kAudioObjectPropertyScopeOutput)
+            if inputs >= plan.inputChannels && outputs >= plan.sinkOutputChannels { break }
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        if inputs != plan.inputChannels || outputs < plan.sinkOutputChannels {
+            layoutWarning = "Expected \(plan.inputChannels) input and \(plan.outputChannels) output channels, macOS made \(inputs) and \(outputs); some cables may carry the wrong channel."
+        }
+
+        var proc: AudioDeviceIOProcID?
+        status = AudioDeviceCreateIOProcID(aggregate, jk_renderer_ioproc, UnsafeMutableRawPointer(renderer), &proc)
+        guard status == noErr, let proc else { throw RouterError.start(status) }
+        procID = proc
+        status = AudioDeviceStart(aggregate, proc)
+        guard status == noErr else { throw RouterError.start(status) }
+    }
+
+    func stop() {
+        if let procID {
+            AudioDeviceStop(aggregate, procID)
+            AudioDeviceDestroyIOProcID(aggregate, procID)
+            self.procID = nil
+        }
+        if aggregate != kAudioObjectUnknown {
+            AudioHardwareDestroyAggregateDevice(aggregate)
+            aggregate = AudioObjectID(kAudioObjectUnknown)
+        }
+        for tap in taps { AudioHardwareDestroyProcessTap(tap.id) }
+        taps.removeAll()
+    }
+
+    func update(gains plan: SinkPlan) {
+        for (index, route) in plan.routes.enumerated() where index < self.plan.routes.count {
+            jk_renderer_set_route_gain(renderer, UInt32(index), route.gain)
+        }
+        jk_renderer_set_master_gain(renderer, plan.masterGain)
+        self.plan = plan
+    }
+
+    func refreshTaps(processes: [HAL.AudioProcess]) {
+        for index in taps.indices {
+            let tap = taps[index]
+            let (description, members) = Self.describe(tap.plan, processes: processes, uuid: tap.uuid)
+            guard Set(members) != Set(tap.processes) else { continue }
+            do {
+                try AudioHardwareTap(id: tap.id).setDescription(description)
+                taps[index].processes = members
+            } catch {
+                // Keep the old description; the next change tries again.
+            }
+        }
+    }
+
+    func takeMeters() -> [PortKey: Float] {
+        var result: [PortKey: Float] = [:]
+        var inputPeaks: [Int: Float] = [:]
+        for route in plan.routes {
+            let peak = inputPeaks[route.input] ?? jk_renderer_take_input_peak(renderer, UInt32(route.input))
+            inputPeaks[route.input] = peak
+            let key = PortKey(node: route.source.node, isOutput: true, channel: route.source.channel)
+            result[key] = max(result[key] ?? 0, peak)
+        }
+        for channel in 0..<plan.sinkOutputChannels {
+            result[PortKey(node: plan.sinkNode, isOutput: false, channel: channel)] =
+                jk_renderer_take_output_peak(renderer, UInt32(channel))
+        }
+        return result
+    }
+
+    /// The tap description for a plan, with the process objects it names right now. Apps are matched with their
+    /// helper processes (browsers and Electron apps play sound from helpers). Junction itself is always excluded
+    /// from "all apps" taps, or it would hear its own output.
+    static func describe(_ tap: TapPlan, processes: [HAL.AudioProcess], uuid: UUID) -> (CATapDescription, [AudioObjectID]) {
+        let own = Bundle.main.bundleIdentifier
+        let description: CATapDescription
+        var bundleIDs: [String]
+        var members: [AudioObjectID]
+        switch tap.mode {
+        case .only(let apps):
+            let matching = processes.filter { apps.contains($0.appBundleID) || apps.contains($0.bundleID) }
+            members = matching.map(\.objectID)
+            bundleIDs = apps + matching.map(\.bundleID)
+            description = CATapDescription(stereoMixdownOfProcesses: members)
+        case .allExcept(let apps):
+            let matching = processes.filter {
+                apps.contains($0.appBundleID) || apps.contains($0.bundleID) || $0.pid == getpid()
+            }
+            members = matching.map(\.objectID)
+            bundleIDs = apps + matching.map(\.bundleID) + (own.map { [$0] } ?? [])
+            description = CATapDescription(stereoGlobalTapButExcludeProcesses: members)
+        }
+        description.name = "Junction · \(tap.name)"
+        description.uuid = uuid
+        description.isPrivate = true
+        description.muteBehavior = tap.mutesOriginal ? .muted : .unmuted
+        description.bundleIDs = Array(Set(bundleIDs.filter { !$0.isEmpty })).sorted()
+        description.isProcessRestoreEnabled = true
+        return (description, members.sorted())
+    }
+}
