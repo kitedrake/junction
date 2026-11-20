@@ -204,11 +204,17 @@ private struct ExcludedApps: View {
                             ForEach(running) { app in Button(app.name) { set(excluded + [app]) } }
                         }
                     }
-                    Section("Chat apps") {
-                        ForEach(Templates.chatApps.filter { app in !excluded.contains(app) && !running.contains(app) }) { app in
-                            Button(app.name) { set(excluded + [app]) }
+                    let chat = model.installedChatApps.filter { app in !excluded.contains(app) && !running.contains(app) }
+                    if !chat.isEmpty {
+                        Section("Chat apps") {
+                            ForEach(chat) { app in Button(app.name) { set(excluded + [app]) } }
                         }
                     }
+                    Divider()
+                    Button("Choose App…") {
+                        if let app = model.chooseApp(), !excluded.contains(where: { $0.bundleID == app.bundleID }) { set(excluded + [app]) }
+                    }
+                    .disabled(model.isDemo)
                 }
                 .fixedSize()
             }

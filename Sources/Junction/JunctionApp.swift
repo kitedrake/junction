@@ -275,7 +275,8 @@ struct StreamTemplateSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var name = "Stream Mix"
-    @State private var chosen: Set<String> = ["com.hnc.Discord"]
+    @State private var chosen: Set<String> = []
+    @State private var picked: [AppRef] = []
 
     var body: some View {
         let candidates = candidates
@@ -285,9 +286,22 @@ struct StreamTemplateSheet: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             LabeledContent("Device name") { TextField("Stream Mix", text: $name).frame(maxWidth: 220) }
-            Text("Leave out").font(.headline)
+            HStack {
+                Text("Leave out").font(.headline)
+                Spacer()
+                Button("Choose App…") {
+                    guard let app = model.chooseApp() else { return }
+                    if !picked.contains(app) { picked.append(app) }
+                    chosen.insert(app.bundleID)
+                }
+            }
             ScrollView {
                 VStack(alignment: .leading, spacing: 6) {
+                    if candidates.isEmpty {
+                        Text("No chat apps found. Apps appear here once they play sound; Choose App… picks any other.")
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     ForEach(candidates) { app in
                         Toggle(isOn: Binding(
                             get: { chosen.contains(app.bundleID) },
@@ -296,7 +310,7 @@ struct StreamTemplateSheet: View {
                                 NodeIcon(kind: .application(app), ports: PortCounts(inputs: 0, outputs: 2), size: 18)
                                 Text(app.name)
                                 if model.inventory.apps.contains(where: { $0.bundleID == app.bundleID }) {
-                                    Text("running").font(.caption).foregroundStyle(.secondary)
+                                    Text("using audio").font(.caption).foregroundStyle(.secondary)
                                 }
                             }
                         }
@@ -327,14 +341,8 @@ struct StreamTemplateSheet: View {
         }
         .padding(22)
         .frame(width: 520)
+        .onAppear { chosen = Templates.defaultExclusions(from: candidates) }
     }
 
-    private var candidates: [AppRef] {
-        var list = Templates.chatApps
-        for app in model.inventory.apps where !list.contains(where: { $0.bundleID == app.bundleID }) {
-            list.append(app.ref)
-        }
-        let running = Set(model.inventory.apps.map(\.bundleID))
-        return list.sorted { (running.contains($0.bundleID) ? 0 : 1, $0.name) < (running.contains($1.bundleID) ? 0 : 1, $1.name) }
-    }
+    private var candidates: [AppRef] { model.chatCandidates(picked: picked) }
 }

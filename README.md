@@ -34,7 +34,8 @@ Junction**), so it is heard only where you route it.
 ### Stream without chat
 
 **Stream Without Chat…** (File menu, empty canvas, inspector) builds the common setup in one step: a virtual device
-("Stream Mix") fed by System Audio with Discord (or any chat app) left out. In OBS add an Audio Input Capture source
+("Stream Mix") fed by System Audio with Discord (or any chat app) left out. It offers the apps using audio and the
+chat apps installed on your Mac; **Choose App…** adds any other. In OBS add an Audio Input Capture source
 for "Stream Mix": viewers hear the desktop, music, games and DAW; the people in the call don't hear themselves. Your
 own monitoring is unchanged.
 

@@ -57,6 +57,23 @@ public enum Templates {
         AppRef(bundleID: "com.teamspeak.TeamSpeak3", name: "TeamSpeak"),
     ]
 
+    /// Apps offered to leave out of a stream: apps using audio now, then the known chat apps that are installed and
+    /// the apps the user picked. Each appears once; apps using audio come first, each group sorted by name.
+    public static func chatCandidates(usingAudio: [AppRef], installedChatApps: [AppRef], picked: [AppRef] = []) -> [AppRef] {
+        var seen = Set<String>()
+        func unique(_ apps: [AppRef]) -> [AppRef] {
+            apps.filter { seen.insert($0.bundleID).inserted }
+                .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        }
+        let first = unique(usingAudio)
+        return first + unique(installedChatApps + picked)
+    }
+
+    /// What Stream Without Chat leaves out unless the user changes it: every version of Discord on offer.
+    public static func defaultExclusions(from candidates: [AppRef]) -> Set<String> {
+        Set(candidates.map(\.bundleID).filter { $0.hasPrefix("com.hnc.Discord") })
+    }
+
     /// "Stream without chat": a virtual device named `deviceName` that carries everything apps play except the
     /// chosen chat apps. A streaming app records it; people in the call don't hear themselves on stream.
     /// Reuses a virtual device and system-audio node of the same name/kind when present. Returns the device.

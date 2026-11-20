@@ -21,6 +21,21 @@ enum Demo {
 }
 
 final class PlannerTests: XCTestCase {
+    func testChatCandidatesOnlyOfferInstalledOrPlayingApps() {
+        let zoom = AppRef(bundleID: "us.zoom.xos", name: "zoom.us")
+        let faceTime = AppRef(bundleID: "com.apple.FaceTime", name: "FaceTime")
+        let music = AppRef(bundleID: "com.apple.Music", name: "Music")
+        let picked = AppRef(bundleID: "org.example.Chat", name: "Another Chat")
+        let candidates = Templates.chatCandidates(usingAudio: [music, Demo.discord],
+                                                  installedChatApps: [zoom, Demo.discord, faceTime], picked: [picked, music])
+        // Using audio first, then installed chat apps and picked apps; no duplicates, nothing else from the known list.
+        XCTAssertEqual(candidates.map(\.name), ["Discord", "Music", "Another Chat", "FaceTime", "zoom.us"])
+        XCTAssertEqual(Templates.defaultExclusions(from: candidates), ["com.hnc.Discord"])
+        XCTAssertTrue(Templates.chatCandidates(usingAudio: [], installedChatApps: []).isEmpty)
+        let canary = AppRef(bundleID: "com.hnc.DiscordCanary", name: "Discord Canary")
+        XCTAssertEqual(Templates.defaultExclusions(from: [canary, zoom]), ["com.hnc.DiscordCanary"])
+    }
+
     func testStreamWithoutChatTemplate() throws {
         var graph = Graph()
         let device = Templates.streamWithoutChat(&graph, excluding: [Demo.discord])

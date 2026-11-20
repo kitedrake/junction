@@ -5,6 +5,8 @@ import SwiftUI
 /// A made-up setup for screenshots and demos: nothing is read from or sent to Core Audio, nothing is saved.
 enum Demo {
     static let discord = AppRef(bundleID: "com.hnc.Discord", name: "Discord")
+    /// Chat apps the made-up Mac has installed (screenshots never show the real Mac's apps).
+    static let installedChatApps: Set<String> = ["com.hnc.Discord", "us.zoom.xos", "com.apple.FaceTime"]
 
     @MainActor static func load(into model: AppModel) {
         let stream = VirtualDevice(name: "Stream Mix")

@@ -4,6 +4,7 @@ import JunctionCore
 import Observation
 import os
 import SwiftUI
+import UniformTypeIdentifiers
 
 enum Selection: Hashable {
     case node(UUID)
@@ -28,6 +29,8 @@ final class AppModel {
     /// A problem to show in an alert (driver install, publishing).
     var alert: String?
     private(set) var isInstallingDriver = false
+    /// The known chat apps (`Templates.chatApps`) installed on this Mac.
+    private(set) var installedChatApps: [AppRef] = []
 
     /// Screenshots and demos: made-up devices, nothing saved, nothing routed.
     let isDemo: Bool
@@ -55,6 +58,7 @@ final class AppModel {
     func start() {
         guard !started else { return }
         started = true
+        refreshInstalledChatApps()
         if isDemo {
             Demo.load(into: self)
             return
@@ -89,7 +93,10 @@ final class AppModel {
             MainActor.assumeIsolated { AppModel.shared.pollMeters() }
         })
         timers.append(Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { _ in
-            MainActor.assumeIsolated { AppModel.shared.refreshInventory() }
+            MainActor.assumeIsolated {
+                AppModel.shared.refreshInventory()
+                AppModel.shared.refreshInstalledChatApps()
+            }
         })
         replan(force: true)
     }
@@ -200,6 +207,32 @@ final class AppModel {
             }
         }
         if adopted != graph { graph = adopted }
+    }
+
+    /// Apps installed or removed while Junction runs show up within a few seconds. Demo mode uses made-up apps.
+    private func refreshInstalledChatApps() {
+        let installed = Templates.chatApps.filter { app in
+            isDemo ? Demo.installedChatApps.contains(app.bundleID)
+                : NSWorkspace.shared.urlForApplication(withBundleIdentifier: app.bundleID) != nil
+        }
+        if installed != installedChatApps { installedChatApps = installed }
+    }
+
+    /// The apps to offer for leaving out of a stream: using audio now, installed chat apps, and `picked`.
+    func chatCandidates(picked: [AppRef] = []) -> [AppRef] {
+        Templates.chatCandidates(usingAudio: inventory.apps.map(\.ref), installedChatApps: installedChatApps, picked: picked)
+    }
+
+    /// Asks for any app (one the chat list doesn't know) to leave out.
+    func chooseApp() -> AppRef? {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.application]
+        panel.directoryURL = URL(fileURLWithPath: "/Applications", isDirectory: true)
+        panel.message = "Choose an app to leave out of the stream."
+        panel.prompt = "Leave Out"
+        guard panel.runModal() == .OK, let url = panel.url, let bundleID = Bundle(url: url)?.bundleIdentifier else { return nil }
+        let name = FileManager.default.displayName(atPath: url.path)
+        return AppRef(bundleID: bundleID, name: name.hasSuffix(".app") ? String(name.dropLast(4)) : name)
     }
 
     /// Core Audio restarted (a driver install, update or removal, or a crash): every tap, aggregate device and IOProc
