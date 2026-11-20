@@ -3,6 +3,9 @@
 A macOS app (SwiftUI, Liquid Glass) for making virtual audio devices and routing apps, system audio, microphones and
 interfaces into them, each on its own node-and-cable canvas.
 
+**New to Junction? Read the [user guide](docs/GUIDE.md)**: installing, making devices, wiring them up, and streaming
+without your voice chat, step by step.
+
 - **Virtual devices** (sidebar): create, rename, set 1–64 channels and a sample rate, and switch each one on or off.
   Every app sees an enabled device as both a microphone and a speaker. Anything sent into it comes back out, so a
   streaming, call or recording app can record what Junction (or another app) plays into it.
