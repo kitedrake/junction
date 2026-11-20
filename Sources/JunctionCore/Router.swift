@@ -47,6 +47,20 @@ public final class Router: @unchecked Sendable {
         queue.async { self.applyNow(plan) }
     }
 
+    /// After Core Audio restarts every tap, aggregate device and IOProc is gone (and their IDs may soon name other
+    /// objects): drop all sinks without calling Core Audio. The next `apply` builds them again.
+    public func forgetAfterRestart() {
+        queue.async {
+            self.lock.lock()
+            let old = self.runners
+            self.runners = [:]
+            self.lock.unlock()
+            for runner in old.values { runner.forget() }
+            self.statuses = [:]
+            self.onStatus(self.statuses)
+        }
+    }
+
     /// Stops everything and waits until it has stopped.
     public func stopAll() {
         queue.sync { self.applyNow(RoutingPlan()) }
@@ -215,6 +229,13 @@ final class SinkRunner: @unchecked Sendable {
             aggregate = AudioObjectID(kAudioObjectUnknown)
         }
         for tap in taps { AudioHardwareDestroyProcessTap(tap.id) }
+        taps.removeAll()
+    }
+
+    /// Drops what `start` built without calling Core Audio: after a restart those objects no longer exist.
+    func forget() {
+        procID = nil
+        aggregate = AudioObjectID(kAudioObjectUnknown)
         taps.removeAll()
     }
 

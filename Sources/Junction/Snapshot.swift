@@ -91,6 +91,14 @@ enum Snapshot {
             if let cable = model.graph.cables.first(where: { $0.gainDB < 0 }) { model.selection = .cable(cable.id) }
             await both("cable")
 
+            let demoInventory = model.inventory, demoStatuses = model.statuses, demoMeters = model.meters
+            var outdated = demoInventory
+            outdated.driver = .installed(version: "0.1.0")  // older than any bundled driver
+            model.selection = nil
+            model.setDemoState(inventory: outdated, statuses: demoStatuses, meters: demoMeters)
+            await both("driver-update")
+            model.setDemoState(inventory: demoInventory, statuses: demoStatuses, meters: demoMeters)
+
             model.graph = Graph()
             model.selection = nil
             model.setDemoState(inventory: model.inventory, statuses: [:], meters: [:])

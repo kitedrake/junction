@@ -33,6 +33,11 @@ enum CommandLineTool {
         case .notInstalled: print("Driver: not installed (\(DriverClient.installPath))")
         case .installed(let version): print("Driver: installed, version \(version)")
         }
+        switch DriverUpdate(installed: inventory.driver, bundled: DriverClient.bundledVersion) {
+        case .available(_, let bundled): print("Driver update available: this app has \(bundled)")
+        case .appIsOlder(_, let bundled): print("This app is older: its driver is \(bundled)")
+        case .notInstalled, .upToDate: break
+        }
         if let published = DriverClient.publishedConfiguration() {
             print("Published virtual devices: \(published.count)")
             for entry in published {

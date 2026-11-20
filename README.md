@@ -60,6 +60,10 @@ is copied to `/Library/Audio/Plug-Ins/HAL/JunctionDriver.driver` and Core Audio 
 moment). By hand: `sudo sh scripts/install-driver.sh build/JunctionDriver.driver`; remove it with **Routing ›
 Uninstall Driver…** or `sudo sh scripts/uninstall-driver.sh`.
 
+Each copy of Junction carries its own driver. When it is newer than the installed one, the sidebar, the menu bar and
+the Routing menu offer **Update Driver…** with both versions; an older copy of Junction says so and doesn't offer to go
+back. Whenever Core Audio restarts (a driver install or update, or a crash), Junction rebuilds its routing by itself.
+
 macOS asks for two permissions the first time routing needs them: **Microphone** (reading any input, including
 Junction's own devices) and **System Audio Recording** (App and System Audio nodes). With ad-hoc signing macOS asks
 again after every rebuild; build with `JUNCTION_SIGN_IDENTITY="Apple Development: …" ./build.sh` to keep them.

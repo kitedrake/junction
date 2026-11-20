@@ -83,6 +83,55 @@ public enum DriverStatus: Equatable, Sendable {
     }
 }
 
+/// The installed driver against the one inside this copy of Junction.
+public enum DriverUpdate: Equatable, Sendable {
+    /// The versions match, or this copy of Junction has no driver inside.
+    case upToDate
+    case notInstalled
+    /// This copy of Junction carries a newer driver (or the installed one reports no readable version).
+    case available(installed: String, bundled: String)
+    /// The installed driver is newer: an older copy of Junction is running. Junction doesn't offer to go back.
+    case appIsOlder(installed: String, bundled: String)
+
+    public init(installed: DriverStatus, bundled: String?) {
+        guard case .installed(let version) = installed else {
+            self = .notInstalled
+            return
+        }
+        guard let bundled, version != bundled else {
+            self = .upToDate
+            return
+        }
+        switch Self.compare(version, bundled) {
+        case .orderedSame?: self = .upToDate
+        case .orderedDescending?: self = .appIsOlder(installed: version, bundled: bundled)
+        case .orderedAscending?, nil: self = .available(installed: version, bundled: bundled)
+        }
+    }
+
+    /// Compares dotted version numbers part by part ("0.1.10" is newer than "0.1.9", "1.0" equals "1.0.0"); nil
+    /// when either isn't one.
+    public static func compare(_ a: String, _ b: String) -> ComparisonResult? {
+        func parts(_ text: String) -> [Int]? {
+            let pieces = text.split(separator: ".", omittingEmptySubsequences: false)
+            guard !pieces.isEmpty else { return nil }
+            var result: [Int] = []
+            for piece in pieces {
+                guard let number = Int(piece), number >= 0 else { return nil }
+                result.append(number)
+            }
+            return result
+        }
+        guard let left = parts(a), let right = parts(b) else { return nil }
+        for index in 0..<max(left.count, right.count) {
+            let l = index < left.count ? left[index] : 0
+            let r = index < right.count ? right[index] : 0
+            if l != r { return l < r ? .orderedAscending : .orderedDescending }
+        }
+        return .orderedSame
+    }
+}
+
 /// Port counts and names of nodes, given the graph and what is on the system.
 public struct NodeInfo {
     public let graph: Graph

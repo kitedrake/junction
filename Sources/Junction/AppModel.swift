@@ -1,6 +1,8 @@
 import AppKit
+import CoreAudio
 import JunctionCore
 import Observation
+import os
 import SwiftUI
 
 enum Selection: Hashable {
@@ -32,12 +34,16 @@ final class AppModel {
     private let store = Store()
     @ObservationIgnored private var router: Router?
     @ObservationIgnored private var watcher: HAL.SystemWatcher?
+    @ObservationIgnored private var restartWatcher: HAL.SystemWatcher?
+    @ObservationIgnored private var restartTask: Task<Void, Never>?
+    @ObservationIgnored private var lastCoreAudioRestart: Date?
     @ObservationIgnored private var saveTask: Task<Void, Never>?
     @ObservationIgnored private var refreshPending = false
     @ObservationIgnored private var timers: [Timer] = []
     @ObservationIgnored private var started = false
     /// Virtual devices Junction just created, turned on or reformatted, and until when its own sample rate wins.
     @ObservationIgnored private var assertRateUntil: [UUID: Date] = [:]
+    private static let log = Logger(subsystem: "local.junction", category: "routing")
 
     init(demo: Bool) {
         isDemo = demo
@@ -76,6 +82,9 @@ final class AppModel {
         watcher = HAL.SystemWatcher(queue: .main) {
             Task { @MainActor in AppModel.shared.scheduleRefresh() }
         }
+        restartWatcher = HAL.SystemWatcher(selectors: [kAudioHardwarePropertyServiceRestarted], queue: .main) {
+            Task { @MainActor in AppModel.shared.coreAudioRestarted() }
+        }
         timers.append(Timer.scheduledTimer(withTimeInterval: 1.0 / 20, repeats: true) { _ in
             MainActor.assumeIsolated { AppModel.shared.pollMeters() }
         })
@@ -88,6 +97,7 @@ final class AppModel {
     func stop() {
         timers.forEach { $0.invalidate() }
         timers.removeAll()
+        restartTask?.cancel()
         router?.stopAll()
         saveNow()
     }
@@ -192,6 +202,29 @@ final class AppModel {
         if adopted != graph { graph = adopted }
     }
 
+    /// Core Audio restarted (a driver install, update or removal, or a crash): every tap, aggregate device and IOProc
+    /// Junction had is gone. Routing is rebuilt once devices are back, and what failed is tried again a little later.
+    private func coreAudioRestarted() {
+        guard !isDemo else { return }
+        lastCoreAudioRestart = Date()
+        Self.log.notice("Core Audio restarted; rebuilding routing")
+        router?.forgetAfterRestart()  // at once, so no refresh in between tries to stop the dead sinks
+        restartTask?.cancel()
+        restartTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1.5))
+            guard !Task.isCancelled else { return }
+            refreshInventory()
+            publishVirtualDevices()
+            replan(force: true)  // builds every sink that isn't running
+            Self.log.notice("Rebuilding \(self.plan.sinks.count, privacy: .public) destination(s) after the restart")
+            for delay in [2.0, 4.0] {  // devices that come back late
+                try? await Task.sleep(for: .seconds(delay))
+                guard !Task.isCancelled else { return }
+                replan(force: true)  // builds sinks that failed; running ones only get their gains again
+            }
+        }
+    }
+
     private func pollMeters() {
         guard let router, graph.isRoutingOn else {
             if !meters.isEmpty { meters = [:] }
@@ -233,10 +266,7 @@ final class AppModel {
 
     var bundledDriverVersion: String? { DriverClient.bundledVersion }
 
-    var driverNeedsUpdate: Bool {
-        guard case .installed(let version) = inventory.driver, let bundled = bundledDriverVersion else { return false }
-        return version != bundled
-    }
+    var driverUpdate: DriverUpdate { DriverUpdate(installed: inventory.driver, bundled: bundledDriverVersion) }
 
     func installDriver() {
         guard let driver = DriverClient.bundledDriverURL,
@@ -274,6 +304,12 @@ final class AppModel {
                 if let message, !cancelled { model.alert = message }
                 model.refreshInventory()
                 model.publishVirtualDevices()
+                // The script restarts Core Audio; rebuild routing even if the restart notice didn't arrive.
+                let noticed = model.lastCoreAudioRestart.map { Date().timeIntervalSince($0) < 15 } ?? false
+                if message == nil, !noticed {
+                    AppModel.log.notice("No restart notice after the driver script; rebuilding routing anyway")
+                    model.coreAudioRestarted()
+                }
             }
         }
     }

@@ -45,12 +45,22 @@ struct JunctionApp: App {
                 Toggle("Routing On", isOn: Binding(get: { model.graph.isRoutingOn }, set: { model.graph.isRoutingOn = $0 }))
                     .keyboardShortcut("r", modifiers: [.command, .shift])
                 Divider()
-                if model.inventory.driver.isInstalled {
-                    Button("Reinstall Driver…") { model.installDriver() }
-                    Button("Uninstall Driver…") { model.uninstallDriver() }
-                } else {
-                    Button("Install Driver…") { model.installDriver() }
+                Group {
+                    switch model.driverUpdate {
+                    case .notInstalled:
+                        Button("Install Driver…") { model.installDriver() }
+                    case .available(_, let bundled):
+                        Button("Update Driver to \(bundled)…") { model.installDriver() }
+                        Button("Uninstall Driver…") { model.uninstallDriver() }
+                    case .appIsOlder(_, let bundled):
+                        Button("Install Older Driver (\(bundled))…") { model.installDriver() }
+                        Button("Uninstall Driver…") { model.uninstallDriver() }
+                    case .upToDate:
+                        Button("Reinstall Driver…") { model.installDriver() }
+                        Button("Uninstall Driver…") { model.uninstallDriver() }
+                    }
                 }
+                .disabled(model.isInstallingDriver || model.isDemo)
             }
             CommandGroup(after: .sidebar) {
                 Button(model.showInspector ? "Hide Inspector" : "Show Inspector") { model.showInspector.toggle() }
@@ -93,6 +103,19 @@ struct MenuBarContent: View {
         if model.failingSinkCount > 0 {
             Divider()
             Text("\(model.failingSinkCount) destination\(model.failingSinkCount == 1 ? "" : "s") with problems")
+        }
+        switch model.driverUpdate {
+        case .notInstalled:
+            Divider()
+            Button(model.isInstallingDriver ? "Installing Driver…" : "Install Driver…") { model.installDriver() }
+                .disabled(model.isInstallingDriver || model.isDemo)
+        case .available(let installed, let bundled):
+            Divider()
+            Text("Driver update available (\(installed) → \(bundled))")
+            Button(model.isInstallingDriver ? "Installing Driver…" : "Update Driver…") { model.installDriver() }
+                .disabled(model.isInstallingDriver || model.isDemo)
+        case .appIsOlder, .upToDate:
+            EmptyView()
         }
         Divider()
         Button("Open Junction") {

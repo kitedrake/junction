@@ -189,17 +189,22 @@ public enum HAL {
 
     // MARK: Listeners
 
-    /// Calls `handler` on `queue` when any of the system-wide properties change (devices, defaults, audio
-    /// processes). Keep the returned object alive; dropping it removes the listeners.
+    /// Calls `handler` on `queue` when any of the given system-object properties change (by default: devices,
+    /// defaults, audio processes). Keep the returned object alive; dropping it removes the listeners.
     public final class SystemWatcher: @unchecked Sendable {
-        private let queue: DispatchQueue
-        private let block: AudioObjectPropertyListenerBlock
-        private let selectors: [AudioObjectPropertySelector] = [
+        /// What the inventory depends on: devices, defaults, processes playing audio.
+        public static let inventorySelectors: [AudioObjectPropertySelector] = [
             kAudioHardwarePropertyDevices, kAudioHardwarePropertyDefaultOutputDevice,
             kAudioHardwarePropertyDefaultInputDevice, kAudioHardwarePropertyProcessObjectList,
         ]
 
-        public init(queue: DispatchQueue, handler: @escaping @Sendable () -> Void) {
+        private let queue: DispatchQueue
+        private let block: AudioObjectPropertyListenerBlock
+        private let selectors: [AudioObjectPropertySelector]
+
+        public init(selectors: [AudioObjectPropertySelector] = inventorySelectors, queue: DispatchQueue,
+                    handler: @escaping @Sendable () -> Void) {
+            self.selectors = selectors
             self.queue = queue
             block = { _, _ in handler() }
             for selector in selectors {

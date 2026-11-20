@@ -9,7 +9,7 @@ struct Sidebar: View {
         List {
             // Pinning this under the list (safeAreaInset) stops the whole window from drawing on macOS 26, so it is a
             // section of the list.
-            if !model.inventory.driver.isInstalled || model.driverNeedsUpdate {
+            if model.driverUpdate != .upToDate {
                 Section { DriverNotice() }
             }
             Section {
@@ -144,31 +144,37 @@ struct DriverNotice: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if model.inventory.driver.isInstalled {
+            switch model.driverUpdate {
+            case .available(let installed, let bundled):
                 Label("Driver update available", systemImage: "arrow.down.circle.fill")
                     .font(.callout.weight(.medium))
-                Text("The installed driver differs from the one in this copy of Junction.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(4)
-                    .fixedSize(horizontal: false, vertical: true)
+                note("Installed: \(installed). This copy of Junction has \(bundled). Updating asks for your password and restarts Core Audio (sound stops for a moment); routing starts again on its own.")
                 Button(model.isInstallingDriver ? "Installing…" : "Update Driver…") { model.installDriver() }
+                    .buttonStyle(.borderedProminent)
                     .disabled(model.isInstallingDriver || model.isDemo)
-            } else {
+            case .appIsOlder(let installed, let bundled):
+                Label("Newer driver installed", systemImage: "info.circle.fill")
+                    .font(.callout.weight(.medium))
+                note("The installed driver (\(installed)) is newer than this copy of Junction (\(bundled)). Open the latest Junction.")
+            case .notInstalled, .upToDate:
                 Label("Driver not installed", systemImage: "exclamationmark.triangle.fill")
                     .symbolRenderingMode(.multicolor)
                     .font(.callout.weight(.medium))
-                Text("Virtual devices need Junction's audio driver. Installing asks for your password and restarts Core Audio (sound stops for a moment).")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(6)
-                    .fixedSize(horizontal: false, vertical: true)
+                note("Virtual devices need Junction's audio driver. Installing asks for your password and restarts Core Audio (sound stops for a moment).")
                 Button(model.isInstallingDriver ? "Installing…" : "Install Driver…") { model.installDriver() }
                     .buttonStyle(.borderedProminent)
                     .disabled(model.isInstallingDriver || model.isDemo)
             }
         }
         .padding(.vertical, 4)
+    }
+
+    private func note(_ text: String) -> some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(6)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 
