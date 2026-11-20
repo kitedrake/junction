@@ -26,7 +26,10 @@ node-and-cable canvas.
 App and System Audio nodes can take their audio away from the speakers it normally plays on (**Only through
 Junction**), so it is heard only where you route it.
 
-![Junction routing system audio without Discord and a microphone into a stream device](docs/screenshots/canvas.png)
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/canvas-light.png">
+  <img src="docs/screenshots/canvas-dark.png" alt="Junction routing system audio without Discord and a microphone into a stream device">
+</picture>
 
 ### Stream without chat
 
@@ -35,9 +38,13 @@ Junction**), so it is heard only where you route it.
 for "Stream Mix": viewers hear the desktop, music, games and DAW; the people in the call don't hear themselves. Your
 own monitoring is unchanged.
 
-<img src="docs/screenshots/stream-template.png" alt="The Stream Without Chat sheet" width="60%">
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/stream-template-light.png">
+  <img src="docs/screenshots/stream-template-dark.png" alt="The Stream Without Chat sheet" width="60%">
+</picture>
 
-*Screenshots made with Junction's snapshot mode on a made-up set of devices (see Development).*
+*Screenshots made with Junction's snapshot mode on a made-up set of devices (see Development); GitHub shows the
+light or dark set to match your theme.*
 
 Junction is open source under the GNU General Public License, version 3 or later (`LICENSE`). Copyright (C) 2026 omso.
 
@@ -90,7 +97,7 @@ build/Junction.app/Contents/MacOS/Junction --self-test   # bundled driver loads,
 build/Junction.app/Contents/MacOS/Junction --list        # driver status, devices, apps using audio
 build/Junction.app/Contents/MacOS/Junction --loopback-test   # with the driver installed: tone in, tone out
 build/Junction.app/Contents/MacOS/Junction --device-test     # with the driver installed: add, rename, reshape, remove
-JUNCTION_SNAPSHOT=/tmp/shots build/Junction.app/Contents/MacOS/Junction   # demo screenshots, then quits
+JUNCTION_SNAPSHOT=/tmp/shots build/Junction.app/Contents/MacOS/Junction   # demo screenshots, light and dark
 ```
 
 The driver harness (`Tests/DriverHarness/harness.c`) loads the driver into a test process with a stand-in Core Audio

@@ -42,7 +42,8 @@ enum Demo {
                 AudioApp(bundleID: "com.apple.Music", name: "Music", isPlaying: true),
                 AudioApp(bundleID: "com.apple.Safari", name: "Safari"),
             ],
-            defaultOutputUID: "demo.speakers", defaultInputUID: "demo.mic", driver: .installed(version: "0.1.0"))
+            defaultOutputUID: "demo.speakers", defaultInputUID: "demo.mic",
+            driver: .installed(version: DriverClient.bundledVersion ?? "0.1.1"))
         let running = SinkStatus(state: .running)
         var meters: [PortKey: Float] = [:]
         func meter(_ node: Node, _ output: Bool, _ values: [Float]) {
@@ -61,51 +62,51 @@ enum Demo {
     }
 }
 
-/// Development aid: `JUNCTION_SNAPSHOT=<folder>` loads the demo setup, saves PNGs of the main states (light and dark)
-/// into the folder and quits. Needs Screen Recording permission for the terminal that launches it.
+/// Development aid: `JUNCTION_SNAPSHOT=<folder>` loads the demo setup, saves PNGs of the main states, each as
+/// `<state>-light.png` and `<state>-dark.png`, into the folder and quits. Needs Screen Recording permission for the terminal that launches it.
 enum Snapshot {
     static func runIfRequested(_ model: AppModel) {
         guard let folder = ProcessInfo.processInfo.environment["JUNCTION_SNAPSHOT"].map({ URL(fileURLWithPath: $0, isDirectory: true) })
         else { return }
         Task { @MainActor in
             try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            NSApp.appearance = NSAppearance(named: .aqua)
+            /// Saves the current state in both appearances (light first, dark last, so the next state starts dark).
+            @MainActor func both(_ name: String, sheet: Bool = false) async {
+                for (appearance, suffix) in [(NSAppearance.Name.aqua, "light"), (.darkAqua, "dark")] {
+                    NSApp.appearance = NSAppearance(named: appearance)
+                    try? await Task.sleep(for: .milliseconds(800))
+                    if sheet { captureSheet(folder, "\(name)-\(suffix)") } else { capture(folder, "\(name)-\(suffix)") }
+                }
+            }
             NSApp.activate()
             NSApp.windows.first { $0.isVisible }?.makeKeyAndOrderFront(nil)
             resize(1280, 720)
-            try? await Task.sleep(for: .seconds(1.2))
-            capture(folder, "1-canvas")
+            try? await Task.sleep(for: .seconds(1))
+            await both("canvas")  // System Audio selected: the apps it leaves out
 
             if let stream = model.graph.nodes.first(where: { if case .virtualDevice = $0.kind { true } else { false } }) {
                 model.selection = .node(stream.id)
             }
-            NSApp.appearance = NSAppearance(named: .darkAqua)
-            try? await Task.sleep(for: .milliseconds(800))
-            capture(folder, "2-canvas-dark")
-
+            await both("device")
             if let cable = model.graph.cables.first(where: { $0.gainDB < 0 }) { model.selection = .cable(cable.id) }
-            try? await Task.sleep(for: .milliseconds(500))
-            capture(folder, "3-cable-dark")
+            await both("cable")
 
-            NSApp.appearance = NSAppearance(named: .aqua)
             model.graph = Graph()
             model.selection = nil
-            try? await Task.sleep(for: .milliseconds(700))
-            capture(folder, "4-empty")
+            model.setDemoState(inventory: model.inventory, statuses: [:], meters: [:])
+            await both("empty")
 
             model.showStreamTemplate = true
-            try? await Task.sleep(for: .milliseconds(900))
-            captureSheet(folder, "5-template")
+            try? await Task.sleep(for: .milliseconds(600))
+            await both("stream-template", sheet: true)
             model.showStreamTemplate = false
             try? await Task.sleep(for: .milliseconds(500))
 
             model.setDemoState(inventory: Inventory(), statuses: [:], meters: [:])
             Templates.streamWithoutChat(&model.graph, excluding: [Demo.discord])
-            try? await Task.sleep(for: .milliseconds(700))
-            capture(folder, "6-no-driver")
+            await both("no-driver")
             resize(980, 560)
-            try? await Task.sleep(for: .milliseconds(700))
-            capture(folder, "7-minimum-size")
+            await both("minimum-size")
             NSApp.terminate(nil)
         }
     }
