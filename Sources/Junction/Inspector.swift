@@ -39,6 +39,7 @@ private struct Overview: View {
                     .foregroundStyle(.secondary)
             }
             VStack(alignment: .leading, spacing: 8) {
+                Help(symbol: "contextualmenu.and.cursorarrow", text: "Right-click the canvas to add a source, an app or an output there.")
                 Help(symbol: "hand.draw", text: "Drag from a channel on the right of a node to a channel on the left of another to connect them.")
                 Help(symbol: "line.3.horizontal", text: "Drag the bar beside a node's title onto another node to connect all channels at once.")
                 Help(symbol: "cursorarrow.click", text: "Click a cable to select it; press Delete to remove it.")

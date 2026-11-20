@@ -185,39 +185,58 @@ struct RootView: View {
 }
 
 struct AddMenu: View {
-    @Environment(AppModel.self) private var model
-
     var body: some View {
         Menu {
-            Button("New Virtual Device") { model.addVirtualDevice() }
-            Divider()
-            Section("Sources") {
-                Button("System Audio") { model.addNode(.systemAudio(excluding: [])) }
-                Button("Default Input") { model.addNode(.defaultInput) }
-                ForEach(model.inventory.inputDevices) { device in
-                    Button(device.name) { model.addNode(.device(device.ref)) }
-                }
-            }
-            if !model.inventory.apps.isEmpty {
-                Section("Apps") {
-                    ForEach(model.inventory.apps) { app in
-                        Button(app.name) { model.addNode(.application(app.ref)) }
-                    }
-                }
-            }
-            Section("Outputs") {
-                Button("Default Output") { model.addNode(.defaultOutput) }
-                ForEach(model.inventory.outputDevices) { device in
-                    Button(device.name) { model.addNode(.device(device.ref)) }
-                }
-            }
-            Divider()
-            Button("Stream Without Chat…") { model.showStreamTemplate = true }
+            AddMenuItems()
         } label: {
             Label("Add", systemImage: "plus")
         }
         .help("Add a source, an output or a virtual device")
     }
+}
+
+/// What the toolbar's Add menu and the canvas's right-click menu offer. `spot` says where the new node goes (read
+/// when an item is chosen); nil finds a free spot.
+struct AddMenuItems: View {
+    @Environment(AppModel.self) private var model
+    var spot: () -> CGPoint? = { nil }
+
+    var body: some View {
+        Button("New Virtual Device") { model.addVirtualDevice(at: spot()) }
+        let offCanvas = model.graph.virtualDevices.filter { device in
+            !model.graph.nodes.contains { $0.kind == .virtualDevice(device.id) }
+        }
+        if !offCanvas.isEmpty {
+            Section("Virtual Devices") {
+                ForEach(offCanvas) { device in Button(device.name) { add(.virtualDevice(device.id)) } }
+            }
+        }
+        Divider()
+        Section("Sources") {
+            Button("System Audio") { add(.systemAudio(excluding: [])) }
+            Button("Default Input") { add(.defaultInput) }
+            ForEach(model.inventory.inputDevices) { device in
+                Button(device.name) { add(.device(device.ref)) }
+            }
+        }
+        if !model.inventory.apps.isEmpty {
+            Section("Apps") {
+                ForEach(model.inventory.apps) { app in
+                    Button(app.name) { add(.application(app.ref)) }
+                }
+            }
+        }
+        Section("Outputs") {
+            Button("Default Output") { add(.defaultOutput) }
+            ForEach(model.inventory.outputDevices) { device in
+                Button(device.name) { add(.device(device.ref)) }
+            }
+        }
+        Divider()
+        Button("Stream Without Chat…") { model.showStreamTemplate = true }
+    }
+
+    private func add(_ kind: NodeKind) { model.addNode(kind, at: spot()) }
 }
 
 struct DriverBanner: View {
@@ -258,13 +277,16 @@ struct EmptyCanvas: View {
                     .multilineTextAlignment(.center)
             }
             HStack(spacing: 12) {
-                Button("Stream Without Chat…") { model.showStreamTemplate = true }
+                Button("New Virtual Device") { model.addVirtualDevice() }
                     .buttonStyle(.glassProminent)
                     .controlSize(.large)
-                Button("New Virtual Device") { model.addVirtualDevice() }
+                Button("Stream Without Chat…") { model.showStreamTemplate = true }
                     .buttonStyle(.glass)
                     .controlSize(.large)
             }
+            Text("Right-click the canvas to add sources and outputs.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
         }
         .padding(40)
     }

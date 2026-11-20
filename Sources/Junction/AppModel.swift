@@ -442,7 +442,7 @@ final class AppModel {
     // MARK: Virtual devices
 
     @discardableResult
-    func addVirtualDevice(name: String? = nil, channels: Int = 2) -> VirtualDevice? {
+    func addVirtualDevice(name: String? = nil, channels: Int = 2, at point: CGPoint? = nil) -> VirtualDevice? {
         guard graph.virtualDevices.count < VirtualDevice.maximumCount else {
             alert = "Junction can publish up to \(VirtualDevice.maximumCount) virtual devices."
             return nil
@@ -455,7 +455,7 @@ final class AppModel {
         }
         let device = VirtualDevice(name: candidate, channels: channels)
         graph.virtualDevices.append(device)
-        addNode(.virtualDevice(device.id))
+        addNode(.virtualDevice(device.id), at: point)
         return device
     }
 

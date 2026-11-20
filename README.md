@@ -6,7 +6,8 @@ node-and-cable canvas.
 - **Virtual devices** (sidebar): create, rename, set 1–64 channels and a sample rate, and switch each one on or off.
   Every app sees an enabled device as both a microphone and a speaker. Anything sent into it comes back out, so a
   streaming, call or recording app can record what Junction (or another app) plays into it.
-- **Canvas**: add sources and destinations from the sidebar (or **+** in the toolbar) and drag cables from a channel on
+- **Canvas**: add sources and destinations from the sidebar, **+** in the toolbar, or by right-clicking the canvas
+  (the node lands where you clicked), and drag cables from a channel on
   the right of a node to a channel on the left of another. The bar beside a node's title connects all channels at once.
   Click a cable to select it, Delete removes it. Meters show levels; cables glow with the audio they carry; dashed
   cables carry nothing right now (an end is missing or routing is off).

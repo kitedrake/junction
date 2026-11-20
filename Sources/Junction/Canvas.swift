@@ -54,6 +54,8 @@ struct CanvasView: View {
     @State private var wire: PendingWire?
     @State private var dragOrigins: [UUID: CGPoint] = [:]
     @State private var refusal: String?
+    /// Where the pointer last was over the canvas, for the right-click menu. Not observed: hovering mustn't redraw.
+    @State private var pointer = PointerSpot()
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -67,6 +69,15 @@ struct CanvasView: View {
                     .onTapGesture(coordinateSpace: .named("canvas")) { location in
                         model.selection = hitCable(at: location, info: info).map { .cable($0) }
                         focused = true
+                    }
+                    .onContinuousHover(coordinateSpace: .named("canvas")) { phase in
+                        if case .active(let location) = phase { pointer.location = location }
+                    }
+                    .contextMenu {
+                        // New nodes go where the menu was opened, header under the pointer.
+                        AddMenuItems(spot: { [pointer] in
+                            pointer.location.map { CGPoint(x: max(0, $0.x - 30), y: max(0, $0.y - 20)) }
+                        })
                     }
                 CableLayer(wire: wire)
                     .frame(width: bounds.width, height: bounds.height)
@@ -265,6 +276,10 @@ struct CableLayer: View {
         case .busInput(let id): graph.node(id).map(NodeLayout.busInputPoint)
         }
     }
+}
+
+final class PointerSpot {
+    var location: CGPoint?
 }
 
 struct GridBackground: View {
