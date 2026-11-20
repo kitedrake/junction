@@ -1,16 +1,20 @@
 # Junction
 
-A macOS app (SwiftUI, Liquid Glass) for making virtual audio devices and routing audio between apps and devices on a
-node-and-cable canvas.
+A macOS app (SwiftUI, Liquid Glass) for making virtual audio devices and routing apps, system audio, microphones and
+interfaces into them, each on its own node-and-cable canvas.
 
 - **Virtual devices** (sidebar): create, rename, set 1–64 channels and a sample rate, and switch each one on or off.
   Every app sees an enabled device as both a microphone and a speaker. Anything sent into it comes back out, so a
   streaming, call or recording app can record what Junction (or another app) plays into it.
-- **Canvas**: add sources and destinations from the sidebar, **+** in the toolbar, or by right-clicking the canvas
-  (the node lands where you clicked), and drag cables from a channel on
-  the right of a node to a channel on the left of another. The bar beside a node's title connects all channels at once.
-  Click a cable to select it, Delete removes it. Meters show levels; cables glow with the audio they carry; dashed
-  cables carry nothing right now (an end is missing or routing is off).
+- **A canvas per device**: pick a virtual device in the sidebar to see its canvas. Sources on the left feed it;
+  outputs on the right (headphones, speakers) let you hear it. Add them from the sidebar, **+** in the toolbar, or by
+  right-clicking the canvas (the node lands where you clicked); a new node is wired to the device straight away. Drag
+  from a channel on the right of a node to a channel on the left of another to change the wiring; the bar beside a
+  node's title connects all channels at once. Click a cable to select it, Delete removes it. Meters show levels;
+  cables glow with the audio they carry; dashed cables carry nothing right now (an end is missing or routing is off).
+- **No feedback**: every cable runs into the canvas's virtual device or out of it, so devices never feed each other.
+  Junction also refuses (or, if Sound settings change later, mutes) a device sent to Default Output while Sound
+  settings play through that same device, and Default Input into the device it stands for.
 - **Inspector**: level and mute per node and per cable, the virtual device's settings, the apps a System Audio node
   leaves out, and any problem a node has.
 - **Routing** (toolbar power button, menu bar, ⇧⌘R) starts and stops everything. Junction keeps routing from the menu
@@ -84,16 +88,18 @@ Three parts:
    buffer indexed by sample time and is read back by its input.
 2. **Planner** (`Sources/JunctionCore/Planner.swift`): turns the graph into one plan per destination ("sink"): a
    private aggregate device whose first sub-device is the sink (the clock), followed by every source device (with
-   drift compensation) and one process tap per App/System Audio node. It refuses cables that would feed a virtual
-   device back into itself (directly, through other virtual devices, or via Default Output set to a virtual device),
-   and notes sample-rate mismatches and missing devices.
+   drift compensation) and one process tap per App/System Audio node. It drops cables that would feed a virtual
+   device back into itself (for example via Default Output set to that device), and notes sample-rate mismatches and
+   missing devices.
 3. **Router** (`Router.swift` + the C kernel in `Sources/JunctionKernel`): builds the taps and aggregate devices and
    runs one IOProc per sink. The IOProc is plain C (no Swift reference counting, locks or allocation on the audio
    thread): it copies aggregate input channels to sink output channels with gains that glide over one buffer, and
    keeps peak meters. Gain and mute changes don't rebuild anything; adding or removing cables rebuilds only the sinks
    they touch. When apps start or quit, taps are updated in place.
 
-The graph is saved to `~/Library/Application Support/Junction/graph.json`.
+The graph is saved to `~/Library/Application Support/Junction/graph.json` (schema 2: nodes belong to a device's
+canvas). A schema 1 file from the shared-canvas versions is converted on load: each node moves to the canvas of the
+device it was wired to (unwired ones to the first device), and cables between devices are dropped.
 
 ## Development
 
@@ -131,6 +137,7 @@ The icon is drawn by `icon/make_icon.swift`; `icon/make-icns.sh` rebuilds `Resou
 - Each rebuilt sink restarts its audio (a short gap) when cables are added or removed.
 - Routing stops when Junction quits; it keeps running from the menu bar when the window is closed.
 - Virtual devices have no volume control yet, so the keyboard volume keys don't change them.
+- Virtual devices can't feed each other; to use the same source in two devices, add it to both canvases.
 - A virtual device's sample rate can also be set by other apps (Audio MIDI Setup, a DAW), and macOS puts back the rate
   it remembers for a device when it appears. Junction insists on its own rate for a few seconds after you create, turn
   on or change a device, and otherwise adopts the outside change rather than fighting it.

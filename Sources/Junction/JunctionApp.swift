@@ -143,7 +143,10 @@ struct RootView: View {
                     }
                 }
                 .overlay {
-                    if model.graph.nodes.isEmpty { EmptyCanvas() }
+                    if model.canvas == nil { EmptyCanvas() }
+                }
+                .overlay(alignment: .bottom) {
+                    if let device = model.canvasDevice, model.canvasNodes.count == 1 { CanvasHint(device: device) }
                 }
                 .toolbar {
                     ToolbarItemGroup(placement: .primaryAction) {
@@ -157,7 +160,7 @@ struct RootView: View {
                     }
                 }
         }
-        .navigationTitle("Junction")
+        .navigationTitle(model.canvasDevice?.name ?? "Junction")
         .navigationSubtitle(subtitle)
         .inspector(isPresented: $model.showInspector) {
             InspectorView()
@@ -166,11 +169,25 @@ struct RootView: View {
         .sheet(isPresented: $model.showStreamTemplate) {
             StreamTemplateSheet()
         }
+        .confirmationDialog(deleteTitle, isPresented: Binding(get: { model.deviceToDelete != nil },
+                                                              set: { if !$0 { model.deviceToDelete = nil } })) {
+            Button("Delete", role: .destructive) {
+                if let id = model.deviceToDelete { model.removeVirtualDevice(id) }
+                model.deviceToDelete = nil
+            }
+        } message: {
+            Text("Apps using it lose it, and its canvas is removed.")
+        }
         .alert("Junction", isPresented: Binding(get: { model.alert != nil }, set: { if !$0 { model.alert = nil } })) {
             Button("OK") { model.alert = nil }
         } message: {
             Text(model.alert ?? "")
         }
+    }
+
+    private var deleteTitle: String {
+        let name = model.deviceToDelete.flatMap(model.graph.virtualDevice)?.name ?? "this virtual device"
+        return "Delete “\(name)”?"
     }
 
     private var subtitle: String {
@@ -195,48 +212,42 @@ struct AddMenu: View {
     }
 }
 
-/// What the toolbar's Add menu and the canvas's right-click menu offer. `spot` says where the new node goes (read
-/// when an item is chosen); nil finds a free spot.
+/// What the toolbar's Add menu and the canvas's right-click menu offer: sources and outputs for the shown canvas,
+/// and new virtual devices. `spot` says where the new node goes (read when an item is chosen); nil finds a free spot.
 struct AddMenuItems: View {
     @Environment(AppModel.self) private var model
     var spot: () -> CGPoint? = { nil }
 
     var body: some View {
-        Button("New Virtual Device") { model.addVirtualDevice(at: spot()) }
-        let offCanvas = model.graph.virtualDevices.filter { device in
-            !model.graph.nodes.contains { $0.kind == .virtualDevice(device.id) }
-        }
-        if !offCanvas.isEmpty {
-            Section("Virtual Devices") {
-                ForEach(offCanvas) { device in Button(device.name) { add(.virtualDevice(device.id)) } }
+        Group {
+            Section("Sources") {
+                Button("System Audio") { add(.systemAudio(excluding: []), .source) }
+                Button("Default Input") { add(.defaultInput, .source) }
+                ForEach(model.inventory.inputDevices) { device in
+                    Button(device.name) { add(.device(device.ref), .source) }
+                }
             }
-        }
-        Divider()
-        Section("Sources") {
-            Button("System Audio") { add(.systemAudio(excluding: [])) }
-            Button("Default Input") { add(.defaultInput) }
-            ForEach(model.inventory.inputDevices) { device in
-                Button(device.name) { add(.device(device.ref)) }
+            if !model.inventory.apps.isEmpty {
+                Section("Apps") {
+                    ForEach(model.inventory.apps) { app in
+                        Button(app.name) { add(.application(app.ref), .source) }
+                    }
+                }
             }
-        }
-        if !model.inventory.apps.isEmpty {
-            Section("Apps") {
-                ForEach(model.inventory.apps) { app in
-                    Button(app.name) { add(.application(app.ref)) }
+            Section("Outputs") {
+                Button("Default Output") { add(.defaultOutput, .output) }
+                ForEach(model.inventory.outputDevices) { device in
+                    Button(device.name) { add(.device(device.ref), .output) }
                 }
             }
         }
-        Section("Outputs") {
-            Button("Default Output") { add(.defaultOutput) }
-            ForEach(model.inventory.outputDevices) { device in
-                Button(device.name) { add(.device(device.ref)) }
-            }
-        }
+        .disabled(model.canvas == nil)
         Divider()
+        Button("New Virtual Device") { model.addVirtualDevice() }
         Button("Stream Without Chat…") { model.showStreamTemplate = true }
     }
 
-    private func add(_ kind: NodeKind) { model.addNode(kind, at: spot()) }
+    private func add(_ kind: NodeKind, _ role: NodeRole) { model.addNode(kind, as: role, at: spot()) }
 }
 
 struct DriverBanner: View {
@@ -257,6 +268,22 @@ struct DriverBanner: View {
             }
         }
         .padding(.top, 14)
+    }
+}
+
+/// Shown while a canvas holds only its virtual device.
+struct CanvasHint: View {
+    let device: VirtualDevice
+
+    var body: some View {
+        Text("Add sources and outputs from the sidebar or by right-clicking: they connect to \(device.name) by themselves.")
+            .font(.callout)
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 9)
+            .glassEffect(.regular, in: .capsule)
+            .padding(.bottom, 22)
+            .padding(.horizontal, 30)
     }
 }
 
@@ -284,7 +311,7 @@ struct EmptyCanvas: View {
                     .buttonStyle(.glass)
                     .controlSize(.large)
             }
-            Text("Right-click the canvas to add sources and outputs.")
+            Text("Each virtual device gets its own canvas: sources on the left feed it, outputs on the right play it.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }
@@ -352,9 +379,7 @@ struct StreamTemplateSheet: View {
                 Button("Create") {
                     let excluded = candidates.filter { chosen.contains($0.bundleID) }
                     let trimmed = name.trimmingCharacters(in: .whitespaces)
-                    let top = (model.graph.nodes.map { $0.y + 260 }.max() ?? 40) + 20
-                    Templates.streamWithoutChat(&model.graph, excluding: excluded, deviceName: trimmed.isEmpty ? "Stream Mix" : trimmed,
-                                                at: (60, model.graph.nodes.isEmpty ? 60 : top))
+                    model.addStreamWithoutChat(excluding: excluded, deviceName: trimmed.isEmpty ? "Stream Mix" : trimmed)
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)

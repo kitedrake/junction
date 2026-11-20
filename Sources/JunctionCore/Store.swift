@@ -22,7 +22,9 @@ public struct Store: Sendable {
     public func load() -> Graph? {
         guard let data = try? Data(contentsOf: graphURL) else { return nil }
         do {
-            return try JSONDecoder().decode(Graph.self, from: data)
+            var graph = try JSONDecoder().decode(Graph.self, from: data)
+            graph.upgrade()
+            return graph
         } catch {
             let aside = folder.appendingPathComponent("graph.json.unreadable")
             try? FileManager.default.removeItem(at: aside)
@@ -76,10 +78,9 @@ public enum Templates {
 
     /// "Stream without chat": a virtual device named `deviceName` that carries everything apps play except the
     /// chosen chat apps. A streaming app records it; people in the call don't hear themselves on stream.
-    /// Reuses a virtual device and system-audio node of the same name/kind when present. Returns the device.
+    /// Reuses (and turns on) a virtual device of that name; the System Audio node goes on its canvas. Returns the device.
     @discardableResult
-    public static func streamWithoutChat(_ graph: inout Graph, excluding chat: [AppRef], deviceName: String = "Stream Mix",
-                                         at origin: (x: Double, y: Double) = (80, 80)) -> VirtualDevice {
+    public static func streamWithoutChat(_ graph: inout Graph, excluding chat: [AppRef], deviceName: String = "Stream Mix") -> VirtualDevice {
         let device: VirtualDevice
         if let existing = graph.virtualDevices.first(where: { $0.name == deviceName }) {
             device = existing
@@ -88,13 +89,14 @@ public enum Templates {
             device = VirtualDevice(name: deviceName, channels: 2)
             graph.virtualDevices.append(device)
         }
-        let system = Node(kind: .systemAudio(excluding: chat), x: origin.x, y: origin.y)
+        let below = graph.nodes(on: device.id).filter { $0.x < CanvasColumn.device }.map { $0.y + 170 }.max() ?? 60
+        let system = Node(kind: .systemAudio(excluding: chat), x: CanvasColumn.sources, y: below, canvas: device.id)
         graph.nodes.append(system)
         let deviceNode: Node
-        if let existing = graph.nodes.first(where: { $0.kind == .virtualDevice(device.id) }) {
+        if let existing = graph.deviceNode(device.id) {
             deviceNode = existing
         } else {
-            deviceNode = Node(kind: .virtualDevice(device.id), x: origin.x + 340, y: origin.y)
+            deviceNode = Node(kind: .virtualDevice(device.id), x: CanvasColumn.device, y: 60, canvas: device.id)
             graph.nodes.append(deviceNode)
         }
         for channel in 0..<min(2, device.channels) {

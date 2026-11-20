@@ -97,9 +97,9 @@ enum CommandLineTool {
         var graph = Graph()
         let discord = AppRef(bundleID: "com.hnc.Discord", name: "Discord")
         let device = Templates.streamWithoutChat(&graph, excluding: [discord])
-        let mic = Node(kind: .defaultInput, x: 60, y: 300)
+        let mic = Node(kind: .defaultInput, x: 60, y: 300, canvas: device.id)
         graph.nodes.append(mic)
-        graph.cables += Rules.busCables(from: mic.id, to: graph.nodes[1].id, graph: graph,
+        graph.cables += Rules.busCables(from: mic.id, to: graph.deviceNode(device.id)?.id ?? UUID(), graph: graph,
                                         inventory: Inventory(devices: [DeviceInfo(uid: "mic", name: "Mic", inputChannels: 1, outputChannels: 0)],
                                                              defaultInputUID: "mic"))
         let inventory = Inventory(

@@ -1,7 +1,11 @@
 import Foundation
 
-// The routing graph Junction saves and edits: virtual devices it publishes through its driver, nodes on the
-// canvas, and cables between node channels.
+// The routing graph Junction saves and edits: virtual devices it publishes through its driver, nodes on their
+// canvases, and cables between node channels.
+//
+// Every virtual device has its own canvas: its device node in the middle, sources on the left that feed it and
+// outputs on the right that play it. A cable always runs into the canvas's device or out of it, so virtual devices
+// never feed each other.
 //
 // Sides: a node's *inputs* (left) are what it can be sent (a device's playback channels, a virtual device's
 // feed); its *outputs* (right) are what it provides (a microphone's capture channels, an app's audio, what comes
@@ -92,9 +96,11 @@ public struct Node: Codable, Identifiable, Hashable, Sendable {
     public var isMuted: Bool
     /// For app and system audio nodes: take the audio away from where the app normally plays it.
     public var mutesOriginal: Bool
+    /// The virtual device whose canvas this node is on (nil only in graphs saved before canvases, see `upgrade()`).
+    public var canvas: UUID?
 
     public init(id: UUID = UUID(), kind: NodeKind, x: Double = 0, y: Double = 0, gainDB: Double = 0, isMuted: Bool = false,
-                mutesOriginal: Bool = false) {
+                mutesOriginal: Bool = false, canvas: UUID? = nil) {
         self.id = id
         self.kind = kind
         self.x = x
@@ -102,7 +108,15 @@ public struct Node: Codable, Identifiable, Hashable, Sendable {
         self.gainDB = gainDB
         self.isMuted = isMuted
         self.mutesOriginal = mutesOriginal
+        self.canvas = canvas
     }
+}
+
+/// Where nodes go on a canvas: sources, the virtual device, outputs.
+public enum CanvasColumn {
+    public static let sources = 40.0
+    public static let device = 330.0
+    public static let outputs = 620.0
 }
 
 /// One channel of one node.
@@ -133,7 +147,9 @@ public struct Cable: Codable, Identifiable, Hashable, Sendable {
 }
 
 public struct Graph: Codable, Equatable, Sendable {
-    public var schema = 1
+    /// 1: one shared canvas. 2: a canvas per virtual device.
+    public static let currentSchema = 2
+    public var schema = Graph.currentSchema
     public var virtualDevices: [VirtualDevice] = []
     public var nodes: [Node] = []
     public var cables: [Cable] = []
@@ -150,15 +166,95 @@ public struct Graph: Codable, Equatable, Sendable {
     public func node(_ id: UUID) -> Node? { nodes.first { $0.id == id } }
     public func virtualDevice(_ id: UUID) -> VirtualDevice? { virtualDevices.first { $0.id == id } }
 
+    /// The node standing for a virtual device in the middle of its canvas.
+    public func deviceNode(_ device: UUID) -> Node? {
+        nodes.first { $0.kind == .virtualDevice(device) && $0.canvas == device }
+    }
+
+    public func nodes(on canvas: UUID) -> [Node] { nodes.filter { $0.canvas == canvas } }
+
+    public func cables(on canvas: UUID) -> [Cable] {
+        let ids = Set(nodes(on: canvas).map(\.id))
+        return cables.filter { ids.contains($0.from.node) && ids.contains($0.to.node) }
+    }
+
     public mutating func removeNode(_ id: UUID) {
         nodes.removeAll { $0.id == id }
         cables.removeAll { $0.from.node == id || $0.to.node == id }
     }
 
-    /// Removes a virtual device and its nodes and cables.
+    /// Removes a virtual device and its canvas: its nodes and cables.
     public mutating func removeVirtualDevice(_ id: UUID) {
-        for node in nodes where node.kind == .virtualDevice(id) { removeNode(node.id) }
+        let gone = Set(nodes.filter { $0.canvas == id || $0.kind == .virtualDevice(id) }.map(\.id))
+        nodes.removeAll { gone.contains($0.id) }
+        cables.removeAll { gone.contains($0.from.node) || gone.contains($0.to.node) }
         virtualDevices.removeAll { $0.id == id }
+    }
+
+    /// Brings a loaded graph up to date: converts the shared canvas of schema 1, then tidies the canvases.
+    public mutating func upgrade() {
+        if schema < 2 { moveToCanvases() }
+        schema = Graph.currentSchema
+        tidyCanvases()
+    }
+
+    /// Schema 1 had one shared canvas. Each node moves to the canvas of the virtual device it is wired to (copied, with
+    /// its cables, when wired to several); unwired nodes go on the first device's canvas. Cables between virtual
+    /// devices, or that bypass them, have no place on a canvas and are dropped.
+    mutating func moveToCanvases() {
+        var deviceOf: [UUID: UUID] = [:]  // device node → virtual device
+        for index in nodes.indices {
+            guard case .virtualDevice(let id) = nodes[index].kind else { continue }
+            nodes[index].canvas = id
+            deviceOf[nodes[index].id] = id
+        }
+        var moved = nodes.filter { deviceOf[$0.id] != nil }
+        var kept: [Cable] = []
+        for node in nodes where deviceOf[node.id] == nil {
+            func other(_ cable: Cable) -> UUID { cable.from.node == node.id ? cable.to.node : cable.from.node }
+            let wired = cables.filter { ($0.from.node == node.id || $0.to.node == node.id) && deviceOf[other($0)] != nil }
+            var canvases: [UUID] = []
+            for cable in wired {
+                if let device = deviceOf[other(cable)], !canvases.contains(device) { canvases.append(device) }
+            }
+            if canvases.isEmpty, let first = virtualDevices.first { canvases = [first.id] }
+            for (index, canvas) in canvases.enumerated() {
+                var copy = node
+                copy.canvas = canvas
+                if index > 0 { copy.id = UUID() }
+                moved.append(copy)
+                for var cable in wired where deviceOf[other(cable)] == canvas {
+                    if index > 0 {
+                        cable.id = UUID()
+                        if cable.from.node == node.id { cable.from.node = copy.id } else { cable.to.node = copy.id }
+                    }
+                    kept.append(cable)
+                }
+            }
+        }
+        nodes = moved
+        cables = kept
+    }
+
+    /// Keeps the canvases consistent: every virtual device has exactly one device node on its own canvas; nodes on no
+    /// canvas (or a deleted one) go, and so do cables that don't run into or out of their canvas's device.
+    public mutating func tidyCanvases() {
+        let devices = Set(virtualDevices.map(\.id))
+        var hasDeviceNode = Set<UUID>()
+        nodes.removeAll { node in
+            guard let canvas = node.canvas, devices.contains(canvas) else { return true }
+            guard case .virtualDevice(let id) = node.kind else { return false }
+            return id != canvas || !hasDeviceNode.insert(id).inserted
+        }
+        for device in virtualDevices where !hasDeviceNode.contains(device.id) {
+            nodes.append(Node(kind: .virtualDevice(device.id), x: CanvasColumn.device, y: 60, canvas: device.id))
+        }
+        let byID = Dictionary(nodes.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        cables.removeAll { cable in
+            guard let a = byID[cable.from.node], let b = byID[cable.to.node], let canvas = a.canvas, b.canvas == canvas
+            else { return true }
+            return (a.kind == .virtualDevice(canvas)) == (b.kind == .virtualDevice(canvas))
+        }
     }
 
     /// Drops cables whose ports no longer exist (a device lost channels, a virtual device got narrower).

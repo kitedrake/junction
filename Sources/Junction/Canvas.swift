@@ -82,7 +82,7 @@ struct CanvasView: View {
                 CableLayer(wire: wire)
                     .frame(width: bounds.width, height: bounds.height)
                     .allowsHitTesting(false)
-                ForEach(model.graph.nodes) { node in
+                ForEach(model.canvasNodes) { node in
                     NodeCard(node: node, wire: $wire, onWireEnd: finishWire, onMove: { translation in
                         let origin = dragOrigins[node.id] ?? CGPoint(x: node.x, y: node.y)
                         dragOrigins[node.id] = origin
@@ -119,7 +119,7 @@ struct CanvasView: View {
 
     private func contentBounds(_ info: NodeInfo) -> CGSize {
         var width: CGFloat = 1800, height: CGFloat = 1200
-        for node in model.graph.nodes {
+        for node in model.canvasNodes {
             let frame = NodeLayout.frame(node, info.ports(node))
             width = max(width, frame.maxX + 400)
             height = max(height, frame.maxY + 300)
@@ -130,7 +130,7 @@ struct CanvasView: View {
     /// The cable closest to a point, if one is within a few points.
     private func hitCable(at point: CGPoint, info: NodeInfo) -> UUID? {
         var best: (UUID, CGFloat)?
-        for cable in model.graph.cables {
+        for cable in model.canvasCables {
             guard let from = model.graph.node(cable.from.node), let to = model.graph.node(cable.to.node) else { continue }
             let a = NodeLayout.outputPoint(from, cable.from.channel), b = NodeLayout.inputPoint(to, cable.to.channel)
             for step in 0...40 {
@@ -148,7 +148,7 @@ struct CanvasView: View {
         let point = wire.location
         func nearest(inputs: Bool) -> PortRef? {
             var best: (PortRef, CGFloat)?
-            for node in model.graph.nodes {
+            for node in model.canvasNodes {
                 let ports = info.ports(node)
                 for channel in 0..<(inputs ? ports.inputs : ports.outputs) {
                     let p = inputs ? NodeLayout.inputPoint(node, channel) : NodeLayout.outputPoint(node, channel)
@@ -159,7 +159,7 @@ struct CanvasView: View {
             return best?.0
         }
         func nodeUnderPointer() -> Node? {
-            model.graph.nodes.last { NodeLayout.frame($0, info.ports($0)).insetBy(dx: -12, dy: -6).contains(point) }
+            model.canvasNodes.last { NodeLayout.frame($0, info.ports($0)).insetBy(dx: -12, dy: -6).contains(point) }
         }
         var problem: Rules.Problem?
         var attempted = true
@@ -229,11 +229,12 @@ struct CableLayer: View {
 
     var body: some View {
         let graph = model.graph
+        let cables = model.canvasCables
         let plan = model.plan
         let selected: UUID? = if case .cable(let id) = model.selection { id } else { nil }
         let meters = model.meters
         Canvas { context, _ in
-            for cable in graph.cables {
+            for cable in cables {
                 guard let from = graph.node(cable.from.node), let to = graph.node(cable.to.node) else { continue }
                 let a = NodeLayout.outputPoint(from, cable.from.channel)
                 let b = NodeLayout.inputPoint(to, cable.to.channel)
@@ -448,7 +449,11 @@ struct NodeCard: View {
             Button(node.isMuted ? "Unmute" : "Mute") { model.updateNode(node.id) { $0.isMuted.toggle() } }
             Button("Disconnect All") { model.disconnectAll(node.id) }
             Divider()
-            Button("Remove from Canvas", role: .destructive) { model.removeNode(node.id) }
+            if case .virtualDevice(let device) = node.kind {
+                Button("Delete Virtual Device…", role: .destructive) { model.deviceToDelete = device }
+            } else {
+                Button("Remove from Canvas", role: .destructive) { model.removeNode(node.id) }
+            }
         }
     }
 

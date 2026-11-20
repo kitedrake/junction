@@ -6,7 +6,7 @@ struct Sidebar: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        List {
+        List(selection: Binding(get: { model.canvas }, set: { if let id = $0 { model.showCanvas(id) } })) {
             // Pinning this under the list (safeAreaInset) stops the whole window from drawing on macOS 26, so it is a
             // section of the list.
             if model.driverUpdate != .upToDate {
@@ -15,6 +15,7 @@ struct Sidebar: View {
             Section {
                 ForEach(model.graph.virtualDevices) { device in
                     VirtualDeviceRow(device: device)
+                        .tag(device.id)
                 }
                 if model.graph.virtualDevices.isEmpty {
                     Text("None yet. Apps see virtual devices as microphones and speakers.")
@@ -33,11 +34,11 @@ struct Sidebar: View {
             }
 
             Section("Sources") {
-                PaletteRow(kind: .systemAudio(excluding: []), title: "System Audio", detail: "Everything apps play")
-                PaletteRow(kind: .defaultInput, title: "Default Input",
+                PaletteRow(kind: .systemAudio(excluding: []), role: .source, title: "System Audio", detail: "Everything apps play")
+                PaletteRow(kind: .defaultInput, role: .source, title: "Default Input",
                            detail: model.inventory.device(model.inventory.defaultInputUID)?.name ?? "None")
                 ForEach(model.inventory.inputDevices) { device in
-                    PaletteRow(kind: .device(device.ref), title: device.name, detail: channels(device.inputChannels))
+                    PaletteRow(kind: .device(device.ref), role: .source, title: device.name, detail: channels(device.inputChannels))
                 }
             }
 
@@ -49,15 +50,15 @@ struct Sidebar: View {
                         .lineLimit(3)
                 }
                 ForEach(model.inventory.apps) { app in
-                    PaletteRow(kind: .application(app.ref), title: app.name, detail: app.isPlaying ? "Playing" : nil)
+                    PaletteRow(kind: .application(app.ref), role: .source, title: app.name, detail: app.isPlaying ? "Playing" : nil)
                 }
             }
 
             Section("Outputs") {
-                PaletteRow(kind: .defaultOutput, title: "Default Output",
+                PaletteRow(kind: .defaultOutput, role: .output, title: "Default Output",
                            detail: model.inventory.device(model.inventory.defaultOutputUID)?.name ?? "None")
                 ForEach(model.inventory.outputDevices) { device in
-                    PaletteRow(kind: .device(device.ref), title: device.name, detail: channels(device.outputChannels))
+                    PaletteRow(kind: .device(device.ref), role: .output, title: device.name, detail: channels(device.outputChannels))
                 }
             }
 
@@ -97,15 +98,10 @@ struct VirtualDeviceRow: View {
                 .labelsHidden()
                 .help(device.isEnabled ? "Published: apps can use it" : "Off: apps don't see it")
         }
-        .contentShape(Rectangle())
-        .onTapGesture {
-            let id = model.addNode(.virtualDevice(device.id))
-            model.selection = .node(id)
-        }
         .contextMenu {
-            Button("Show on Canvas") { model.addNode(.virtualDevice(device.id)) }
+            Button(device.isEnabled ? "Turn Off" : "Turn On") { model.updateVirtualDevice(device.id) { $0.isEnabled.toggle() } }
             Divider()
-            Button("Delete Virtual Device", role: .destructive) { model.removeVirtualDevice(device.id) }
+            Button("Delete Virtual Device…", role: .destructive) { model.deviceToDelete = device.id }
         }
     }
 }
@@ -113,6 +109,7 @@ struct VirtualDeviceRow: View {
 struct PaletteRow: View {
     @Environment(AppModel.self) private var model
     let kind: NodeKind
+    let role: NodeRole
     let title: String
     let detail: String?
 
@@ -127,15 +124,16 @@ struct PaletteRow: View {
             }
             Spacer(minLength: 4)
             Button {
-                model.addNode(kind)
+                model.addNode(kind, as: role)
             } label: {
                 Image(systemName: "plus.circle")
             }
             .buttonStyle(.borderless)
-            .help("Add to the canvas")
+            .disabled(model.canvas == nil)
+            .help(model.canvasDevice.map { "Add to \($0.name)" } ?? "Create a virtual device first")
         }
         .contentShape(Rectangle())
-        .onTapGesture(count: 2) { model.addNode(kind) }
+        .onTapGesture(count: 2) { model.addNode(kind, as: role) }
     }
 }
 

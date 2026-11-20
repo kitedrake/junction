@@ -39,8 +39,9 @@ private struct Overview: View {
                     .foregroundStyle(.secondary)
             }
             VStack(alignment: .leading, spacing: 8) {
-                Help(symbol: "contextualmenu.and.cursorarrow", text: "Right-click the canvas to add a source, an app or an output there.")
-                Help(symbol: "hand.draw", text: "Drag from a channel on the right of a node to a channel on the left of another to connect them.")
+                Help(symbol: "rectangle.stack", text: "Each virtual device has its own canvas: pick it in the sidebar. Sources on the left feed it; outputs on the right play it.")
+                Help(symbol: "contextualmenu.and.cursorarrow", text: "Right-click the canvas (or use the sidebar) to add a source or an output; it connects to the device by itself.")
+                Help(symbol: "hand.draw", text: "Drag from a channel on the right of a node to a channel on the left of another to change the wiring.")
                 Help(symbol: "line.3.horizontal", text: "Drag the bar beside a node's title onto another node to connect all channels at once.")
                 Help(symbol: "cursorarrow.click", text: "Click a cable to select it; press Delete to remove it.")
                 Help(symbol: "mic", text: "Apps see each virtual device as a microphone (what you send into it) and as a speaker.")
@@ -124,7 +125,9 @@ private struct NodeInspector: View {
         HStack {
             Button("Disconnect All") { model.disconnectAll(node.id) }
             Spacer()
-            Button("Remove", role: .destructive) { model.removeNode(node.id) }
+            if !model.isDeviceNode(node) {
+                Button("Remove", role: .destructive) { model.removeNode(node.id) }
+            }
         }
     }
 }
@@ -161,7 +164,7 @@ private struct VirtualDeviceSettings: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Button("Delete Virtual Device", role: .destructive) { model.removeVirtualDevice(device.id) }
+                Button("Delete Virtual Device…", role: .destructive) { model.deviceToDelete = device.id }
                     .controlSize(.small)
             }
             .padding(6)

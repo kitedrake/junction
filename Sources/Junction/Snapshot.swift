@@ -12,24 +12,29 @@ enum Demo {
         let stream = VirtualDevice(name: "Stream Mix")
         let recording = VirtualDevice(name: "Recording", channels: 4)
         let headphones = DeviceInfo(uid: "demo.headphones", name: "AirPods Pro", inputChannels: 1, outputChannels: 2)
-        let system = Node(kind: .systemAudio(excluding: [discord]), x: 60, y: 50)
-        let mic = Node(kind: .defaultInput, x: 60, y: 250)
-        let chat = Node(kind: .application(discord), x: 60, y: 420)
-        let streamNode = Node(kind: .virtualDevice(stream.id), x: 430, y: 110)
-        let recordingNode = Node(kind: .virtualDevice(recording.id), x: 800, y: 250)
-        let phones = Node(kind: .device(headphones.ref), x: 800, y: 40)
+        // Stream Mix: system audio without Discord, plus the mic, monitored on headphones.
+        let system = Node(kind: .systemAudio(excluding: [discord]), x: 40, y: 50, canvas: stream.id)
+        let mic = Node(kind: .defaultInput, x: 40, y: 250, canvas: stream.id)
+        let streamNode = Node(kind: .virtualDevice(stream.id), x: 330, y: 130, canvas: stream.id)
+        let phones = Node(kind: .device(headphones.ref), x: 620, y: 130, canvas: stream.id)
+        // Recording: the mic and Discord on separate channel pairs.
+        let recordingMic = Node(kind: .defaultInput, x: 40, y: 50, canvas: recording.id)
+        let chat = Node(kind: .application(discord), x: 40, y: 220, canvas: recording.id)
+        let recordingNode = Node(kind: .virtualDevice(recording.id), x: 330, y: 100, canvas: recording.id)
         func cable(_ a: Node, _ ac: Int, _ b: Node, _ bc: Int, _ dB: Double = 0) -> Cable {
             Cable(from: PortRef(node: a.id, channel: ac), to: PortRef(node: b.id, channel: bc), gainDB: dB)
         }
-        var graph = Graph(virtualDevices: [stream, recording], nodes: [system, mic, chat, streamNode, recordingNode, phones])
+        var graph = Graph(virtualDevices: [stream, recording],
+                          nodes: [system, mic, streamNode, phones, recordingMic, chat, recordingNode])
         graph.cables = [
             cable(system, 0, streamNode, 0), cable(system, 1, streamNode, 1),
             cable(mic, 0, streamNode, 0, -3), cable(mic, 0, streamNode, 1, -3),
-            cable(streamNode, 0, recordingNode, 0), cable(streamNode, 1, recordingNode, 1),
-            cable(chat, 0, recordingNode, 2), cable(chat, 1, recordingNode, 3),
             cable(streamNode, 0, phones, 0, -12), cable(streamNode, 1, phones, 1, -12),
+            cable(recordingMic, 0, recordingNode, 0), cable(recordingMic, 0, recordingNode, 1),
+            cable(chat, 0, recordingNode, 2), cable(chat, 1, recordingNode, 3),
         ]
         model.graph = graph
+        model.showCanvas(stream.id)
         let inventory = Inventory(
             devices: [
                 DeviceInfo(uid: "demo.speakers", name: "MacBook Pro Speakers", inputChannels: 0, outputChannels: 2),
@@ -54,9 +59,10 @@ enum Demo {
         meter(system, true, [0.42, 0.37])
         meter(mic, true, [0.18])
         meter(chat, true, [0.3, 0.3])
+        meter(recordingMic, true, [0.18])
         meter(streamNode, false, [0.5, 0.45])
         meter(streamNode, true, [0.5, 0.45])
-        meter(recordingNode, false, [0.5, 0.45, 0.3, 0.3])
+        meter(recordingNode, false, [0.18, 0.18, 0.3, 0.3])
         meter(phones, false, [0.12, 0.11])
         model.setDemoState(inventory: inventory, statuses: [streamNode.id: running, recordingNode.id: running, phones.id: running],
                            meters: meters)
@@ -82,16 +88,19 @@ enum Snapshot {
             }
             NSApp.activate()
             NSApp.windows.first { $0.isVisible }?.makeKeyAndOrderFront(nil)
-            resize(1280, 720)
+            resize(1440, 810)
             try? await Task.sleep(for: .seconds(1))
             await both("canvas")  // System Audio selected: the apps it leaves out
 
-            if let stream = model.graph.nodes.first(where: { if case .virtualDevice = $0.kind { true } else { false } }) {
-                model.selection = .node(stream.id)
-            }
+            if let stream = model.canvas.flatMap(model.graph.deviceNode) { model.selection = .node(stream.id) }
             await both("device")
-            if let cable = model.graph.cables.first(where: { $0.gainDB < 0 }) { model.selection = .cable(cable.id) }
+            if let cable = model.canvasCables.first(where: { $0.gainDB < 0 }) { model.selection = .cable(cable.id) }
             await both("cable")
+            if let first = model.canvas, let other = model.graph.virtualDevices.first(where: { $0.id != first }) {
+                model.showCanvas(other.id)
+                await both("second-canvas")
+                model.showCanvas(first)
+            }
 
             let demoInventory = model.inventory, demoStatuses = model.statuses, demoMeters = model.meters
             var outdated = demoInventory
@@ -112,8 +121,12 @@ enum Snapshot {
             model.showStreamTemplate = false
             try? await Task.sleep(for: .milliseconds(500))
 
+            model.addVirtualDevice()
+            await both("new-device")  // a canvas with only its device: the hint
+
+            model.graph = Graph()
             model.setDemoState(inventory: Inventory(), statuses: [:], meters: [:])
-            Templates.streamWithoutChat(&model.graph, excluding: [Demo.discord])
+            model.addStreamWithoutChat(excluding: [Demo.discord], deviceName: "Stream Mix")
             await both("no-driver")
             resize(980, 560)
             await both("minimum-size")

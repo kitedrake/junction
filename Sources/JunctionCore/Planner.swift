@@ -213,12 +213,15 @@ public enum Rules {
     public enum Problem: Equatable, Sendable {
         case noSuchPort
         case alreadyConnected
+        /// Neither end is the canvas's virtual device (or the ends are on different canvases).
+        case bypassesDevice
         case feedback
 
         public var message: String {
             switch self {
             case .noSuchPort: "There is no such channel."
             case .alreadyConnected: "These channels are already connected."
+            case .bypassesDevice: "Connect sources into the virtual device, and the virtual device out to outputs."
             case .feedback: "That would feed a virtual device's audio back into itself."
             }
         }
@@ -232,15 +235,25 @@ public enum Rules {
               from.channel < info.ports(source).outputs, to.channel < info.ports(target).inputs
         else { return .noSuchPort }
         if graph.cables.contains(where: { $0.from == from && $0.to == to }) { return .alreadyConnected }
-        // Audio only passes through loopback nodes (Junction's virtual devices, or a hardware node standing for
-        // one). A path back to the source through them would ring forever.
+        // Each virtual device has its own canvas, and every cable runs into its device or out of it.
+        guard let canvas = source.canvas, target.canvas == canvas else { return .bypassesDevice }
+        let fromDevice = source.kind == .virtualDevice(canvas), toDevice = target.kind == .virtualDevice(canvas)
+        if fromDevice && toDevice { return .feedback }
+        if !fromDevice && !toDevice { return .bypassesDevice }
+        // Audio only passes through loopback nodes: Junction's virtual devices, a hardware node standing for one, or
+        // Default Output/Input while Sound settings point at one. A path back to the source through them would ring
+        // forever. (Sound settings can change later; the planner checks again with the devices of the moment.)
+        func loopback(uid: String?) -> String? {
+            guard let uid, let device = inventory.device(uid), device.isJunction else { return nil }
+            return graph.virtualDevices.first { $0.uid == uid }.map { "vd:\($0.id)" } ?? "uid:\(uid)"
+        }
         func loopback(_ node: Node) -> String? {
             switch node.kind {
-            case .virtualDevice(let id): return "vd:\(id)"
-            case .device(let ref):
-                guard let device = inventory.device(ref.uid), device.isJunction else { return nil }
-                return graph.virtualDevices.first { $0.uid == ref.uid }.map { "vd:\($0.id)" } ?? "uid:\(ref.uid)"
-            default: return nil
+            case .virtualDevice(let id): "vd:\(id)"
+            case .device(let ref): loopback(uid: ref.uid)
+            case .defaultOutput: loopback(uid: inventory.defaultOutputUID)
+            case .defaultInput: loopback(uid: inventory.defaultInputUID)
+            case .application, .systemAudio: nil
             }
         }
         guard let start = loopback(source), let end = loopback(target) else { return nil }

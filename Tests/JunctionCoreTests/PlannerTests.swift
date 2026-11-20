@@ -42,6 +42,10 @@ final class PlannerTests: XCTestCase {
         XCTAssertEqual(graph.virtualDevices.count, 1)
         XCTAssertEqual(graph.nodes.count, 2)
         XCTAssertEqual(graph.cables.count, 2)
+        XCTAssertEqual(graph.nodes(on: device.id).count, 2, "both nodes on the device's canvas")
+        var tidy = graph
+        tidy.tidyCanvases()
+        XCTAssertEqual(tidy, graph, "the template makes a consistent canvas")
         // Pretend the driver published it.
         var inventory = Demo.inventory
         inventory.devices.append(DeviceInfo(uid: device.uid, name: device.name, inputChannels: 2, outputChannels: 2, isJunction: true))
@@ -126,25 +130,100 @@ final class PlannerTests: XCTestCase {
         XCTAssertEqual(plan.idleCables.count, 2)
     }
 
-    func testFeedbackThroughVirtualDevicesIsRefused() {
+    func testCablesRunIntoOrOutOfTheCanvasDevice() {
+        let mix = Demo.streamMix.id, chat = Demo.chat.id
         var graph = Graph(virtualDevices: [Demo.streamMix, Demo.chat])
+        let a = Node(kind: .virtualDevice(mix), canvas: mix)
+        let b = Node(kind: .virtualDevice(chat), canvas: chat)
+        let mic = Node(kind: .defaultInput, canvas: mix)
+        let speakers = Node(kind: .defaultOutput, canvas: mix)
+        let otherSpeakers = Node(kind: .defaultOutput, canvas: chat)
+        graph.nodes = [a, b, mic, speakers, otherSpeakers]
+        let inventory = Demo.inventory
+        func check(_ from: Node, _ fc: Int, _ to: Node, _ tc: Int) -> Rules.Problem? {
+            Rules.check(from: PortRef(node: from.id, channel: fc), to: PortRef(node: to.id, channel: tc), graph: graph, inventory: inventory)
+        }
+        XCTAssertNil(check(mic, 0, a, 0), "a source into its canvas's device")
+        XCTAssertNil(check(a, 0, speakers, 0), "the device out to an output; speakers don't feed back digitally")
+        XCTAssertEqual(check(a, 0, a, 0), .feedback, "a device into itself")
+        XCTAssertEqual(check(mic, 0, speakers, 0), .bypassesDevice, "straight past the device")
+        XCTAssertEqual(check(a, 0, b, 0), .bypassesDevice, "virtual devices don't feed each other")
+        XCTAssertEqual(check(a, 0, otherSpeakers, 0), .bypassesDevice, "a node on another canvas")
+        graph.cables.append(Cable(from: PortRef(node: mic.id, channel: 0), to: PortRef(node: a.id, channel: 0)))
+        XCTAssertEqual(check(mic, 0, a, 0), .alreadyConnected)
+        XCTAssertEqual(check(a, 5, speakers, 0), .noSuchPort)
+        XCTAssertEqual(check(speakers, 0, a, 0), .noSuchPort)
+    }
+
+    func testLoopsThroughSoundSettingsAreRefused() {
+        let mix = Demo.streamMix.id
+        var graph = Graph(virtualDevices: [Demo.streamMix])
+        let device = Node(kind: .virtualDevice(mix), canvas: mix)
+        let out = Node(kind: .defaultOutput, canvas: mix)
+        let input = Node(kind: .defaultInput, canvas: mix)
+        graph.nodes = [device, out, input]
+        var inventory = Demo.inventory
+        // Sound settings play everything through Stream Mix: sending Stream Mix to Default Output feeds it back in.
+        inventory.defaultOutputUID = Demo.streamMix.uid
+        XCTAssertEqual(Rules.check(from: PortRef(node: device.id, channel: 0), to: PortRef(node: out.id, channel: 0),
+                                   graph: graph, inventory: inventory), .feedback)
+        XCTAssertTrue(Rules.busCables(from: device.id, to: out.id, graph: graph, inventory: inventory).isEmpty)
+        // Stream Mix as the Mac's microphone: Default Input into Stream Mix is the same loop.
+        inventory.defaultInputUID = Demo.streamMix.uid
+        XCTAssertEqual(Rules.check(from: PortRef(node: input.id, channel: 0), to: PortRef(node: device.id, channel: 0),
+                                   graph: graph, inventory: inventory), .feedback)
+        // With real devices chosen in Sound settings both are fine.
+        XCTAssertNil(Rules.check(from: PortRef(node: device.id, channel: 0), to: PortRef(node: out.id, channel: 0),
+                                 graph: graph, inventory: Demo.inventory))
+        XCTAssertNil(Rules.check(from: PortRef(node: input.id, channel: 0), to: PortRef(node: device.id, channel: 0),
+                                 graph: graph, inventory: Demo.inventory))
+    }
+
+    func testSharedCanvasGraphsMoveToDeviceCanvases() throws {
+        // Schema 1: one canvas. The mic feeds both devices, Stream Mix feeds Chat, Stream Mix plays on the speakers,
+        // the mic also goes straight to the speakers, and an interface sits unwired.
         let a = Node(kind: .virtualDevice(Demo.streamMix.id))
         let b = Node(kind: .virtualDevice(Demo.chat.id))
+        let mic = Node(kind: .defaultInput)
         let speakers = Node(kind: .defaultOutput)
-        graph.nodes = [a, b, speakers]
-        let inventory = Demo.inventory
-        // Into itself.
-        XCTAssertEqual(Rules.check(from: PortRef(node: a.id, channel: 0), to: PortRef(node: a.id, channel: 0), graph: graph, inventory: inventory), .feedback)
-        // A → B is fine, then B → A closes a loop.
-        XCTAssertNil(Rules.check(from: PortRef(node: a.id, channel: 0), to: PortRef(node: b.id, channel: 0), graph: graph, inventory: inventory))
-        graph.cables.append(Cable(from: PortRef(node: a.id, channel: 0), to: PortRef(node: b.id, channel: 0)))
-        XCTAssertEqual(Rules.check(from: PortRef(node: b.id, channel: 1), to: PortRef(node: a.id, channel: 1), graph: graph, inventory: inventory), .feedback)
-        // Through hardware is not a loop: speakers don't feed back digitally.
-        XCTAssertNil(Rules.check(from: PortRef(node: b.id, channel: 0), to: PortRef(node: speakers.id, channel: 0), graph: graph, inventory: inventory))
-        // Duplicates and bad channels.
-        XCTAssertEqual(Rules.check(from: PortRef(node: a.id, channel: 0), to: PortRef(node: b.id, channel: 0), graph: graph, inventory: inventory), .alreadyConnected)
-        XCTAssertEqual(Rules.check(from: PortRef(node: a.id, channel: 5), to: PortRef(node: b.id, channel: 0), graph: graph, inventory: inventory), .noSuchPort)
-        XCTAssertEqual(Rules.check(from: PortRef(node: speakers.id, channel: 0), to: PortRef(node: a.id, channel: 0), graph: graph, inventory: inventory), .noSuchPort)
+        let interface = Node(kind: .device(Demo.interface.ref))
+        func cable(_ x: Node, _ y: Node) -> Cable { Cable(from: PortRef(node: x.id, channel: 0), to: PortRef(node: y.id, channel: 0)) }
+        var graph = Graph(virtualDevices: [Demo.streamMix, Demo.chat], nodes: [a, b, mic, speakers, interface],
+                          cables: [cable(mic, a), cable(mic, b), cable(a, b), cable(a, speakers), cable(mic, speakers)])
+        graph.schema = 1
+        let data = try JSONEncoder().encode(graph)
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("junction-upgrade-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let store = Store(folder: folder)
+        try data.write(to: store.graphURL)
+        let upgraded = try XCTUnwrap(store.load())
+
+        XCTAssertEqual(upgraded.schema, Graph.currentSchema)
+        let onMix = upgraded.nodes(on: Demo.streamMix.id), onChat = upgraded.nodes(on: Demo.chat.id)
+        XCTAssertEqual(onMix.map(\.kind), [a.kind, mic.kind, speakers.kind, interface.kind], "unwired: the first canvas")
+        XCTAssertEqual(onChat.map(\.kind), [b.kind, mic.kind], "the mic is copied onto the second canvas")
+        XCTAssertEqual(onMix.first { $0.kind == .defaultInput }?.id, mic.id, "the first copy keeps its identity")
+        XCTAssertEqual(upgraded.cables(on: Demo.streamMix.id).count, 2, "mic → Stream Mix, Stream Mix → speakers")
+        XCTAssertEqual(upgraded.cables(on: Demo.chat.id).count, 1, "mic copy → Chat")
+        XCTAssertEqual(upgraded.cables.count, 3, "device to device and past-the-device cables are gone")
+        var again = upgraded
+        again.upgrade()
+        XCTAssertEqual(again, upgraded, "upgrading twice changes nothing")
+    }
+
+    func testTidyCanvasesKeepsOneDeviceNodePerCanvas() {
+        let mix = Demo.streamMix.id
+        var graph = Graph(virtualDevices: [Demo.streamMix, Demo.chat])
+        let stray = Node(kind: .virtualDevice(Demo.chat.id), canvas: mix)  // another device on Stream Mix's canvas
+        let orphan = Node(kind: .defaultInput, canvas: UUID())               // a canvas that no longer exists
+        graph.nodes = [stray, orphan]
+        graph.tidyCanvases()
+        XCTAssertNotNil(graph.deviceNode(mix))
+        XCTAssertNotNil(graph.deviceNode(Demo.chat.id))
+        XCTAssertEqual(graph.nodes.count, 2)
+        graph.removeVirtualDevice(mix)
+        XCTAssertEqual(graph.nodes.map(\.canvas), [Demo.chat.id])
     }
 
     func testPlannerDropsLoopsTheEditorCouldNotSee() throws {
@@ -164,9 +243,10 @@ final class PlannerTests: XCTestCase {
 
     func testBusCables() {
         var graph = Graph(virtualDevices: [Demo.streamMix])
-        let mic = Node(kind: .defaultInput)
-        let interface = Node(kind: .device(Demo.interface.ref))
-        let mix = Node(kind: .virtualDevice(Demo.streamMix.id))
+        let canvas = Demo.streamMix.id
+        let mic = Node(kind: .defaultInput, canvas: canvas)
+        let interface = Node(kind: .device(Demo.interface.ref), canvas: canvas)
+        let mix = Node(kind: .virtualDevice(Demo.streamMix.id), canvas: canvas)
         graph.nodes = [mic, interface, mix]
         let mono = Rules.busCables(from: mic.id, to: mix.id, graph: graph, inventory: Demo.inventory)
         XCTAssertEqual(mono.map(\.from.channel), [0, 0], "a mono source goes to both sides")
@@ -206,8 +286,8 @@ final class PlannerTests: XCTestCase {
         let store = Store(folder: folder)
         XCTAssertNil(store.load())
         var graph = Graph()
-        Templates.streamWithoutChat(&graph, excluding: [Demo.discord])
-        graph.nodes.append(Node(kind: .device(Demo.interface.ref), x: 12.5, y: -4, gainDB: -3, isMuted: true))
+        let device = Templates.streamWithoutChat(&graph, excluding: [Demo.discord])
+        graph.nodes.append(Node(kind: .device(Demo.interface.ref), x: 12.5, y: -4, gainDB: -3, isMuted: true, canvas: device.id))
         try store.save(graph)
         XCTAssertEqual(store.load(), graph)
         try Data("not json".utf8).write(to: store.graphURL)

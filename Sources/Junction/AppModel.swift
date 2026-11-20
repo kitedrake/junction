@@ -11,6 +11,11 @@ enum Selection: Hashable {
     case cable(UUID)
 }
 
+/// Which side of the canvas a new node goes on: sources feed the virtual device, outputs play it.
+enum NodeRole {
+    case source, output
+}
+
 /// The app's state: the graph (saved), what is on the system, the routing plan and how it runs.
 @MainActor @Observable
 final class AppModel {
@@ -24,6 +29,10 @@ final class AppModel {
     private(set) var statuses: [UUID: SinkStatus] = [:]
     var meters: [PortKey: Float] = [:]
     var selection: Selection?
+    /// The virtual device whose canvas is shown, as picked in the sidebar.
+    private var pickedCanvas: UUID?
+    /// A virtual device waiting for the user to confirm its deletion.
+    var deviceToDelete: UUID?
     var showInspector = true
     var showStreamTemplate = false
     /// A problem to show in an alert (driver install, publishing).
@@ -353,28 +362,59 @@ final class AppModel {
 
     func node(_ id: UUID) -> Node? { graph.node(id) }
 
+    // MARK: Canvases
+
+    /// The virtual device whose canvas is shown: the one picked in the sidebar, else the first.
+    var canvas: UUID? {
+        if let pickedCanvas, graph.virtualDevice(pickedCanvas) != nil { return pickedCanvas }
+        return graph.virtualDevices.first?.id
+    }
+
+    var canvasDevice: VirtualDevice? { canvas.flatMap(graph.virtualDevice) }
+    var canvasNodes: [Node] { canvas.map(graph.nodes(on:)) ?? [] }
+    var canvasCables: [Cable] { canvas.map(graph.cables(on:)) ?? [] }
+
+    func showCanvas(_ device: UUID) {
+        guard device != canvas else { return }
+        pickedCanvas = device
+        selection = nil
+    }
+
+    /// Adds a node to the shown canvas and wires it to the virtual device: a source into it, an output out of it
+    /// (`role` decides for hardware that has both sides). `point` is where it goes; nil finds a free spot.
     @discardableResult
-    func addNode(_ kind: NodeKind, at point: CGPoint? = nil) -> UUID {
-        if case .virtualDevice(let id) = kind, let existing = graph.nodes.first(where: { $0.kind == .virtualDevice(id) }) {
-            selection = .node(existing.id)
-            return existing.id
+    func addNode(_ kind: NodeKind, as role: NodeRole? = nil, at point: CGPoint? = nil) -> UUID? {
+        guard let canvas, let device = graph.deviceNode(canvas) else {
+            alert = "Create a virtual device first: each one has its own canvas."
+            return nil
         }
-        let spot = point ?? freeSpot(for: kind)
-        let node = Node(kind: kind, x: spot.x, y: spot.y)
-        graph.nodes.append(node)
+        if case .virtualDevice = kind {  // only the canvas's own device belongs here, and it is already there
+            selection = .node(device.id)
+            return device.id
+        }
+        let ports = info.ports(Node(kind: kind))
+        let role = role ?? (ports.outputs > 0 && ports.inputs == 0 ? .source : .output)
+        let spot = point ?? freeSpot(role: role, canvas: canvas)
+        let node = Node(kind: kind, x: spot.x, y: spot.y, canvas: canvas)
+        var updated = graph
+        updated.nodes.append(node)
+        updated.cables += role == .source
+            ? Rules.busCables(from: node.id, to: device.id, graph: updated, inventory: inventory)
+            : Rules.busCables(from: device.id, to: node.id, graph: updated, inventory: inventory)
+        graph = updated
         selection = .node(node.id)
         return node.id
     }
 
-    /// Sources go on the left, sinks on the right, below what is already there.
-    private func freeSpot(for kind: NodeKind) -> CGPoint {
-        let probe = Node(kind: kind)
-        let ports = info.ports(probe)
-        let column: Double = ports.outputs > 0 && ports.inputs == 0 ? 60 : (ports.inputs > 0 && ports.outputs == 0 ? 760 : 410)
-        let bottom = graph.nodes.filter { abs($0.x - column) < 150 }
-            .map { $0.y + Double(NodeLayout.height(for: info.ports($0))) }.max() ?? 30
+    /// Sources go on the left, outputs on the right, below what is already there.
+    private func freeSpot(role: NodeRole, canvas: UUID) -> CGPoint {
+        let column = role == .source ? CanvasColumn.sources : CanvasColumn.outputs
+        let bottom = graph.nodes(on: canvas).filter { abs($0.x - column) < 150 }
+            .map { $0.y + Double(NodeLayout.height(for: info.ports($0))) }.max() ?? 20
         return CGPoint(x: column, y: bottom + 30)
     }
+
+    // MARK: Editing
 
     func moveNode(_ id: UUID, to point: CGPoint) {
         guard let index = graph.nodes.firstIndex(where: { $0.id == id }) else { return }
@@ -392,9 +432,16 @@ final class AppModel {
         change(&graph.cables[index])
     }
 
+    /// Removes a node from its canvas; a virtual device's own node stays (it is the canvas).
     func removeNode(_ id: UUID) {
+        guard let node = graph.node(id), !isDeviceNode(node) else { return }
         graph.removeNode(id)
         if selection == .node(id) { selection = nil }
+    }
+
+    func isDeviceNode(_ node: Node) -> Bool {
+        if case .virtualDevice = node.kind { return true }
+        return false
     }
 
     func removeCable(_ id: UUID) {
@@ -404,7 +451,12 @@ final class AppModel {
 
     func deleteSelection() {
         switch selection {
-        case .node(let id): removeNode(id)
+        case .node(let id):
+            if let node = graph.node(id), case .virtualDevice(let device) = node.kind {
+                deviceToDelete = device
+            } else {
+                removeNode(id)
+            }
         case .cable(let id): removeCable(id)
         case nil: break
         }
@@ -441,8 +493,9 @@ final class AppModel {
 
     // MARK: Virtual devices
 
+    /// Creates a virtual device and shows its (empty) canvas.
     @discardableResult
-    func addVirtualDevice(name: String? = nil, channels: Int = 2, at point: CGPoint? = nil) -> VirtualDevice? {
+    func addVirtualDevice(name: String? = nil, channels: Int = 2) -> VirtualDevice? {
         guard graph.virtualDevices.count < VirtualDevice.maximumCount else {
             alert = "Junction can publish up to \(VirtualDevice.maximumCount) virtual devices."
             return nil
@@ -454,8 +507,12 @@ final class AppModel {
             number += 1
         }
         let device = VirtualDevice(name: candidate, channels: channels)
-        graph.virtualDevices.append(device)
-        addNode(.virtualDevice(device.id), at: point)
+        var updated = graph
+        updated.virtualDevices.append(device)
+        updated.nodes.append(Node(kind: .virtualDevice(device.id), x: CanvasColumn.device, y: 60, canvas: device.id))
+        graph = updated
+        pickedCanvas = device.id
+        selection = nil
         return device
     }
 
@@ -470,9 +527,28 @@ final class AppModel {
         graph = updated
     }
 
+    /// Deletes a virtual device with its canvas.
     func removeVirtualDevice(_ id: UUID) {
         graph.removeVirtualDevice(id)
-        if case .node(let node) = selection, graph.node(node) == nil { selection = nil }
+        switch selection {
+        case .node(let node) where graph.node(node) == nil: selection = nil
+        case .cable(let cable) where !graph.cables.contains(where: { $0.id == cable }): selection = nil
+        default: break
+        }
+    }
+
+    /// Makes the "stream without chat" setup and shows its canvas.
+    func addStreamWithoutChat(excluding apps: [AppRef], deviceName: String) {
+        guard graph.virtualDevices.count < VirtualDevice.maximumCount
+                || graph.virtualDevices.contains(where: { $0.name == deviceName }) else {
+            alert = "Junction can publish up to \(VirtualDevice.maximumCount) virtual devices."
+            return
+        }
+        var updated = graph
+        let device = Templates.streamWithoutChat(&updated, excluding: apps, deviceName: deviceName)
+        graph = updated
+        pickedCanvas = device.id
+        selection = nil
     }
 
     // MARK: Status for the canvas
