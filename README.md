@@ -17,8 +17,8 @@ interfaces into them, each on its own node-and-cable canvas.
 - **No feedback**: every cable runs into the canvas's virtual device or out of it, so devices never feed each other.
   Junction also refuses (or, if Sound settings change later, mutes) a device sent to Default Output while Sound
   settings play through that same device, and Default Input into the device it stands for.
-- **Inspector**: level and mute per node and per cable, the virtual device's settings, the apps a System Audio node
-  leaves out, and any problem a node has.
+- **Inspector**: level and mute per node and per cable (Option- or Command-click a fader to put it back to 0 dB), the
+  virtual device's settings, the apps a System Audio node leaves out, and any problem a node has.
 - **Routing** (toolbar power button, menu bar, ⇧⌘R) starts and stops everything. Junction keeps routing from the menu
   bar when the window is closed.
 

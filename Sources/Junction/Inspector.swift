@@ -310,10 +310,13 @@ private struct CableInspector: View {
     return "\(end(cable.from, output: true)) → \(end(cable.to, output: false))"
 }
 
+/// A level fader. Option- or Command-click (or double-click) puts it back to 0 dB.
 struct GainSlider: View {
     let title: String?
     let dB: Double
     let onChange: (Double) -> Void
+    /// Option or Command is held: a click on the fader resets it instead of moving it.
+    @State private var resetArmed = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -328,7 +331,16 @@ struct GainSlider: View {
             Slider(value: Binding(get: { dB }, set: { onChange(($0 * 2).rounded() / 2) }), in: Gain.floorDB...Gain.ceilingDB)
                 .controlSize(.small)
                 .onTapGesture(count: 2) { onChange(0) }
-                .help("Double-click to reset to 0 dB")
+                .overlay {
+                    // The slider handles its own clicks, so while a modifier is down a clear layer takes them.
+                    if resetArmed {
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .onTapGesture { onChange(0) }
+                    }
+                }
+                .onModifierKeysChanged(mask: [.option, .command]) { _, keys in resetArmed = !keys.isEmpty }
+                .help("Option-click or Command-click to reset to 0 dB")
         }
     }
 }
