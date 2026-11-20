@@ -10,7 +10,9 @@ interfaces into them, each on its own node-and-cable canvas.
   outputs on the right (headphones, speakers) let you hear it. Add them from the sidebar, **+** in the toolbar, or by
   right-clicking the canvas (the node lands where you clicked); a new node is wired to the device straight away. Drag
   from a channel on the right of a node to a channel on the left of another to change the wiring; the bar beside a
-  node's title connects all channels at once. Click a cable to select it, Delete removes it. Meters show levels;
+  node's title connects all channels at once. To move or remove a cable, drag it off the channel it plugs into: drop
+  it on another channel to move it, or on empty canvas (it turns red) to remove it. Clicking a cable and pressing
+  Delete works too, and right-clicking the device offers **Disconnect** for each node wired to it. Meters show levels;
   cables glow with the audio they carry; dashed cables carry nothing right now (an end is missing or routing is off).
 - **No feedback**: every cable runs into the canvas's virtual device or out of it, so devices never feed each other.
   Junction also refuses (or, if Sound settings change later, mutes) a device sent to Default Output while Sound

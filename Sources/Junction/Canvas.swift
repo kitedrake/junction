@@ -43,6 +43,8 @@ struct PendingWire: Equatable {
         case input(PortRef)
         case busOutput(UUID)
         case busInput(UUID)
+        /// A cable picked up by its input end: drop it on another input to move it, anywhere empty to remove it.
+        case moving(Cable)
     }
 
     var start: Start
@@ -188,6 +190,20 @@ struct CanvasView: View {
             if let source = nodeUnderPointer(), source.id != target { problem = model.connectAll(from: source.id, to: target) }
             else if let from = nearest(inputs: false) { problem = model.connectAll(from: from.node, to: target) }
             else { attempted = false }
+        case .moving(let cable):
+            if let to = nearest(inputs: true) {
+                if to != cable.to { problem = model.moveCable(cable.id, to: to) }
+            } else if let target = nodeUnderPointer() {
+                // Dropped on a node: its matching channel; back on either end node, nothing changes.
+                if target.id != cable.to.node, target.id != cable.from.node {
+                    let inputs = info.ports(target).inputs
+                    problem = inputs > 0
+                        ? model.moveCable(cable.id, to: PortRef(node: target.id, channel: min(cable.to.channel, inputs - 1)))
+                        : .noSuchPort
+                }
+            } else {
+                model.removeCable(cable.id)  // dropped on empty canvas
+            }
         }
         if attempted, let problem {
             refusal = problem == .noSuchPort ? "Connect a channel on the right of one node to a channel on the left of another." : problem.message
@@ -229,7 +245,10 @@ struct CableLayer: View {
 
     var body: some View {
         let graph = model.graph
-        let cables = model.canvasCables
+        let moving: UUID? = if case .moving(let cable) = wire?.start { cable.id } else { nil }
+        let cables = model.canvasCables.filter { $0.id != moving }
+        let nodes = model.canvasNodes
+        let info = model.info
         let plan = model.plan
         let selected: UUID? = if case .cable(let id) = model.selection { id } else { nil }
         let meters = model.meters
@@ -264,7 +283,12 @@ struct CableLayer: View {
                 default: false
                 }
                 let path = reversed ? CableGeometry.path(wire.location, anchor) : CableGeometry.path(anchor, wire.location)
-                context.stroke(path, with: .color(.accentColor), style: StrokeStyle(lineWidth: 2.5, lineCap: .round, dash: [6, 4]))
+                // A picked-up cable over empty canvas turns red: letting go there removes it.
+                let removing = moving != nil && !nodes.contains {
+                    NodeLayout.frame($0, info.ports($0)).insetBy(dx: -12, dy: -6).contains(wire.location)
+                }
+                context.stroke(path, with: .color(removing ? .red.opacity(0.8) : .accentColor),
+                               style: StrokeStyle(lineWidth: 2.5, lineCap: .round, dash: [6, 4]))
             }
         }
     }
@@ -275,6 +299,7 @@ struct CableLayer: View {
         case .input(let port): graph.node(port.node).map { NodeLayout.inputPoint($0, port.channel) }
         case .busOutput(let id): graph.node(id).map(NodeLayout.busOutputPoint)
         case .busInput(let id): graph.node(id).map(NodeLayout.busInputPoint)
+        case .moving(let cable): graph.node(cable.from.node).map { NodeLayout.outputPoint($0, cable.from.channel) }
         }
     }
 }
@@ -447,7 +472,19 @@ struct NodeCard: View {
         .overlay(alignment: .topLeading) { portOverlay(ports, tint: tint) }
         .contextMenu {
             Button(node.isMuted ? "Unmute" : "Mute") { model.updateNode(node.id) { $0.isMuted.toggle() } }
-            Button("Disconnect All") { model.disconnectAll(node.id) }
+            let linked = model.linkedNodes(node.id)
+            if model.isDeviceNode(node), !linked.isEmpty {
+                Menu("Disconnect") {
+                    ForEach(linked) { other in
+                        Button(model.info.title(other)) { model.disconnect(node.id, other.id) }
+                    }
+                    Divider()
+                    Button("Everything") { model.disconnectAll(node.id) }
+                }
+            } else {
+                Button("Disconnect") { model.disconnectAll(node.id) }
+                    .disabled(linked.isEmpty)
+            }
             Divider()
             if case .virtualDevice(let device) = node.kind {
                 Button("Delete Virtual Device…", role: .destructive) { model.deviceToDelete = device }
@@ -465,13 +502,18 @@ struct NodeCard: View {
     /// Port dots on both edges, plus the "all channels" handles beside the header.
     @ViewBuilder private func portOverlay(_ ports: PortCounts, tint: Color) -> some View {
         let connectedOut = Set(model.graph.cables.filter { $0.from.node == node.id }.map(\.from.channel))
-        let connectedIn = Set(model.graph.cables.filter { $0.to.node == node.id }.map(\.to.channel))
+        // The newest cable into each input: dragging a connected input picks it up.
+        let arriving = Dictionary(model.graph.cables.filter { $0.to.node == node.id }.map { ($0.to.channel, $0) },
+                                  uniquingKeysWith: { _, newer in newer })
         ZStack(alignment: .topLeading) {
             ForEach(0..<ports.inputs, id: \.self) { channel in
-                PortDot(filled: connectedIn.contains(channel), tint: tint)
+                let port = PortRef(node: node.id, channel: channel)
+                PortDot(filled: arriving[channel] != nil, tint: tint)
                     .position(local(NodeLayout.inputPoint(node, channel)))
-                    .gesture(wireGesture(.input(PortRef(node: node.id, channel: channel))))
-                    .help("Input \(channel + 1): drag to a channel on the right side of another node")
+                    .gesture(wireGesture(arriving[channel].map { .moving($0) } ?? .input(port)))
+                    .help(arriving[channel] == nil
+                          ? "Input \(channel + 1): drag to a channel on the right side of another node"
+                          : "Input \(channel + 1): drag its cable to another input to move it, or onto empty canvas to remove it")
             }
             ForEach(0..<ports.outputs, id: \.self) { channel in
                 PortDot(filled: connectedOut.contains(channel), tint: tint)

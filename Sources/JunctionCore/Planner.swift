@@ -272,6 +272,18 @@ public enum Rules {
         return nil
     }
 
+    /// Moves a cable's input end to `port`, keeping its level and place, if a cable from its source to `port` would be
+    /// allowed. Leaves the graph unchanged and returns the problem otherwise.
+    public static func move(_ cable: UUID, to port: PortRef, in graph: inout Graph, inventory: Inventory) -> Problem? {
+        guard let index = graph.cables.firstIndex(where: { $0.id == cable }) else { return .noSuchPort }
+        var without = graph
+        var moved = without.cables.remove(at: index)
+        if let problem = check(from: moved.from, to: port, graph: without, inventory: inventory) { return problem }
+        moved.to = port
+        graph.cables[index] = moved
+        return nil
+    }
+
     /// Cables for a whole-node connection: output 1 → input 1, 2 → 2… (a mono source goes to both sides of a stereo
     /// input). Skips pairs that are already connected or not allowed.
     public static func busCables(from source: UUID, to target: UUID, graph: Graph, inventory: Inventory) -> [Cable] {

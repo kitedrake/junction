@@ -43,7 +43,7 @@ private struct Overview: View {
                 Help(symbol: "contextualmenu.and.cursorarrow", text: "Right-click the canvas (or use the sidebar) to add a source or an output; it connects to the device by itself.")
                 Help(symbol: "hand.draw", text: "Drag from a channel on the right of a node to a channel on the left of another to change the wiring.")
                 Help(symbol: "line.3.horizontal", text: "Drag the bar beside a node's title onto another node to connect all channels at once.")
-                Help(symbol: "cursorarrow.click", text: "Click a cable to select it; press Delete to remove it.")
+                Help(symbol: "cursorarrow.click", text: "To remove a cable, drag it off the channel it plugs into and let go on empty canvas, or click it and press Delete.")
                 Help(symbol: "mic", text: "Apps see each virtual device as a microphone (what you send into it) and as a speaker.")
             }
             Button("Stream Without Chat…") { model.showStreamTemplate = true }
@@ -123,7 +123,8 @@ private struct NodeInspector: View {
         Connections(node: node)
 
         HStack {
-            Button("Disconnect All") { model.disconnectAll(node.id) }
+            Button(model.isDeviceNode(node) ? "Disconnect Everything" : "Disconnect") { model.disconnectAll(node.id) }
+                .disabled(model.linkedNodes(node.id).isEmpty)
             Spacer()
             if !model.isDeviceNode(node) {
                 Button("Remove", role: .destructive) { model.removeNode(node.id) }

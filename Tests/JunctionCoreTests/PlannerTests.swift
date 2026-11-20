@@ -155,6 +155,28 @@ final class PlannerTests: XCTestCase {
         XCTAssertEqual(check(speakers, 0, a, 0), .noSuchPort)
     }
 
+    func testMovingACableKeepsItsLevelAndFollowsTheRules() {
+        let mix = Demo.streamMix.id
+        var graph = Graph(virtualDevices: [Demo.streamMix])
+        let device = Node(kind: .virtualDevice(mix), canvas: mix)
+        let mic = Node(kind: .defaultInput, canvas: mix)
+        let speakers = Node(kind: .defaultOutput, canvas: mix)
+        graph.nodes = [device, mic, speakers]
+        let cable = Cable(from: PortRef(node: mic.id, channel: 0), to: PortRef(node: device.id, channel: 0), gainDB: -6)
+        let other = Cable(from: PortRef(node: device.id, channel: 0), to: PortRef(node: speakers.id, channel: 0))
+        graph.cables = [cable, other]
+        XCTAssertNil(Rules.move(cable.id, to: PortRef(node: device.id, channel: 1), in: &graph, inventory: Demo.inventory))
+        XCTAssertEqual(graph.cables[0].to, PortRef(node: device.id, channel: 1))
+        XCTAssertEqual(graph.cables[0].gainDB, -6)
+        XCTAssertEqual(graph.cables[0].id, cable.id)
+        // Moving the mic's cable onto the speakers would bypass the device: refused, nothing changes.
+        let before = graph
+        XCTAssertEqual(Rules.move(cable.id, to: PortRef(node: speakers.id, channel: 1), in: &graph, inventory: Demo.inventory),
+                       .bypassesDevice)
+        XCTAssertEqual(graph, before)
+        XCTAssertEqual(Rules.move(UUID(), to: PortRef(node: device.id, channel: 0), in: &graph, inventory: Demo.inventory), .noSuchPort)
+    }
+
     func testLoopsThroughSoundSettingsAreRefused() {
         let mix = Demo.streamMix.id
         var graph = Graph(virtualDevices: [Demo.streamMix])

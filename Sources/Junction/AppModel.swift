@@ -491,6 +491,27 @@ final class AppModel {
         graph.cables.removeAll { $0.from.node == node || $0.to.node == node }
     }
 
+    /// Removes the cables between two nodes, in either direction.
+    func disconnect(_ a: UUID, _ b: UUID) {
+        graph.cables.removeAll { ($0.from.node == a && $0.to.node == b) || ($0.from.node == b && $0.to.node == a) }
+    }
+
+    /// The nodes a node has cables to or from, in canvas order.
+    func linkedNodes(_ node: UUID) -> [Node] {
+        let ids = Set(graph.cables.compactMap { $0.from.node == node ? $0.to.node : ($0.to.node == node ? $0.from.node : nil) })
+        return graph.nodes.filter { ids.contains($0.id) }
+    }
+
+    /// Moves a cable's input end to another channel, keeping its level. Returns why not when it can't.
+    @discardableResult
+    func moveCable(_ id: UUID, to port: PortRef) -> Rules.Problem? {
+        var updated = graph
+        if let problem = Rules.move(id, to: port, in: &updated, inventory: inventory) { return problem }
+        graph = updated
+        selection = .cable(id)
+        return nil
+    }
+
     // MARK: Virtual devices
 
     /// Creates a virtual device and shows its (empty) canvas.
