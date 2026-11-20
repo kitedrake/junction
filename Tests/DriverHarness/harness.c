@@ -191,6 +191,24 @@ static CFDictionaryRef DeviceEntry(const char *uid, const char *name, int channe
     return dict;
 }
 
+/// The sample rate the driver's configuration reports for a device (what the app reads back).
+static Float64 ConfigRate(const char *uid) {
+    AudioObjectPropertyAddress address = Address(kSelectorConfig, kAudioObjectPropertyScopeGlobal);
+    CFArrayRef config = NULL;
+    UInt32 size = 0;
+    (*gDriver)->GetPropertyData(gDriver, kAudioObjectPlugInObject, 0, &address, 0, NULL, sizeof config, &size, &config);
+    Float64 rate = 0;
+    CFStringRef key = CFStringCreateWithCString(NULL, uid, kCFStringEncodingUTF8);
+    for (CFIndex i = 0; config && i < CFArrayGetCount(config); i++) {
+        CFDictionaryRef entry = CFArrayGetValueAtIndex(config, i);
+        if (!CFEqual(CFDictionaryGetValue(entry, CFSTR("uid")), key)) continue;
+        CFNumberGetValue(CFDictionaryGetValue(entry, CFSTR("sampleRate")), kCFNumberFloat64Type, &rate);
+    }
+    CFRelease(key);
+    if (config) CFRelease(config);
+    return rate;
+}
+
 static OSStatus SetConfig(CFPropertyListRef config) {
     AudioObjectPropertyAddress address = Address(kSelectorConfig, kAudioObjectPropertyScopeGlobal);
     return (*gDriver)->SetPropertyData(gDriver, kAudioObjectPlugInObject, 0, &address, 0, NULL, sizeof config, &config);
@@ -355,6 +373,22 @@ int main(int argc, char **argv) {
         UInt32 size = 0;
         (*gDriver)->GetPropertyData(gDriver, chatDevice, 0, &address, 0, NULL, sizeof now, &size, &now);
         CHECK(now == 96000, "rate should be 96 kHz, is %.0f", now);
+        // A change from outside the app (Core Audio restoring a remembered rate, Audio MIDI Setup) shows in the
+        // configuration the app reads back, and is saved.
+        CHECK(ConfigRate("junction.test.chat") == 96000, "configuration should report 96 kHz, reports %.0f",
+              ConfigRate("junction.test.chat"));
+        usleep(100000);
+        CFArrayRef stored = CFDictionaryGetValue(gStorage, CFSTR("devices"));
+        bool storedRate = false;
+        for (CFIndex i = 0; stored && i < CFArrayGetCount(stored); i++) {
+            CFDictionaryRef entry = CFArrayGetValueAtIndex(stored, i);
+            Float64 value = 0;
+            CFNumberRef number = CFDictionaryGetValue(entry, CFSTR("sampleRate"));
+            if (CFEqual(CFDictionaryGetValue(entry, CFSTR("uid")), CFSTR("junction.test.chat")) && number &&
+                CFNumberGetValue(number, kCFNumberFloat64Type, &value))
+                storedRate = value == 96000;
+        }
+        CHECK(storedRate, "saved configuration should hold 96 kHz");
         rate = 12345;
         CHECK((*gDriver)->SetPropertyData(gDriver, chatDevice, 0, &address, 0, NULL, sizeof rate, &rate) != noErr,
               "unsupported rate should be refused");

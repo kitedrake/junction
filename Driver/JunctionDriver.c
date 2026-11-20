@@ -23,7 +23,7 @@
 
 #pragma mark - Constants
 
-#define kDriverVersion "0.1.0"
+#define kDriverVersion "0.1.1"
 #define kManufacturer "omso"
 #define kModelUID "local.junction.virtual-device"
 #define kConfigurationApp "local.junction.app"
@@ -321,6 +321,39 @@ static void ApplyConfig(const Entry *entries, UInt32 count, bool notify) {
     for (UInt32 i = 0; i < reconfiguredCount; i++) RequestConfigurationChangeAsync(reconfigured[i]);
 }
 
+/// Makes the saved configuration match a device's current format. The format can change from outside the app: Core
+/// Audio puts back the rate it remembers for a device UID when the device appears, and Audio MIDI Setup or a DAW can
+/// set it. The app reads the configuration back to see the real state. Call with gStateMutex held; returns true if the
+/// entry changed.
+static bool RecordSlotFormat(const Slot *s) {
+    if (!gConfig || !s->uid) return false;
+    CFIndex n = CFArrayGetCount(gConfig);
+    for (CFIndex i = 0; i < n; i++) {
+        CFDictionaryRef entry = CFArrayGetValueAtIndex(gConfig, i);
+        CFTypeRef uid = CFDictionaryGetValue(entry, CFSTR("uid"));
+        if (!uid || !CFEqual(uid, s->uid)) continue;
+        Float64 channels = 0, rate = 0;
+        NumberValue(entry, CFSTR("channels"), &channels);
+        NumberValue(entry, CFSTR("sampleRate"), &rate);
+        if ((UInt32)channels == s->channels && rate == s->sampleRate) return false;
+        CFMutableDictionaryRef updated = CFDictionaryCreateMutableCopy(NULL, 0, entry);
+        SInt32 newChannels = (SInt32)s->channels;
+        CFNumberRef channelsNumber = CFNumberCreate(NULL, kCFNumberSInt32Type, &newChannels);
+        CFNumberRef rateNumber = CFNumberCreate(NULL, kCFNumberFloat64Type, &s->sampleRate);
+        CFDictionarySetValue(updated, CFSTR("channels"), channelsNumber);
+        CFDictionarySetValue(updated, CFSTR("sampleRate"), rateNumber);
+        CFMutableArrayRef config = CFArrayCreateMutableCopy(NULL, 0, gConfig);
+        CFArraySetValueAtIndex(config, i, updated);
+        CFRelease(gConfig);
+        gConfig = config;
+        CFRelease(updated);
+        CFRelease(channelsNumber);
+        CFRelease(rateNumber);
+        return true;
+    }
+    return false;
+}
+
 static void SaveConfig(void) {
     pthread_mutex_lock(&gStateMutex);
     CFArrayRef config = gConfig ? CFRetain(gConfig) : NULL;
@@ -480,7 +513,9 @@ static OSStatus PerformDeviceConfigurationChange(AudioServerPlugInDriverRef d, A
     s->ioSampleRate = rate;
     s->hostTicksPerFrame = gHostTicksPerSecond / rate;
     pthread_mutex_unlock(&s->ioMutex);
+    bool changed = RecordSlotFormat(s);
     pthread_mutex_unlock(&gStateMutex);
+    if (changed) SaveConfig();
     return noErr;
 }
 

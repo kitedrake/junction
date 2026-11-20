@@ -65,6 +65,15 @@ public enum HAL {
         return status == noErr && device != kAudioObjectUnknown ? device : nil
     }
 
+    /// Sets a device's nominal sample rate, as Audio MIDI Setup does.
+    @discardableResult
+    public static func setNominalSampleRate(uid: String, _ rate: Double) -> Bool {
+        guard let device = deviceID(forUID: uid) else { return false }
+        var address = address(kAudioDevicePropertyNominalSampleRate)
+        var value = Float64(rate)
+        return AudioObjectSetPropertyData(device, &address, 0, nil, UInt32(MemoryLayout<Float64>.size), &value) == noErr
+    }
+
     /// Readable text for an OSStatus (many Core Audio errors are four-character codes).
     public static func describe(_ status: OSStatus) -> String {
         let known: [OSStatus: String] = [

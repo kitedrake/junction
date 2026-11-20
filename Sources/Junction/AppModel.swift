@@ -36,6 +36,8 @@ final class AppModel {
     @ObservationIgnored private var refreshPending = false
     @ObservationIgnored private var timers: [Timer] = []
     @ObservationIgnored private var started = false
+    /// Virtual devices Junction just created, turned on or reformatted, and until when its own sample rate wins.
+    @ObservationIgnored private var assertRateUntil: [UUID: Date] = [:]
 
     init(demo: Bool) {
         isDemo = demo
@@ -60,8 +62,17 @@ final class AppModel {
             Task { @MainActor in AppModel.shared.statuses = statuses }
         }
         self.router = router
-        refreshInventory()
-        publishVirtualDevices()
+        // Rates changed from outside while Junction wasn't running (Audio MIDI Setup, a DAW) are kept.
+        if let published = DriverClient.publishedDevices() {
+            var adopted = graph
+            for index in adopted.virtualDevices.indices {
+                guard let live = published.first(where: { $0.id == adopted.virtualDevices[index].id }),
+                      VirtualDevice.sampleRateChoices.contains(live.sampleRate) else { continue }
+                adopted.virtualDevices[index].sampleRate = live.sampleRate
+            }
+            if adopted != graph { graph = adopted }
+        }
+        refreshInventory()  // publishes the devices once it sees the driver
         watcher = HAL.SystemWatcher(queue: .main) {
             Task { @MainActor in AppModel.shared.scheduleRefresh() }
         }
@@ -99,7 +110,14 @@ final class AppModel {
                 guard !Task.isCancelled else { return }
                 self?.saveNow()
             }
-            if old.virtualDevices != graph.virtualDevices { publishVirtualDevices() }
+            if old.virtualDevices != graph.virtualDevices {
+                let changed = graph.virtualDevices.filter { device in
+                    guard let before = old.virtualDevice(device.id) else { return true }
+                    return (device.isEnabled && !before.isEnabled) || device.sampleRate != before.sampleRate
+                        || device.channels != before.channels
+                }
+                publishVirtualDevices(changed: Set(changed.map(\.id)))
+            }
         }
         replan()
     }
@@ -144,8 +162,34 @@ final class AppModel {
             updated.nodes[index].kind = .device(live.ref)
         }
         if updated != graph { graph = updated }
-        if driverAppeared { publishVirtualDevices() }
+        if driverAppeared {
+            // Devices the driver doesn't have yet will appear now; Core Audio may give them a remembered rate.
+            let published = Set((DriverClient.publishedDevices() ?? []).map(\.id))
+            publishVirtualDevices(changed: Set(graph.virtualDevices.filter { !published.contains($0.id) }.map(\.id)))
+        }
         replan()
+        reconcileSampleRates()
+    }
+
+    /// Core Audio can change a virtual device's sample rate behind Junction's back: when a device appears it puts back
+    /// the rate it remembers for that device, and Audio MIDI Setup or a DAW can set it. Shortly after Junction creates,
+    /// turns on or reformats a device its own rate wins; later outside changes are adopted, so Junction doesn't fight
+    /// another app over the rate.
+    private func reconcileSampleRates() {
+        guard !isDemo, inventory.driver.isInstalled else { return }
+        let now = Date()
+        assertRateUntil = assertRateUntil.filter { $0.value > now }
+        var adopted = graph
+        for (index, device) in graph.virtualDevices.enumerated() where device.isEnabled {
+            guard let rate = inventory.device(device.uid)?.sampleRate, rate > 0, rate != device.sampleRate else { continue }
+            if assertRateUntil[device.id] != nil {
+                let uid = device.uid, wanted = device.sampleRate
+                Task.detached { HAL.setNominalSampleRate(uid: uid, wanted) }
+            } else if VirtualDevice.sampleRateChoices.contains(rate) {
+                adopted.virtualDevices[index].sampleRate = rate
+            }
+        }
+        if adopted != graph { graph = adopted }
     }
 
     private func pollMeters() {
@@ -164,8 +208,12 @@ final class AppModel {
 
     // MARK: Driver
 
-    private func publishVirtualDevices() {
+    /// Sends the device list to the driver. `changed` names the devices whose sample rate Junction should insist on
+    /// for the next few seconds (all of them when nil).
+    private func publishVirtualDevices(changed: Set<UUID>? = nil) {
         guard !isDemo, inventory.driver.isInstalled else { return }
+        let until = Date().addingTimeInterval(5)
+        for id in changed ?? Set(graph.virtualDevices.map(\.id)) { assertRateUntil[id] = until }
         let devices = graph.virtualDevices
         Task.detached {
             do {
@@ -173,6 +221,12 @@ final class AppModel {
             } catch {
                 let message = error.localizedDescription
                 await MainActor.run { AppModel.shared.alert = message }
+                return
+            }
+            // A device that just appeared may be switched to a remembered rate a moment later.
+            for delay in [1.0, 2.5] {
+                try? await Task.sleep(for: .seconds(delay))
+                await MainActor.run { AppModel.shared.refreshInventory() }
             }
         }
     }

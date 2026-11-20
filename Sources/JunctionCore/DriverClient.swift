@@ -36,6 +36,22 @@ public enum DriverClient {
         return result.takeRetainedValue() as? [[String: Any]]
     }
 
+    /// The published devices as VirtualDevice values (all enabled), or nil when the driver isn't loaded.
+    public static func publishedDevices() -> [VirtualDevice]? {
+        publishedConfiguration().map(devices(from:))
+    }
+
+    static func devices(from configuration: [[String: Any]]) -> [VirtualDevice] {
+        configuration.compactMap { entry in
+            guard let uid = entry["uid"] as? String, uid.hasPrefix("junction."),
+                  let id = UUID(uuidString: String(uid.dropFirst("junction.".count)))
+            else { return nil }
+            return VirtualDevice(id: id, name: entry["name"] as? String ?? "Virtual Device",
+                                 channels: (entry["channels"] as? NSNumber)?.intValue ?? 2,
+                                 sampleRate: (entry["sampleRate"] as? NSNumber)?.doubleValue ?? 48000)
+        }
+    }
+
     /// The configuration the driver should publish: the enabled virtual devices, in order.
     public static func configuration(for devices: [VirtualDevice]) -> [[String: Any]] {
         devices.filter(\.isEnabled).prefix(VirtualDevice.maximumCount).map {

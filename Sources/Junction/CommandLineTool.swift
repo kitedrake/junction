@@ -3,13 +3,14 @@ import Foundation
 import JunctionCore
 import JunctionKernel
 
-/// `Junction --list | --self-test [folder] | --loopback-test | --help`
+/// `Junction --list | --self-test [folder] | --loopback-test | --device-test | --help`
 enum CommandLineTool {
     static func run(_ arguments: [String]) -> Int32 {
         switch arguments.first {
         case "--list": return list()
         case "--self-test": return selfTest(folder: arguments.dropFirst().first)
         case "--loopback-test": return loopbackTest()
+        case "--device-test": return deviceTest()
         default:
             print("""
             Junction: virtual audio devices and an audio router.
@@ -17,6 +18,8 @@ enum CommandLineTool {
               --self-test [dir] Checks the bundled driver, the planner, the mixing kernel and saving (no audio).
               --loopback-test   With the driver installed: plays a tone into a temporary virtual device and checks
                                 it comes back out. Needs microphone permission for the calling app (e.g. Terminal).
+              --device-test     With the driver installed: adds a temporary virtual device, renames it, changes its
+                                channels and sample rate, turns it off and on, and checks Core Audio follows each step.
             """)
             return 0
         }
@@ -159,28 +162,14 @@ enum CommandLineTool {
     /// Adds a temporary device next to the published ones, plays a 997 Hz tone into its output and listens to its
     /// input, then puts the driver's device list back.
     static func loopbackTest() -> Int32 {
-        guard DriverClient.status().isInstalled, let original = DriverClient.publishedConfiguration() else {
+        guard DriverClient.status().isInstalled, let existing = DriverClient.publishedDevices() else {
             print("The Junction driver isn't installed (or coreaudiod hasn't loaded it).")
             return 1
         }
         let test = VirtualDevice(id: UUID(uuidString: "4A554E43-5445-5354-0000-000000000001")!, name: "Junction Loopback Test")
-        func restore() {
-            let devices = original.compactMap { entry -> VirtualDevice? in
-                guard let uid = entry["uid"] as? String, uid != test.uid,
-                      let id = UUID(uuidString: String(uid.dropFirst("junction.".count))) else { return nil }
-                return VirtualDevice(id: id, name: entry["name"] as? String ?? "Device",
-                                     channels: entry["channels"] as? Int ?? 2, sampleRate: entry["sampleRate"] as? Double ?? 48000)
-            }
-            try? DriverClient.publish(devices)
-        }
-        let existing = original.compactMap { entry -> VirtualDevice? in
-            guard let uid = entry["uid"] as? String, uid.hasPrefix("junction."),
-                  let id = UUID(uuidString: String(uid.dropFirst("junction.".count))) else { return nil }
-            return VirtualDevice(id: id, name: entry["name"] as? String ?? "Device",
-                                 channels: entry["channels"] as? Int ?? 2, sampleRate: entry["sampleRate"] as? Double ?? 48000)
-        }
+        func restore() { try? DriverClient.publish(existing.filter { $0.uid != test.uid }) }
         do {
-            try DriverClient.publish(existing + [test])
+            try DriverClient.publish(existing.filter { $0.uid != test.uid } + [test])
         } catch {
             print("Couldn't add the test device: \(error.localizedDescription)")
             return 1

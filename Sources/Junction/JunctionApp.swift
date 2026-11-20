@@ -6,7 +6,7 @@ import SwiftUI
 enum Main {
     static func main() {
         let arguments = Array(CommandLine.arguments.dropFirst())
-        if ["--list", "--self-test", "--loopback-test", "--help"].contains(arguments.first ?? "") {
+        if ["--list", "--self-test", "--loopback-test", "--device-test", "--help"].contains(arguments.first ?? "") {
             exit(CommandLineTool.run(arguments))
         }
         JunctionApp.main()

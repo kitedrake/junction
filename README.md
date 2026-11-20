@@ -89,6 +89,7 @@ The graph is saved to `~/Library/Application Support/Junction/graph.json`.
 build/Junction.app/Contents/MacOS/Junction --self-test   # bundled driver loads, planning, kernel, saving
 build/Junction.app/Contents/MacOS/Junction --list        # driver status, devices, apps using audio
 build/Junction.app/Contents/MacOS/Junction --loopback-test   # with the driver installed: tone in, tone out
+build/Junction.app/Contents/MacOS/Junction --device-test     # with the driver installed: add, rename, reshape, remove
 JUNCTION_SNAPSHOT=/tmp/shots build/Junction.app/Contents/MacOS/Junction   # demo screenshots, then quits
 ```
 
@@ -96,6 +97,8 @@ The driver harness (`Tests/DriverHarness/harness.c`) loads the driver into a tes
 host and checks the device list, properties, configuration changes, saved state across a simulated restart and
 bit-exact loopback. `--loopback-test` is the real-system check: it adds a temporary device, plays 997 Hz into it,
 records its input, and restores the device list. It needs microphone permission for the app running it (Terminal).
+`--device-test` checks that Core Audio follows the driver (a temporary device appears, is renamed, changes channels
+and rate, reports a rate set from outside, disappears and returns); it opens no audio and needs no permission.
 
 `omso-build.json` describes the build for omso Builder: `build.sh`, `test.sh`, then `Junction --self-test`;
 **Build & Install** copies `Junction.app` to `/Applications/omso`. Installing the driver stays a separate,
@@ -115,3 +118,6 @@ The icon is drawn by `icon/make_icon.swift`; `icon/make-icns.sh` rebuilds `Resou
 - Each rebuilt sink restarts its audio (a short gap) when cables are added or removed.
 - Routing stops when Junction quits; it keeps running from the menu bar when the window is closed.
 - Virtual devices have no volume control yet, so the keyboard volume keys don't change them.
+- A virtual device's sample rate can also be set by other apps (Audio MIDI Setup, a DAW), and macOS puts back the rate
+  it remembers for a device when it appears. Junction insists on its own rate for a few seconds after you create, turn
+  on or change a device, and otherwise adopts the outside change rather than fighting it.
