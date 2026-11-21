@@ -85,7 +85,7 @@ struct VirtualDeviceRow: View {
             NodeIcon(kind: .virtualDevice(device.id), ports: PortCounts(inputs: device.channels, outputs: device.channels), size: 22)
             VStack(alignment: .leading, spacing: 1) {
                 Text(device.name).lineLimit(1)
-                Text("\(device.channels) ch · \(formatRate(device.sampleRate))")
+                Text(details)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -100,9 +100,31 @@ struct VirtualDeviceRow: View {
         }
         .contextMenu {
             Button(device.isEnabled ? "Turn Off" : "Turn On") { model.updateVirtualDevice(device.id) { $0.isEnabled.toggle() } }
+            Button(device.isHidden ? "Show to Apps" : "Hide from Apps") { model.updateVirtualDevice(device.id) { $0.isHidden.toggle() } }
+            Menu("Apps See It As") {
+                ForEach(DeviceDirection.allCases, id: \.self) { direction in
+                    Toggle(direction.title, isOn: Binding(
+                        get: { device.direction == direction },
+                        set: { _ in model.updateVirtualDevice(device.id) { $0.direction = direction } }))
+                }
+            }
             Divider()
             Button("Delete Virtual Device…", role: .destructive) { model.deviceToDelete = device.id }
         }
+    }
+}
+
+extension VirtualDeviceRow {
+    /// "2 ch · 48 kHz", plus the direction when apps see one side only and "hidden" when they see none.
+    var details: String {
+        var parts = ["\(device.channels) ch", formatRate(device.sampleRate)]
+        switch device.direction {
+        case .both: break
+        case .inputOnly: parts.append("input only")
+        case .outputOnly: parts.append("output only")
+        }
+        if device.isHidden { parts.append("hidden") }
+        return parts.joined(separator: " · ")
     }
 }
 

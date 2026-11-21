@@ -390,7 +390,7 @@ struct NodeCard: View {
     var body: some View {
         let info = model.info
         let ports = info.ports(node)
-        let labels = (inputs: channelLabels(ports.inputs), outputs: channelLabels(ports.outputs))
+        let labels = (inputs: info.channelLabels(node, outputs: false), outputs: info.channelLabels(node, outputs: true))
         let selected = model.selection == .node(node.id)
         let tint = NodeStyle.tint(node.kind)
         let issues = model.issues(for: node.id)
@@ -461,6 +461,8 @@ struct NodeCard: View {
                             Text(labels.inputs[row])
                                 .font(.system(size: 11, weight: .medium, design: .rounded))
                                 .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .frame(maxWidth: 56, alignment: .leading)
                             LevelBar(level: model.level(node.id, output: false, channel: row), tint: tint)
                         }
                         Spacer(minLength: 0)
@@ -469,6 +471,8 @@ struct NodeCard: View {
                             Text(labels.outputs[row])
                                 .font(.system(size: 11, weight: .medium, design: .rounded))
                                 .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .frame(maxWidth: 56, alignment: .trailing)
                         }
                     }
                     .padding(.horizontal, 14)

@@ -1,3 +1,4 @@
+import CoreAudio
 import XCTest
 @testable import JunctionCore
 
@@ -208,6 +209,16 @@ final class PlannerTests: XCTestCase {
         XCTAssertTrue(loaded.nodes.allSatisfy { $0.rateConversion == .automatic })
         XCTAssertEqual(loaded.nodes[sinkIndex].bufferFrames, 256, "schema 3 settings are kept")
         XCTAssertEqual(loaded.cables, graph.cables)
+        // Devices from before the device options show apps both sides, under the Junction icon, at full volume.
+        let loadedDevice = try XCTUnwrap(loaded.virtualDevice(device.id))
+        XCTAssertEqual(loadedDevice.direction, .both)
+        XCTAssertEqual(loadedDevice.icon, .junction)
+        XCTAssertEqual(loadedDevice.channelNames, [])
+        XCTAssertFalse(loadedDevice.isHidden)
+        XCTAssertEqual(loadedDevice.outputVolume, 1)
+        XCTAssertEqual(loadedDevice.inputVolume, 1)
+        XCTAssertFalse(loadedDevice.outputMuted || loadedDevice.inputMuted)
+        XCTAssertEqual(loadedDevice.name, device.name)
 
         // Schema 4 keeps the choice.
         var changed = loaded
@@ -218,6 +229,176 @@ final class PlannerTests: XCTestCase {
         var again = changed
         again.upgrade()
         XCTAssertEqual(again, changed, "a schema 4 graph isn't converted again")
+
+        // …and the device options.
+        var dressed = changed
+        dressed.virtualDevices[0].direction = .outputOnly
+        dressed.virtualDevices[0].channelNames = ["Voice", "Music"]
+        dressed.virtualDevices[0].icon = .stream
+        dressed.virtualDevices[0].isHidden = true
+        dressed.virtualDevices[0].outputVolume = 0.25
+        dressed.virtualDevices[0].inputMuted = true
+        try store.save(dressed)
+        XCTAssertEqual(store.load(), dressed)
+    }
+
+    func testDeviceOptionsInTheDriverConfiguration() throws {
+        var device = Demo.streamMix
+        device.direction = .inputOnly
+        device.channelNames = ["Voice", "", "extra"]
+        device.icon = .microphone
+        device.isHidden = true
+        device.outputVolume = 1.5
+        device.inputVolume = 0.5
+        device.inputMuted = true
+        let entry = try XCTUnwrap(DriverClient.configuration(for: [device]).first)
+        XCTAssertEqual(entry["direction"] as? String, "input")
+        XCTAssertEqual(entry["channelNames"] as? [String], ["Voice"], "names past the channels and empty ones at the end go")
+        XCTAssertEqual(entry["icon"] as? String, "microphone")
+        XCTAssertEqual(entry["hidden"] as? Bool, true)
+        XCTAssertEqual(entry["outputVolume"] as? Double, 1, "volumes stay within 0…1")
+        XCTAssertEqual(entry["inputVolume"] as? Double, 0.5)
+        XCTAssertEqual(entry["inputMute"] as? Bool, true)
+        XCTAssertEqual(entry["outputMute"] as? Bool, false)
+        // What the driver reports back reads as the same device.
+        let read = try XCTUnwrap(DriverClient.devices(from: [entry]).first)
+        XCTAssertEqual(read.direction, .inputOnly)
+        XCTAssertEqual(read.channelNames, ["Voice"])
+        XCTAssertEqual(read.icon, .microphone)
+        XCTAssertTrue(read.isHidden)
+        XCTAssertEqual(read.inputVolume, 0.5)
+        XCTAssertTrue(read.inputMuted)
+        // Driver 0.1 reports only the format: the rest takes the defaults.
+        let old = try XCTUnwrap(DriverClient.devices(from: [["uid": Demo.chat.uid, "name": "Chat", "channels": 4,
+                                                             "sampleRate": 44100.0]]).first)
+        XCTAssertEqual(old.channels, 4)
+        XCTAssertEqual(old.sampleRate, 44100)
+        XCTAssertEqual(old.direction, .both)
+        XCTAssertEqual(old.icon, .junction)
+        XCTAssertFalse(old.isHidden)
+        XCTAssertEqual(old.outputVolume, 1)
+        XCTAssertFalse(old.outputMuted)
+        // Channel names label the device node's ports.
+        var graph = Graph(virtualDevices: [device])
+        let node = Node(kind: .virtualDevice(device.id), canvas: device.id)
+        graph.nodes = [node]
+        let info = NodeInfo(graph: graph, inventory: Demo.inventory)
+        XCTAssertEqual(info.channelLabels(node, outputs: true), ["Voice", "R"])
+        XCTAssertEqual(info.subtitle(node), "Virtual input · hidden")
+    }
+
+    func testOneSidedDevicesRouteThroughTheirCompanions() throws {
+        // Chat is a microphone only: Junction plays into its companion. Stream Mix is a speaker only: Junction
+        // records it from its companion.
+        var chat = Demo.chat, mix = Demo.streamMix
+        chat.direction = .inputOnly
+        mix.direction = .outputOnly
+        var inventory = Demo.inventory
+        inventory.devices.removeAll { $0.isJunction }
+        inventory.devices += [
+            DeviceInfo(uid: chat.uid, name: chat.name, inputChannels: 2, outputChannels: 0, isJunction: true),
+            DeviceInfo(uid: chat.companionUID, name: "Chat (Junction routing)", inputChannels: 0, outputChannels: 2, isJunction: true),
+            DeviceInfo(uid: mix.uid, name: mix.name, inputChannels: 0, outputChannels: 2, isJunction: true),
+            DeviceInfo(uid: mix.companionUID, name: "Stream Mix (Junction routing)", inputChannels: 2, outputChannels: 0,
+                       isJunction: true),
+        ]
+        var graph = Graph(virtualDevices: [mix, chat])
+        let mixNode = Node(kind: .virtualDevice(mix.id), canvas: mix.id)
+        let chatNode = Node(kind: .virtualDevice(chat.id), canvas: chat.id)
+        let mixSource = Node(kind: .device(DeviceRef(uid: mix.uid, name: mix.name, inputChannels: 0, outputChannels: 2)),
+                             canvas: chat.id)
+        graph.nodes = [mixNode, chatNode, mixSource]
+        // The virtual device node keeps both sides on the canvas.
+        XCTAssertEqual(NodeInfo(graph: graph, inventory: inventory).ports(chatNode), PortCounts(inputs: 2, outputs: 2))
+        let speakers = Node(kind: .device(Demo.speakers.ref), canvas: mix.id)
+        let micOnChat = Node(kind: .defaultInput, canvas: chat.id)
+        graph.nodes += [speakers, micOnChat]
+        graph.cables = [
+            Cable(from: PortRef(node: micOnChat.id, channel: 0), to: PortRef(node: chatNode.id, channel: 0)),
+            Cable(from: PortRef(node: mixNode.id, channel: 0), to: PortRef(node: speakers.id, channel: 0)),
+        ]
+        let plan = Planner.plan(graph, inventory: inventory)
+        let intoChat = try XCTUnwrap(plan.sinks.first { $0.sinkNode == chatNode.id })
+        XCTAssertEqual(intoChat.sinkUID, chat.companionUID, "an input-only device is fed through its companion")
+        let fromMix = try XCTUnwrap(plan.sinks.first { $0.sinkNode == speakers.id })
+        XCTAssertEqual(fromMix.subDevices.map(\.uid), [Demo.speakers.uid, mix.companionUID],
+                       "an output-only device is recorded through its companion")
+
+        // A companion missing (an older driver) leaves the node unavailable rather than routing the wrong side.
+        var older = inventory
+        older.devices.removeAll { $0.uid == chat.companionUID }
+        let olderPlan = Planner.plan(graph, inventory: older)
+        XCTAssertNil(olderPlan.sinks.first { $0.sinkNode == chatNode.id })
+        XCTAssertFalse(olderPlan.issues[chatNode.id, default: []].isEmpty)
+    }
+
+    func testTheLoopGuardCountsACompanionAsItsDevice() throws {
+        // Stream Mix → Chat (Chat fed through its companion) and Chat → Stream Mix would ring: one of them is refused.
+        var chat = Demo.chat
+        chat.direction = .inputOnly
+        var inventory = Demo.inventory
+        inventory.devices.removeAll { $0.uid == chat.uid }
+        inventory.devices += [
+            DeviceInfo(uid: chat.uid, name: chat.name, inputChannels: 2, outputChannels: 0, isJunction: true),
+            DeviceInfo(uid: chat.companionUID, name: "Chat (Junction routing)", inputChannels: 0, outputChannels: 2, isJunction: true),
+        ]
+        var graph = Graph(virtualDevices: [Demo.streamMix, chat])
+        let mixNode = Node(kind: .virtualDevice(Demo.streamMix.id), canvas: Demo.streamMix.id)
+        let chatNode = Node(kind: .virtualDevice(chat.id), canvas: chat.id)
+        let chatOnMix = Node(kind: .device(DeviceRef(uid: chat.uid, name: "Chat", inputChannels: 2, outputChannels: 0)),
+                             canvas: Demo.streamMix.id)
+        let mixOnChat = Node(kind: .device(DeviceRef(uid: Demo.streamMix.uid, name: "Stream Mix", inputChannels: 2,
+                                                     outputChannels: 2)), canvas: chat.id)
+        graph.nodes = [mixNode, chatNode, chatOnMix, mixOnChat]
+        graph.cables = [
+            Cable(from: PortRef(node: chatOnMix.id, channel: 0), to: PortRef(node: mixNode.id, channel: 0)),
+            Cable(from: PortRef(node: mixOnChat.id, channel: 0), to: PortRef(node: chatNode.id, channel: 0)),
+        ]
+        let plan = Planner.plan(graph, inventory: inventory)
+        XCTAssertEqual(plan.sinks.count, 1, "only one direction of the loop is routed")
+        XCTAssertEqual(plan.idleCables.count, 1)
+    }
+
+    func testDevicesOnTheSinksClockSkipDriftCompensation() throws {
+        // Junction's devices share one clock domain; the interface has its own and the mic reports none.
+        var inventory = Demo.inventory
+        for index in inventory.devices.indices where inventory.devices[index].isJunction {
+            inventory.devices[index].clockDomain = 0x6A6E_6374
+        }
+        if let index = inventory.devices.firstIndex(where: { $0.uid == Demo.interface.uid }) {
+            inventory.devices[index].clockDomain = 7
+            inventory.devices[index].sampleRate = 48000
+        }
+        var graph = Graph(virtualDevices: [Demo.streamMix, Demo.chat])
+        let sink = Node(kind: .virtualDevice(Demo.streamMix.id), canvas: Demo.streamMix.id)
+        let chat = Node(kind: .device(DeviceRef(uid: Demo.chat.uid, name: "Chat", inputChannels: 2, outputChannels: 2)),
+                        canvas: Demo.streamMix.id)
+        let interface = Node(kind: .device(Demo.interface.ref), canvas: Demo.streamMix.id)
+        let mic = Node(kind: .defaultInput, canvas: Demo.streamMix.id)
+        graph.nodes = [sink, chat, interface, mic]
+        graph.cables = [chat, interface, mic].map { Cable(from: PortRef(node: $0.id, channel: 0), to: PortRef(node: sink.id, channel: 0)) }
+        let plan = try XCTUnwrap(Planner.plan(graph, inventory: inventory).sinks.first)
+        XCTAssertEqual(plan.subDevices.map(\.uid), [Demo.streamMix.uid, Demo.chat.uid, Demo.interface.uid, Demo.mic.uid])
+        XCTAssertEqual(plan.subDevices.map(\.sameClock), [true, true, false, false])
+        let list = SinkRunner.subDeviceList(plan)
+        XCTAssertNil(list[0][kAudioSubDeviceDriftCompensationKey], "the sink is the clock")
+        XCTAssertEqual(list[1][kAudioSubDeviceDriftCompensationKey] as? Int, 0, "no drift compensation on the same clock")
+        XCTAssertEqual(list[2][kAudioSubDeviceDriftCompensationKey] as? Int, 1)
+        XCTAssertEqual(list[3][kAudioSubDeviceDriftCompensationKey] as? Int, 1, "an unknown domain is compensated")
+
+        // A Junction device at another rate is converted as being on the same clock.
+        var otherRate = inventory
+        if let index = otherRate.devices.firstIndex(where: { $0.uid == Demo.chat.uid }) { otherRate.devices[index].sampleRate = 44100 }
+        let converting = try XCTUnwrap(Planner.plan(graph, inventory: otherRate).sinks.first)
+        XCTAssertEqual(converting.converted.map(\.uid), [Demo.chat.uid])
+        XCTAssertEqual(converting.converted.first?.sameClock, true)
+        XCTAssertNotEqual(converting.structureKey, plan.structureKey)
+        // Losing the shared domain rebuilds the sink with compensation.
+        var separate = inventory
+        if let index = separate.devices.firstIndex(where: { $0.uid == Demo.chat.uid }) { separate.devices[index].clockDomain = 0 }
+        let compensated = try XCTUnwrap(Planner.plan(graph, inventory: separate).sinks.first)
+        XCTAssertEqual(compensated.subDevices[1].sameClock, false)
+        XCTAssertNotEqual(compensated.structureKey, plan.structureKey)
     }
 
     func testGainsDoNotChangeStructure() throws {

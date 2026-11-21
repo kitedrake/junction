@@ -29,6 +29,12 @@ typedef struct JKConverter JKConverter;
 /// Returns NULL if memory runs out or an argument is out of range.
 JKConverter *_Nullable jk_converter_create(uint32_t channels, double inputRate, double outputRate);
 
+/// Marks the two devices as running on one clock (the same Core Audio clock domain, such as two of Junction's own
+/// devices): the ratio stays at exactly inputRate / outputRate instead of following measured rates and the ring's
+/// fill. Only call before either IOProc starts.
+void jk_converter_set_same_clock(JKConverter *_Nonnull converter, int sameClock);
+int jk_converter_same_clock(const JKConverter *_Nonnull converter);
+
 /// Frees the converter. Only call once neither IOProc uses it any more.
 void jk_converter_destroy(JKConverter *_Nonnull converter);
 

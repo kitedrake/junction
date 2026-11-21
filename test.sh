@@ -18,7 +18,8 @@ sanitize="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
 xcrun clang $sanitize -mmacosx-version-min=26.0 -O1 -Wall -Wextra -Werror -ISources/JunctionKernel/include -framework CoreAudio \
   Sources/JunctionKernel/*.c Tests/KernelHarness/stress.c -o "$tmp/kernel-stress"
 "$tmp/kernel-stress"
-mkdir -p "$tmp/JunctionDriver.driver/Contents/MacOS"
+mkdir -p "$tmp/JunctionDriver.driver/Contents/MacOS" "$tmp/JunctionDriver.driver/Contents/Resources"
+cp Driver/Icons/*.icns "$tmp/JunctionDriver.driver/Contents/Resources/"
 xcrun clang $sanitize -mmacosx-version-min=26.0 -bundle -O1 -Wall -Wextra -Werror -Wno-four-char-constants -fvisibility=hidden \
   -framework CoreAudio -framework CoreFoundation Driver/JunctionDriver.c -o "$tmp/JunctionDriver.driver/Contents/MacOS/JunctionDriver"
 sed -e "s/__VERSION__/$(cat Driver/VERSION)/" -e "s/__BUILD__/1/" Driver/Info.plist > "$tmp/JunctionDriver.driver/Contents/Info.plist"

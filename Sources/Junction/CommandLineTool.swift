@@ -107,6 +107,10 @@ enum CommandLineTool {
             check(types["443ABAB8-E7B3-491A-B985-BEB9187030DB"]?.contains(where: { factories[$0] != nil }) ?? false,
                   "driver registers as an AudioServerPlugIn")
             check(signatureIsValid(url), "driver is code-signed")
+            let icons = DeviceIcon.allCases.filter {
+                !FileManager.default.fileExists(atPath: url.appendingPathComponent("Contents/Resources/\($0.rawValue).icns").path)
+            }
+            check(icons.isEmpty, "driver carries its device icons" + (icons.isEmpty ? "" : " (missing: \(icons.map(\.rawValue)))"))
             var loaded = false
             if CFBundleLoadExecutable(bundle), let symbol = CFBundleGetFunctionPointerForName(bundle, "JunctionDriver_Create" as CFString) {
                 typealias Factory = @convention(c) (CFAllocator?, CFUUID) -> UnsafeMutableRawPointer?

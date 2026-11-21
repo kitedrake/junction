@@ -44,7 +44,7 @@ private struct Overview: View {
                 Help(symbol: "hand.draw", text: "Drag from a channel on the right of a node to a channel on the left of another to change the wiring.")
                 Help(symbol: "line.3.horizontal", text: "Drag the bar beside a node's title onto another node to connect all channels at once.")
                 Help(symbol: "cursorarrow.click", text: "To remove a cable, drag it off the channel it plugs into and let go on empty canvas, or click it and press Delete.")
-                Help(symbol: "mic", text: "Apps see each virtual device as a microphone (what you send into it) and as a speaker.")
+                Help(symbol: "mic", text: "Apps see each virtual device as a microphone (what you send into it) and as a speaker; its inspector can make it one or the other, or hide it.")
             }
             Button("Stream Without Chat…") { model.showStreamTemplate = true }
                 .buttonStyle(.glass)
@@ -97,6 +97,7 @@ private struct NodeInspector: View {
 
         if case .virtualDevice(let id) = node.kind, let device = model.graph.virtualDevice(id) {
             VirtualDeviceSettings(device: device)
+            VirtualDeviceLevels(device: device)
         }
 
         GroupBox {
@@ -173,7 +174,20 @@ private struct VirtualDeviceSettings: View {
                     set: { value in model.updateVirtualDevice(device.id) { $0.sampleRate = value } })) {
                     ForEach(VirtualDevice.sampleRateChoices, id: \.self) { Text(formatRate($0)).tag($0) }
                 }
-                Text("Apps list it as “\(device.name)” for both input and output. Anything sent into it comes back out, so a streaming or call app can record it.")
+                Picker("Apps see it as", selection: Binding(
+                    get: { device.direction },
+                    set: { value in model.updateVirtualDevice(device.id) { $0.direction = value } })) {
+                    ForEach(DeviceDirection.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                Picker("Icon", selection: Binding(
+                    get: { device.icon },
+                    set: { value in model.updateVirtualDevice(device.id) { $0.icon = value } })) {
+                    ForEach(DeviceIcon.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                Toggle("Hidden from apps", isOn: Binding(
+                    get: { device.isHidden },
+                    set: { value in model.updateVirtualDevice(device.id) { $0.isHidden = value } }))
+                Text(explanation)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -184,9 +198,102 @@ private struct VirtualDeviceSettings: View {
         }
     }
 
+    private var explanation: String {
+        let hidden = device.isHidden ? " It is hidden: apps don't list it, but Junction still routes it." : ""
+        switch device.direction {
+        case .both:
+            return "Apps list it as “\(device.name)” for both input and output. Anything sent into it comes back out, so a streaming or call app can record it." + hidden
+        case .inputOnly:
+            return "Apps list it as a microphone only: they record what this canvas sends into it." + hidden
+        case .outputOnly:
+            return "Apps list it as a speaker only: what they play into it comes out on the right of this canvas." + hidden
+        }
+    }
+
     private func commitName() {
         guard name != device.name else { return }
         model.updateVirtualDevice(device.id) { $0.name = name }
+    }
+}
+
+/// A virtual device's volume and mute per side apps see (Sound settings and the volume keys change them too), and
+/// its channel names.
+private struct VirtualDeviceLevels: View {
+    @Environment(AppModel.self) private var model
+    let device: VirtualDevice
+
+    var body: some View {
+        GroupBox("Volume") {
+            VStack(alignment: .leading, spacing: 10) {
+                if device.showsOutput {
+                    side("Played into it", volume: device.outputVolume, muted: device.outputMuted,
+                         setVolume: { value in model.updateVirtualDevice(device.id) { $0.outputVolume = value } },
+                         setMuted: { value in model.updateVirtualDevice(device.id) { $0.outputMuted = value } })
+                }
+                if device.showsInput {
+                    side("Recorded from it", volume: device.inputVolume, muted: device.inputMuted,
+                         setVolume: { value in model.updateVirtualDevice(device.id) { $0.inputVolume = value } },
+                         setMuted: { value in model.updateVirtualDevice(device.id) { $0.inputMuted = value } })
+                }
+                Text("The same volume apps and Sound settings show for “\(device.name)”.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        GroupBox("Channel names") {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(0..<min(device.channels, 16), id: \.self) { channel in
+                    ChannelNameField(device: device, channel: channel)
+                }
+                if device.channels > 16 {
+                    Text("Channels after 16 keep their numbers.").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .padding(6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func side(_ title: String, volume: Double, muted: Bool, setVolume: @escaping (Double) -> Void,
+                      setMuted: @escaping (Bool) -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(title)
+                Spacer()
+                Toggle("Mute", isOn: Binding(get: { muted }, set: setMuted))
+                    .controlSize(.small)
+            }
+            Slider(value: Binding(get: { volume }, set: { setVolume(($0 * 100).rounded() / 100) }), in: 0...1)
+                .controlSize(.small)
+                .disabled(muted)
+        }
+    }
+}
+
+private struct ChannelNameField: View {
+    @Environment(AppModel.self) private var model
+    let device: VirtualDevice
+    let channel: Int
+    @State private var text = ""
+
+    var body: some View {
+        LabeledContent(channelLabels(device.channels)[channel]) {
+            TextField("Name", text: $text, prompt: Text("None"))
+                .onSubmit { commit() }
+                .onChange(of: device.id, initial: true) { text = device.channelName(channel) ?? "" }
+                .onDisappear { commit() }
+        }
+    }
+
+    private func commit() {
+        guard text != (device.channelName(channel) ?? "") else { return }
+        model.updateVirtualDevice(device.id) { device in
+            while device.channelNames.count <= channel { device.channelNames.append("") }
+            device.channelNames[channel] = text
+        }
     }
 }
 
@@ -392,8 +499,7 @@ private struct CableInspector: View {
     let info = model.info
     func end(_ port: PortRef, output: Bool) -> String {
         guard let node = model.node(port.node) else { return "?" }
-        let ports = info.ports(node)
-        let labels = channelLabels(output ? ports.outputs : ports.inputs)
+        let labels = info.channelLabels(node, outputs: output)
         let label = port.channel < labels.count ? labels[port.channel] : "\(port.channel + 1)"
         return "\(info.title(node)) \(label)"
     }

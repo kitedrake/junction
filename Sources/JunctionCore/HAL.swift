@@ -96,20 +96,35 @@ public enum HAL {
     static let junctionModelUID = "local.junction.virtual-device"
     static let aggregateUIDPrefix = "local.junction.aggregate."
 
-    /// Reads devices, defaults and audio apps.
+    static func deviceInfo(_ id: AudioObjectID, uid: String) -> DeviceInfo {
+        DeviceInfo(
+            uid: uid, objectID: id, name: string(id, kAudioObjectPropertyName) ?? uid,
+            inputChannels: channelCount(id, kAudioObjectPropertyScopeInput),
+            outputChannels: channelCount(id, kAudioObjectPropertyScopeOutput),
+            sampleRate: value(id, kAudioDevicePropertyNominalSampleRate, default: Float64(0)),
+            isJunction: string(id, kAudioDevicePropertyModelUID) == junctionModelUID,
+            clockDomain: value(id, kAudioDevicePropertyClockDomain, default: UInt32(0)))
+    }
+
+    /// Reads devices, defaults and audio apps. Hidden devices are left out, except Junction's own (a virtual device
+    /// set to hidden, and the companions of one-sided devices): apps don't list them, Junction still routes them.
     public static func readInventory() -> Inventory {
         let system = AudioObjectID(kAudioObjectSystemObject)
         var devices: [DeviceInfo] = []
         for id in array(system, kAudioHardwarePropertyDevices, of: AudioObjectID.self) {
             guard let uid = string(id, kAudioDevicePropertyDeviceUID), !uid.hasPrefix(aggregateUIDPrefix) else { continue }
-            if value(id, kAudioDevicePropertyIsHidden, default: UInt32(0)) != 0 { continue }
-            let name = string(id, kAudioObjectPropertyName) ?? uid
-            devices.append(DeviceInfo(
-                uid: uid, objectID: id, name: name,
-                inputChannels: channelCount(id, kAudioObjectPropertyScopeInput),
-                outputChannels: channelCount(id, kAudioObjectPropertyScopeOutput),
-                sampleRate: value(id, kAudioDevicePropertyNominalSampleRate, default: Float64(0)),
-                isJunction: string(id, kAudioDevicePropertyModelUID) == junctionModelUID))
+            let info = deviceInfo(id, uid: uid)
+            if value(id, kAudioDevicePropertyIsHidden, default: UInt32(0)) != 0, !info.isJunction { continue }
+            devices.append(info)
+        }
+        // Hidden devices are only found by their UID.
+        for entry in DriverClient.publishedConfiguration() ?? [] {
+            guard let uid = entry["uid"] as? String else { continue }
+            for candidate in [uid, uid + VirtualDevice.companionSuffix] where !devices.contains(where: { $0.uid == candidate }) {
+                guard let id = deviceID(forUID: candidate) else { continue }
+                let info = deviceInfo(id, uid: candidate)
+                if info.isJunction { devices.append(info) }
+            }
         }
         let defaultOutput = value(system, kAudioHardwarePropertyDefaultOutputDevice, default: AudioObjectID(kAudioObjectUnknown))
         let defaultInput = value(system, kAudioHardwarePropertyDefaultInputDevice, default: AudioObjectID(kAudioObjectUnknown))

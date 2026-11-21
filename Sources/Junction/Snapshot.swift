@@ -10,8 +10,10 @@ enum Demo {
     static let installedChatApps: Set<String> = ["com.hnc.Discord", "us.zoom.xos", "com.apple.FaceTime"]
 
     @MainActor static func load(into model: AppModel) {
-        let stream = VirtualDevice(name: "Stream Mix")
-        let recording = VirtualDevice(name: "Recording", channels: 4)
+        let stream = VirtualDevice(name: "Stream Mix", icon: .stream)
+        // A microphone only, for a recording app, with its channels named.
+        let recording = VirtualDevice(name: "Recording", channels: 4, direction: .inputOnly,
+                                      channelNames: ["Voice", "Voice", "Chat L", "Chat R"], icon: .microphone)
         // At 44.1 kHz, so the canvas shows Stream Mix's 48 kHz being converted for them.
         let headphones = DeviceInfo(uid: "demo.headphones", name: "AirPods Pro", inputChannels: 1, outputChannels: 2,
                                     sampleRate: 44100)
@@ -44,8 +46,12 @@ enum Demo {
                 DeviceInfo(uid: "demo.mic", name: "MacBook Pro Microphone", inputChannels: 1, outputChannels: 0),
                 DeviceInfo(uid: "demo.interface", name: "Scarlett 2i2 USB", inputChannels: 2, outputChannels: 2),
                 headphones,
-                DeviceInfo(uid: stream.uid, name: stream.name, inputChannels: 2, outputChannels: 2, isJunction: true),
-                DeviceInfo(uid: recording.uid, name: recording.name, inputChannels: 4, outputChannels: 4, isJunction: true),
+                DeviceInfo(uid: stream.uid, name: stream.name, inputChannels: 2, outputChannels: 2, isJunction: true,
+                           clockDomain: 0x6A6E_6374),
+                DeviceInfo(uid: recording.uid, name: recording.name, inputChannels: 4, outputChannels: 0, isJunction: true,
+                           clockDomain: 0x6A6E_6374),
+                DeviceInfo(uid: recording.companionUID, name: "Recording (Junction routing)", inputChannels: 0,
+                           outputChannels: 4, isJunction: true, clockDomain: 0x6A6E_6374),
             ],
             apps: [
                 AudioApp(bundleID: discord.bundleID, name: "Discord", isPlaying: true),
@@ -53,7 +59,7 @@ enum Demo {
                 AudioApp(bundleID: "com.apple.Safari", name: "Safari"),
             ],
             defaultOutputUID: "demo.speakers", defaultInputUID: "demo.mic",
-            driver: .installed(version: DriverClient.bundledVersion ?? "0.1.1"))
+            driver: .installed(version: DriverClient.bundledVersion ?? "0.2.0"))
         let running = SinkStatus(state: .running, latency: 0.0117, bufferFrames: 512)
         var meters: [PortKey: Float] = [:]
         func meter(_ node: Node, _ output: Bool, _ values: [Float]) {

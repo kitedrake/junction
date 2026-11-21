@@ -51,10 +51,12 @@ sign_code() {
   esac
 }
 
-# 1. The HAL driver: a plain C bundle for Apple silicon and Intel.
+# 1. The HAL driver: a plain C bundle for Apple silicon and Intel, with the device icons it offers
+#    (Driver/Icons, made by scripts/make-driver-icons.swift).
 driver="build/JunctionDriver.driver"
 rm -rf "$driver"
-mkdir -p "$driver/Contents/MacOS"
+mkdir -p "$driver/Contents/MacOS" "$driver/Contents/Resources"
+cp Driver/Icons/*.icns "$driver/Contents/Resources/"
 xcrun clang -arch arm64 -arch x86_64 -mmacosx-version-min=26.0 -bundle -O2 -Wall -Wextra -Werror -Wno-four-char-constants \
   -fvisibility=hidden -framework CoreAudio -framework CoreFoundation \
   Driver/JunctionDriver.c -o "$driver/Contents/MacOS/JunctionDriver"

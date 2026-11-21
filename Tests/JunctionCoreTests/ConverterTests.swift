@@ -197,6 +197,26 @@ final class ConverterTests: XCTestCase {
         zip(samples, samples.dropFirst()).map { abs($1 - $0) }.max() ?? 0
     }
 
+    func testSameClockKeepsTheNominalRatio() throws {
+        // Time stamps that make the source look 0.5 % fast: a converter on two clocks follows them, one on a shared
+        // clock (two of Junction's own devices) keeps the exact nominal ratio and still plays without gaps.
+        let clocks = Clocks(inputRate: 44100, outputRate: 48000, drift: 0.005)
+        let separate = try XCTUnwrap(jk_converter_create(1, 44100, 48000))
+        let shared = try XCTUnwrap(jk_converter_create(1, 44100, 48000))
+        defer { jk_converter_destroy(separate); jk_converter_destroy(shared) }
+        jk_converter_set_same_clock(shared, 1)
+        XCTAssertEqual(jk_converter_same_clock(shared), 1)
+        XCTAssertEqual(jk_converter_same_clock(separate), 0)
+        let tone: (Int, Int) -> Float = { n, _ in Float(sin(Double(n) * 2 * .pi * 440 / 44100)) * 0.5 }
+        _ = Self.run(separate, clocks, seconds: 4, signal: tone)
+        let run = Self.run(shared, Clocks(inputRate: 44100, outputRate: 48000), seconds: 4, signal: tone)
+        XCTAssertEqual(jk_converter_ratio(shared), 44100.0 / 48000.0, "the shared clock keeps the nominal ratio exactly")
+        XCTAssertGreaterThan(jk_converter_ratio(separate), 44100.0 / 48000.0 * 1.003, "separate clocks follow the measured rate")
+        XCTAssertEqual(jk_converter_underrun_count(shared), 0)
+        XCTAssertEqual(jk_converter_overrun_count(shared), 0)
+        XCTAssertGreaterThan(run.output.suffix(48000).map(abs).max() ?? 0, 0.4, "the tone comes through")
+    }
+
     func testUnderrunsAndOverrunsFadeInsteadOfClicking() throws {
         let clocks = Clocks(inputRate: 48000, outputRate: 44100, writeFrames: 512, readFrames: 256)
         let converter = try XCTUnwrap(jk_converter_create(1, 48000, 44100))

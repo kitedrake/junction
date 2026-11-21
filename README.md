@@ -7,6 +7,9 @@ interfaces into them, each on its own node-and-cable canvas.
 without your voice chat, step by step.
 
 - **Virtual devices** (sidebar): create, rename, set 1–64 channels and a sample rate, and switch each one on or off.
+  Each one can also show apps only one side (**input only**: a microphone; **output only**: a speaker), be hidden
+  from apps' device lists, name its channels, and pick an icon (shown in Audio MIDI Setup). Its volume and mute per
+  side are the ones Sound settings and the volume keys change; Junction shows and sets them in the inspector.
   Every app sees an enabled device as both a microphone and a speaker. Anything sent into it comes back out, so a
   streaming, call or recording app can record what Junction (or another app) plays into it.
 - **A canvas per device**: pick a virtual device in the sidebar to see its canvas. Sources on the left feed it;
@@ -150,8 +153,12 @@ JUNCTION_SNAPSHOT=/tmp/shots build/Junction.app/Contents/MacOS/Junction   # demo
 The kernel stress test (`Tests/KernelHarness/stress.c`) runs the sample-rate converter and the renderer under
 address and undefined-behaviour sanitizers with random buffer sizes, stalls on either side and every pair of common
 rates. The driver harness (`Tests/DriverHarness/harness.c`) loads the driver into a test process with a stand-in Core Audio
-host and checks the device list, properties, configuration changes, saved state across a simulated restart and
-bit-exact loopback. `--loopback-test` is the real-system check: it adds a temporary device, plays 997 Hz into it,
+host and checks the device list, properties, configuration changes, saved state across a simulated restart (also a
+list saved by driver 0.1), bit-exact loopback, the volume and mute controls with their ramp, directions and their
+hidden companions, channel names, icons, hidden devices, property-change notifications, and the shared clock (same
+clock domain and identical zero time stamps over many periods, also for a device added later or reformatted). The
+driver's device icons are drawn by `scripts/make-driver-icons.swift` into `Driver/Icons`; `build.sh` copies them
+into the driver bundle. `--loopback-test` is the real-system check: it adds a temporary device, plays 997 Hz into it,
 records its input, and restores the device list. It needs microphone permission for the app running it (Terminal).
 `--device-test` checks that Core Audio follows the driver (a temporary device appears, is renamed, changes channels
 and rate, reports a rate set from outside, disappears and returns); it opens no audio and needs no permission.
@@ -204,7 +211,9 @@ system-audio permissions and **Install Driver…** with the first one.
   or left out together.
 - Cross-fading a rebuilt sink (when cables are added or removed) hasn't been tried with real audio yet.
 - Routing stops when Junction quits; it keeps running from the menu bar when the window is closed.
-- Virtual devices have no volume control yet, so the keyboard volume keys don't change them.
+- A one-sided or hidden device keeps working inside Junction through a hidden companion device (`<uid>.routing`)
+  that the driver publishes only for Junction. Whether every app honours the hidden flag and the channel names
+  hasn't been checked on a real Mac yet.
 - Virtual devices can't feed each other; to use the same source in two devices, add it to both canvases.
 - A virtual device's sample rate can also be set by other apps (Audio MIDI Setup, a DAW), and macOS puts back the rate
   it remembers for a device when it appears. Junction insists on its own rate for a few seconds after you create, turn

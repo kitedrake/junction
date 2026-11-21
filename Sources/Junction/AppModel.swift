@@ -70,6 +70,10 @@ final class AppModel {
     @ObservationIgnored private var started = false
     /// Virtual devices Junction just created, turned on or reformatted, and until when its own sample rate wins.
     @ObservationIgnored private var assertRateUntil: [UUID: Date] = [:]
+    /// Virtual devices whose volume or mute Junction just changed, and until when its own values win.
+    @ObservationIgnored private var assertControlsUntil: [UUID: Date] = [:]
+    /// Tells when the driver changes its list by itself (a volume set in Sound settings).
+    @ObservationIgnored private var configWatcher: DriverClient.ConfigWatcher?
     private static let log = Logger(subsystem: "local.junction", category: "routing")
 
     init(demo: Bool) {
@@ -100,13 +104,14 @@ final class AppModel {
             Task { @MainActor in AppModel.shared.statuses = statuses }
         }
         self.router = router
-        // Rates changed from outside while Junction wasn't running (Audio MIDI Setup, a DAW) are kept.
+        // Rates, volumes and mutes changed from outside while Junction wasn't running (Audio MIDI Setup, a DAW, Sound
+        // settings) are kept.
         if let published = DriverClient.publishedDevices() {
             var adopted = graph
             for index in adopted.virtualDevices.indices {
-                guard let live = published.first(where: { $0.id == adopted.virtualDevices[index].id }),
-                      VirtualDevice.sampleRateChoices.contains(live.sampleRate) else { continue }
-                adopted.virtualDevices[index].sampleRate = live.sampleRate
+                guard let live = published.first(where: { $0.id == adopted.virtualDevices[index].id }) else { continue }
+                if VirtualDevice.sampleRateChoices.contains(live.sampleRate) { adopted.virtualDevices[index].sampleRate = live.sampleRate }
+                if driverReportsControls { Self.adoptControls(of: live, into: &adopted.virtualDevices[index]) }
             }
             if adopted != graph { graph = adopted }
         }
@@ -176,6 +181,11 @@ final class AppModel {
             }
             if old.isRoutingOn != graph.isRoutingOn { note(graph.isRoutingOn ? "Routing turned on" : "Routing turned off") }
             if old.virtualDevices != graph.virtualDevices {
+                let until = Date().addingTimeInterval(3)
+                for device in graph.virtualDevices {
+                    guard let before = old.virtualDevice(device.id), !Self.sameControls(device, before) else { continue }
+                    assertControlsUntil[device.id] = until
+                }
                 let changed = graph.virtualDevices.filter { device in
                     guard let before = old.virtualDevice(device.id) else { return true }
                     return (device.isEnabled && !before.isEnabled) || device.sampleRate != before.sampleRate
@@ -230,7 +240,10 @@ final class AppModel {
     func refreshInventory() {
         guard !isDemo else { return }
         let fresh = HAL.readInventory()
-        guard fresh != inventory else { return }
+        guard fresh != inventory else {
+            reconcileControls()
+            return
+        }
         let driverAppeared = !inventory.driver.isInstalled && fresh.driver.isInstalled
         inventory = fresh
         // Remember the current shape of devices on the canvas, for when they are unplugged.
@@ -240,6 +253,11 @@ final class AppModel {
             updated.nodes[index].kind = .device(live.ref)
         }
         if updated != graph { graph = updated }
+        if fresh.driver.isInstalled, configWatcher == nil {
+            configWatcher = DriverClient.ConfigWatcher(queue: .main) {
+                Task { @MainActor in AppModel.shared.scheduleRefresh() }
+            }
+        }
         if driverAppeared {
             // Devices the driver doesn't have yet will appear now; Core Audio may give them a remembered rate.
             let published = Set((DriverClient.publishedDevices() ?? []).map(\.id))
@@ -247,6 +265,43 @@ final class AppModel {
         }
         replan()
         reconcileSampleRates()
+        reconcileControls()
+    }
+
+    /// Driver 0.2 and newer report volume and mute; older ones don't have them.
+    private var driverReportsControls: Bool {
+        let driver = inventory.driver.isInstalled ? inventory.driver : DriverClient.status()
+        guard case .installed(let version) = driver else { return false }
+        return DriverUpdate.compare(version, "0.2.0").map { $0 != .orderedAscending } ?? false
+    }
+
+    private static func sameControls(_ a: VirtualDevice, _ b: VirtualDevice) -> Bool {
+        a.outputVolume == b.outputVolume && a.outputMuted == b.outputMuted && a.inputVolume == b.inputVolume
+            && a.inputMuted == b.inputMuted
+    }
+
+    private static func adoptControls(of live: VirtualDevice, into device: inout VirtualDevice) {
+        device.outputVolume = live.outputVolume
+        device.outputMuted = live.outputMuted
+        device.inputVolume = live.inputVolume
+        device.inputMuted = live.inputMuted
+    }
+
+    /// Volume and mute can change outside Junction (Sound settings, the volume keys, Audio MIDI Setup): the driver
+    /// keeps them in its list, and Junction takes them over, except shortly after changing them itself.
+    private func reconcileControls() {
+        guard !isDemo, inventory.driver.isInstalled, driverReportsControls,
+              let published = DriverClient.publishedDevices() else { return }
+        let now = Date()
+        assertControlsUntil = assertControlsUntil.filter { $0.value > now }
+        var adopted = graph
+        for index in adopted.virtualDevices.indices {
+            let device = adopted.virtualDevices[index]
+            guard device.isEnabled, assertControlsUntil[device.id] == nil,
+                  let live = published.first(where: { $0.id == device.id }), !Self.sameControls(device, live) else { continue }
+            Self.adoptControls(of: live, into: &adopted.virtualDevices[index])
+        }
+        if adopted != graph { graph = adopted }
     }
 
     /// Core Audio can change a virtual device's sample rate behind Junction's back: when a device appears it puts back
@@ -304,6 +359,7 @@ final class AppModel {
         note("Core Audio restarted; rebuilding routing", .warning)
         router?.forgetAfterRestart()  // at once, so no refresh in between tries to stop the dead sinks
         watchedUIDs = []  // device IDs change: listen again on the next plan
+        configWatcher = nil
         restartTask?.cancel()
         restartTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(1.5))

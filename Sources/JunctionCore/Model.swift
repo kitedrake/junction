@@ -18,21 +18,109 @@ public struct VirtualDevice: Codable, Identifiable, Hashable, Sendable {
     public var channels: Int
     public var sampleRate: Double
     public var isEnabled: Bool
+    /// Which sides apps see. Junction itself always reaches both (through the hidden companion device).
+    public var direction: DeviceDirection
+    /// A name per channel, shown by apps that list channels ("" or missing: no name).
+    public var channelNames: [String]
+    /// The picture apps such as Audio MIDI Setup show for it.
+    public var icon: DeviceIcon
+    /// Left out of apps' device lists (Junction still uses it).
+    public var isHidden: Bool
+    /// Volume (0…1) and mute of what is played into it (output) and recorded from it (input). Sound settings and the
+    /// volume keys change them too; Junction reads them back from the driver.
+    public var outputVolume: Double
+    public var outputMuted: Bool
+    public var inputVolume: Double
+    public var inputMuted: Bool
 
-    public init(id: UUID = UUID(), name: String, channels: Int = 2, sampleRate: Double = 48000, isEnabled: Bool = true) {
+    public init(id: UUID = UUID(), name: String, channels: Int = 2, sampleRate: Double = 48000, isEnabled: Bool = true,
+                direction: DeviceDirection = .both, channelNames: [String] = [], icon: DeviceIcon = .junction,
+                isHidden: Bool = false, outputVolume: Double = 1, outputMuted: Bool = false, inputVolume: Double = 1,
+                inputMuted: Bool = false) {
         self.id = id
         self.name = name
         self.channels = channels
         self.sampleRate = sampleRate
         self.isEnabled = isEnabled
+        self.direction = direction
+        self.channelNames = channelNames
+        self.icon = icon
+        self.isHidden = isHidden
+        self.outputVolume = outputVolume
+        self.outputMuted = outputMuted
+        self.inputVolume = inputVolume
+        self.inputMuted = inputMuted
+    }
+
+    /// Files before schema 4 have only the first five fields; the rest take their defaults (see `Graph.upgrade`).
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        name = try values.decode(String.self, forKey: .name)
+        channels = try values.decode(Int.self, forKey: .channels)
+        sampleRate = try values.decode(Double.self, forKey: .sampleRate)
+        isEnabled = try values.decode(Bool.self, forKey: .isEnabled)
+        direction = try values.decodeIfPresent(DeviceDirection.self, forKey: .direction) ?? .both
+        channelNames = try values.decodeIfPresent([String].self, forKey: .channelNames) ?? []
+        icon = try values.decodeIfPresent(DeviceIcon.self, forKey: .icon) ?? .junction
+        isHidden = try values.decodeIfPresent(Bool.self, forKey: .isHidden) ?? false
+        outputVolume = try values.decodeIfPresent(Double.self, forKey: .outputVolume) ?? 1
+        outputMuted = try values.decodeIfPresent(Bool.self, forKey: .outputMuted) ?? false
+        inputVolume = try values.decodeIfPresent(Double.self, forKey: .inputVolume) ?? 1
+        inputMuted = try values.decodeIfPresent(Bool.self, forKey: .inputMuted) ?? false
     }
 
     /// The Core Audio device UID; apps that remember a chosen device find it again by this.
     public var uid: String { "junction.\(id.uuidString.lowercased())" }
 
+    /// The hidden companion the driver publishes when apps see only one side: it carries the other side, so Junction
+    /// can still feed an input-only device or record an output-only one.
+    public var companionUID: String { uid + VirtualDevice.companionSuffix }
+    public static let companionSuffix = ".routing"
+
+    /// The device Junction plays into (its feed) and the one it records from (what comes out of it).
+    public var feedUID: String { direction == .inputOnly ? companionUID : uid }
+    public var returnUID: String { direction == .outputOnly ? companionUID : uid }
+
+    /// The name of a channel (0-based), or nil when it has none.
+    public func channelName(_ channel: Int) -> String? {
+        guard channel >= 0, channel < min(channels, channelNames.count) else { return nil }
+        let name = channelNames[channel].trimmingCharacters(in: .whitespaces)
+        return name.isEmpty ? nil : name
+    }
+
+    /// Whether apps see a side (and it has a volume and mute).
+    public var showsOutput: Bool { direction != .inputOnly }
+    public var showsInput: Bool { direction != .outputOnly }
+
     public static let channelChoices = [1, 2, 4, 6, 8, 16, 32, 64]
     public static let sampleRateChoices: [Double] = [44100, 48000, 88200, 96000, 176400, 192000]
     public static let maximumCount = 32
+}
+
+/// Which sides of a virtual device apps see.
+public enum DeviceDirection: String, Codable, CaseIterable, Sendable {
+    /// A microphone and a speaker.
+    case both
+    /// A microphone only: apps record what Junction sends into it.
+    case inputOnly = "input"
+    /// A speaker only: apps play into it and Junction picks the sound up.
+    case outputOnly = "output"
+
+    public var title: String {
+        switch self {
+        case .both: "Input and output"
+        case .inputOnly: "Input only"
+        case .outputOnly: "Output only"
+        }
+    }
+}
+
+/// The icons bundled in the driver (`Driver/Icons`).
+public enum DeviceIcon: String, Codable, CaseIterable, Sendable {
+    case junction, microphone, speaker, headphones, stream
+
+    public var title: String { rawValue == "junction" ? "Junction" : rawValue.capitalized }
 }
 
 /// An application, by bundle identifier (its helper processes count as part of it).
@@ -182,7 +270,8 @@ public struct Cable: Codable, Identifiable, Hashable, Sendable {
 public struct Graph: Codable, Equatable, Sendable {
     /// 1: one shared canvas. 2: a canvas per virtual device. 3: nodes can set a buffer size (`Node.bufferFrames`;
     /// absent in older files, which means macOS's default). 4: receiving nodes choose sample-rate conversion
-    /// (`Node.rateConversion`).
+    /// (`Node.rateConversion`), and virtual devices have a direction, channel names, an icon, a hidden switch and a
+    /// volume and mute per side.
     public static let currentSchema = 4
     public var schema = Graph.currentSchema
     public var virtualDevices: [VirtualDevice] = []
@@ -226,11 +315,14 @@ public struct Graph: Codable, Equatable, Sendable {
         virtualDevices.removeAll { $0.id == id }
     }
 
-    /// Brings a loaded graph up to date: converts the shared canvas of schema 1, turns on sample-rate conversion for
-    /// files from before it existed, then tidies the canvases.
+    /// Brings a loaded graph up to date: converts the shared canvas of schema 1, turns on sample-rate conversion and
+    /// sets the device options for files from before they existed, then tidies the canvases.
     public mutating func upgrade() {
         if schema < 2 { moveToCanvases() }
-        if schema < 4 { convertRates() }
+        if schema < 4 {
+            convertRates()
+            convertDevices()
+        }
         schema = Graph.currentSchema
         tidyCanvases()
     }
@@ -277,6 +369,17 @@ public struct Graph: Codable, Equatable, Sendable {
     /// Their nodes get the new default, Automatic, so those devices are converted from now on.
     mutating func convertRates() {
         for index in nodes.indices { nodes[index].rateConversion = .automatic }
+    }
+
+    /// Schema 3 and older had no device options: every device showed apps both sides, under the Junction icon, at full
+    /// volume. Decoding already gives those defaults; this states them, so a file that has them half (written by a
+    /// development build) loads the same way.
+    mutating func convertDevices() {
+        for index in virtualDevices.indices {
+            let device = virtualDevices[index]
+            virtualDevices[index] = VirtualDevice(id: device.id, name: device.name, channels: device.channels,
+                                                  sampleRate: device.sampleRate, isEnabled: device.isEnabled)
+        }
     }
 
     /// Keeps the canvases consistent: every virtual device has exactly one device node on its own canvas; nodes on no

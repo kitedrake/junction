@@ -3,8 +3,9 @@ import Foundation
 // Turns the graph into what the router builds. Every node that receives cables (a "sink") becomes one private
 // aggregate device: the sink's device first (it is the clock), then every source device, then one process tap per
 // app/system-audio source. Core Audio keeps the clocks in step (drift compensation), so the render callback only
-// copies channels with gains. A source device at another nominal sample rate stays out of the aggregate when the
-// sink's conversion is Automatic: it runs on its own IOProc and the kernel converts it to the sink's rate.
+// copies channels with gains; devices in the sink's clock domain (Junction's own devices share one) need none. A
+// source device at another nominal sample rate stays out of the aggregate when the sink's conversion is Automatic:
+// it runs on its own IOProc and the kernel converts it to the sink's rate.
 
 public struct RoutingPlan: Equatable, Sendable {
     public var sinks: [SinkPlan] = []
@@ -49,7 +50,8 @@ public struct SinkPlan: Equatable, Sendable, Identifiable {
     /// Everything that needs a rebuild when it changes (gains don't), including which devices are converted.
     public var structureKey: String {
         func key(_ devices: [SubDevice]) -> String {
-            devices.map { "\($0.uid):\($0.inputChannels):\($0.outputChannels)@\($0.sampleRate)" }.joined(separator: ",")
+            devices.map { "\($0.uid):\($0.inputChannels):\($0.outputChannels)@\($0.sampleRate)\($0.sameClock ? "=" : "~")" }
+                .joined(separator: ",")
         }
         let tapKeys = taps.map { "\($0.node.uuidString):\($0.mode):\($0.mutesOriginal)" }.joined(separator: ",")
         let routeKeys = routes.map { "\($0.input)>\($0.output)" }.joined(separator: ",")
@@ -97,6 +99,9 @@ public struct SubDevice: Equatable, Sendable {
     public var outputChannels: Int
     /// Part of the structure: an aggregate is rebuilt when one of its devices changes rate.
     public var sampleRate: Double
+    /// In the sink's clock domain: joins the aggregate without drift compensation, or is converted at the exact
+    /// nominal ratio.
+    public var sameClock = false
 }
 
 public enum TapMode: Equatable, Sendable, CustomStringConvertible {
@@ -138,7 +143,12 @@ public enum Planner {
             plan.idleCables = Set(graph.cables.map(\.id))
             return plan
         }
+        // A virtual device and its hidden companion are one loopback: the loop guard counts them as one.
         let loopbacks = Set(inventory.devices.filter(\.isJunction).map(\.uid))
+        func loopback(_ uid: String) -> String {
+            uid.hasSuffix(VirtualDevice.companionSuffix) && loopbacks.contains(uid)
+                ? String(uid.dropLast(VirtualDevice.companionSuffix.count)) : uid
+        }
         var feeds: [String: Set<String>] = [:]  // loopback device → loopback devices it is routed into
 
         func reaches(_ start: String, _ target: String) -> Bool {
@@ -154,14 +164,15 @@ public enum Planner {
         for sink in graph.nodes {
             let cables = graph.cables.filter { $0.to.node == sink.id }
             guard !cables.isEmpty else { continue }
-            guard let sinkUID = info.deviceUID(sink), let sinkDevice = inventory.device(sinkUID), sinkDevice.outputChannels > 0
+            guard let sinkUID = info.feedUID(sink), let sinkDevice = inventory.device(sinkUID), sinkDevice.outputChannels > 0
             else {
                 plan.note(sink.id, unavailableReason(sink, graph: graph, inventory: inventory))
                 plan.idleCables.formUnion(cables.map(\.id))
                 continue
             }
             var subDevices = [SubDevice(uid: sinkUID, inputChannels: sinkDevice.inputChannels,
-                                        outputChannels: sinkDevice.outputChannels, sampleRate: sinkDevice.sampleRate)]
+                                        outputChannels: sinkDevice.outputChannels, sampleRate: sinkDevice.sampleRate,
+                                        sameClock: true)]
             var taps: [TapPlan] = []
             var converted: [SubDevice] = []
             enum Origin { case device(String), tap(Int), converted(String) }
@@ -183,7 +194,7 @@ public enum Planner {
                     let index = tapIndex(&taps, source, name: "System Audio", mode: .allExcept(excluded.map(\.bundleID)))
                     pending.append((cable, .tap(index), gain))
                 default:
-                    guard let uid = info.deviceUID(source), let device = inventory.device(uid),
+                    guard let uid = info.returnUID(source), let device = inventory.device(uid),
                           cable.from.channel < device.inputChannels
                     else {
                         plan.note(source.id, unavailableReason(source, graph: graph, inventory: inventory))
@@ -191,18 +202,21 @@ public enum Planner {
                         continue
                     }
                     if loopbacks.contains(uid), loopbacks.contains(sinkUID) {
-                        if uid == sinkUID || reaches(sinkUID, uid) {
+                        let from = loopback(uid), into = loopback(sinkUID)
+                        if from == into || reaches(into, from) {
                             plan.note(sink.id, "A cable into \(info.title(sink)) would feed its own audio back into it, so it is not used.")
                             plan.idleCables.insert(cable.id)
                             continue
                         }
-                        feeds[uid, default: []].insert(sinkUID)
+                        feeds[from, default: []].insert(into)
                     }
+                    let sameClock = device.sharesClock(with: sinkDevice)
                     let mismatched = device.sampleRate != sinkDevice.sampleRate && device.sampleRate > 0 && sinkDevice.sampleRate > 0
                     if mismatched, sink.rateConversion == .automatic {
                         if !converted.contains(where: { $0.uid == uid }) {
                             converted.append(SubDevice(uid: uid, inputChannels: device.inputChannels,
-                                                       outputChannels: device.outputChannels, sampleRate: device.sampleRate))
+                                                       outputChannels: device.outputChannels, sampleRate: device.sampleRate,
+                                                       sameClock: sameClock))
                         }
                         // A source is converted to its sink's rate; an output fed by its virtual device shows the
                         // conversion on itself (the virtual device has more than one output).
@@ -218,7 +232,8 @@ public enum Planner {
                     }
                     if !subDevices.contains(where: { $0.uid == uid }) {
                         subDevices.append(SubDevice(uid: uid, inputChannels: device.inputChannels,
-                                                    outputChannels: device.outputChannels, sampleRate: device.sampleRate))
+                                                    outputChannels: device.outputChannels, sampleRate: device.sampleRate,
+                                                    sameClock: sameClock))
                     }
                     if mismatched {
                         plan.note(source.id, "Runs at \(formatSampleRate(device.sampleRate)) while \(info.title(sink)) runs at \(formatSampleRate(sinkDevice.sampleRate)), and sample-rate conversion is off. Set both to the same rate in Audio MIDI Setup, or turn conversion back to Automatic in \(info.title(sink))'s inspector.")

@@ -41,21 +41,61 @@ public enum DriverClient {
         publishedConfiguration().map(devices(from:))
     }
 
+    /// Reads the driver's list. Driver 0.1 reports only uid, name, channels and sample rate; the other settings then
+    /// keep their defaults.
     static func devices(from configuration: [[String: Any]]) -> [VirtualDevice] {
         configuration.compactMap { entry in
             guard let uid = entry["uid"] as? String, uid.hasPrefix("junction."),
                   let id = UUID(uuidString: String(uid.dropFirst("junction.".count)))
             else { return nil }
+            func number(_ key: String, _ fallback: Double) -> Double { (entry[key] as? NSNumber)?.doubleValue ?? fallback }
+            func flag(_ key: String) -> Bool { (entry[key] as? NSNumber)?.boolValue ?? false }
             return VirtualDevice(id: id, name: entry["name"] as? String ?? "Virtual Device",
-                                 channels: (entry["channels"] as? NSNumber)?.intValue ?? 2,
-                                 sampleRate: (entry["sampleRate"] as? NSNumber)?.doubleValue ?? 48000)
+                                 channels: Int(number("channels", 2)), sampleRate: number("sampleRate", 48000),
+                                 direction: (entry["direction"] as? String).flatMap(DeviceDirection.init(rawValue:)) ?? .both,
+                                 channelNames: entry["channelNames"] as? [String] ?? [],
+                                 icon: (entry["icon"] as? String).flatMap(DeviceIcon.init(rawValue:)) ?? .junction,
+                                 isHidden: flag("hidden"), outputVolume: number("outputVolume", 1), outputMuted: flag("outputMute"),
+                                 inputVolume: number("inputVolume", 1), inputMuted: flag("inputMute"))
         }
     }
 
-    /// The configuration the driver should publish: the enabled virtual devices, in order.
+    /// The configuration the driver should publish: the enabled virtual devices, in order, in the form the driver
+    /// reports back (so an unchanged list isn't sent again).
     public static func configuration(for devices: [VirtualDevice]) -> [[String: Any]] {
-        devices.filter(\.isEnabled).prefix(VirtualDevice.maximumCount).map {
-            ["uid": $0.uid, "name": $0.name, "channels": $0.channels, "sampleRate": $0.sampleRate]
+        devices.filter(\.isEnabled).prefix(VirtualDevice.maximumCount).map { device in
+            var names = Array(device.channelNames.prefix(device.channels))
+            while names.last?.isEmpty == true { names.removeLast() }
+            return [
+                "uid": device.uid, "name": device.name, "channels": device.channels, "sampleRate": device.sampleRate,
+                "direction": device.direction.rawValue, "channelNames": names, "icon": device.icon.rawValue,
+                "hidden": device.isHidden, "outputVolume": min(max(device.outputVolume, 0), 1),
+                "outputMute": device.outputMuted, "inputVolume": min(max(device.inputVolume, 0), 1),
+                "inputMute": device.inputMuted,
+            ]
+        }
+    }
+
+    /// Calls `handler` on `queue` when the driver reports that its list changed by itself (a volume or mute set in
+    /// Sound settings, a sample rate set elsewhere). Keep the returned object alive; make a new one after Core Audio
+    /// restarts.
+    public final class ConfigWatcher: @unchecked Sendable {
+        private let queue: DispatchQueue
+        private let block: AudioObjectPropertyListenerBlock
+        private let plugIn: AudioObjectID
+
+        public init?(queue: DispatchQueue, handler: @escaping @Sendable () -> Void) {
+            guard let plugIn = DriverClient.plugIn() else { return nil }
+            self.plugIn = plugIn
+            self.queue = queue
+            block = { _, _ in handler() }
+            var address = HAL.address(configSelector)
+            guard AudioObjectAddPropertyListenerBlock(plugIn, &address, queue, block) == noErr else { return nil }
+        }
+
+        deinit {
+            var address = HAL.address(configSelector)
+            AudioObjectRemovePropertyListenerBlock(plugIn, &address, queue, block)
         }
     }
 

@@ -39,11 +39,13 @@ public struct DeviceInfo: Hashable, Sendable, Identifiable {
     public var sampleRate: Double
     /// Published by Junction's driver.
     public var isJunction: Bool
+    /// Core Audio's clock domain (0: not known). Devices in the same nonzero domain share one clock and never drift.
+    public var clockDomain: UInt32
 
     public var id: String { uid }
 
     public init(uid: String, objectID: AudioObjectID = 0, name: String, inputChannels: Int, outputChannels: Int,
-                sampleRate: Double = 48000, isJunction: Bool = false) {
+                sampleRate: Double = 48000, isJunction: Bool = false, clockDomain: UInt32 = 0) {
         self.uid = uid
         self.objectID = objectID
         self.name = name
@@ -51,6 +53,12 @@ public struct DeviceInfo: Hashable, Sendable, Identifiable {
         self.outputChannels = outputChannels
         self.sampleRate = sampleRate
         self.isJunction = isJunction
+        self.clockDomain = clockDomain
+    }
+
+    /// Whether this device runs on the same clock as `other`.
+    public func sharesClock(with other: DeviceInfo) -> Bool {
+        clockDomain != 0 && clockDomain == other.clockDomain
     }
 
     public var ref: DeviceRef { DeviceRef(uid: uid, name: name, inputChannels: inputChannels, outputChannels: outputChannels) }
@@ -174,7 +182,12 @@ public struct NodeInfo {
         switch node.kind {
         case .virtualDevice(let id):
             guard let device = graph.virtualDevice(id) else { return "" }
-            return device.isEnabled ? "Virtual device" : "Virtual device · off"
+            guard device.isEnabled else { return "Virtual device · off" }
+            switch device.direction {
+            case .both: return device.isHidden ? "Virtual device · hidden" : "Virtual device"
+            case .inputOnly: return device.isHidden ? "Virtual input · hidden" : "Virtual input"
+            case .outputOnly: return device.isHidden ? "Virtual output · hidden" : "Virtual output"
+            }
         case .device(let ref):
             return inventory.device(ref.uid) == nil ? "Not connected" : "Audio device"
         case .defaultOutput:
@@ -200,6 +213,32 @@ public struct NodeInfo {
     public func rateText(_ node: Node, plan: RoutingPlan) -> String? {
         if let note = plan.conversions[node.id] { return note.text }
         return sampleRate(node).map { formatSampleRate($0) }
+    }
+
+    /// Channel names for one side of a node: a virtual device's own names where it has them, else L/R or numbers.
+    public func channelLabels(_ node: Node, outputs: Bool) -> [String] {
+        let ports = ports(node)
+        var labels = JunctionCore.channelLabels(outputs ? ports.outputs : ports.inputs)
+        if case .virtualDevice(let id) = node.kind, let device = graph.virtualDevice(id) {
+            for index in labels.indices { if let name = device.channelName(index) { labels[index] = name } }
+        }
+        return labels
+    }
+
+    /// The device Junction plays into for a receiving node: a virtual device's feed (its hidden companion when apps
+    /// see it as an input only), else the node's device.
+    public func feedUID(_ node: Node) -> String? {
+        guard case .virtualDevice(let id) = node.kind else { return deviceUID(node) }
+        guard deviceUID(node) != nil, let uid = graph.virtualDevice(id)?.feedUID, inventory.device(uid) != nil else { return nil }
+        return uid
+    }
+
+    /// The device Junction records from for a source node: what comes out of a virtual device (its hidden companion
+    /// when apps see it as an output only), else the node's device.
+    public func returnUID(_ node: Node) -> String? {
+        guard case .virtualDevice(let id) = node.kind else { return deviceUID(node) }
+        guard deviceUID(node) != nil, let uid = graph.virtualDevice(id)?.returnUID, inventory.device(uid) != nil else { return nil }
+        return uid
     }
 
     /// The device UID a node stands for right now, if it is a device and available.

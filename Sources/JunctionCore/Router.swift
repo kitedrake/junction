@@ -340,6 +340,7 @@ final class SinkRunner: @unchecked Sendable {
                 converters.forEach { jk_converter_destroy($0) }
                 return nil
             }
+            jk_converter_set_same_clock(converter, device.sameClock ? 1 : 0)
             converters.append(converter)
         }
         guard let renderer = jk_renderer_create_converting(UInt32(plan.inputChannels), UInt32(plan.sinkOutputChannels),
@@ -369,12 +370,7 @@ final class SinkRunner: @unchecked Sendable {
             taps.append((tap, id, description.uuid, members))
         }
 
-        var subDevices: [[String: Any]] = []
-        for (index, device) in plan.subDevices.enumerated() {
-            var entry: [String: Any] = [kAudioSubDeviceUIDKey: device.uid]
-            if index > 0 { entry[kAudioSubDeviceDriftCompensationKey] = 1 }
-            subDevices.append(entry)
-        }
+        let subDevices = Self.subDeviceList(plan)
         let tapList: [[String: Any]] = taps.map {
             [kAudioSubTapUIDKey: $0.uuid.uuidString, kAudioSubTapDriftCompensationKey: 1]
         }
@@ -430,6 +426,17 @@ final class SinkRunner: @unchecked Sendable {
         status = AudioDeviceStart(aggregate, proc)
         guard status == noErr else { throw RouterError.start(status) }
         if fadingIn { jk_renderer_fade(renderer, 1, fadeFrames) }
+    }
+
+    /// The aggregate's sub-devices: the sink first (the clock), then the sources. Core Audio's drift compensation keeps
+    /// a source in step with the sink unless both share a clock domain (Junction's own devices do), where it would
+    /// only add work and a little filtering.
+    static func subDeviceList(_ plan: SinkPlan) -> [[String: Any]] {
+        plan.subDevices.enumerated().map { index, device in
+            var entry: [String: Any] = [kAudioSubDeviceUIDKey: device.uid]
+            if index > 0 { entry[kAudioSubDeviceDriftCompensationKey] = device.sameClock ? 0 : 1 }
+            return entry
+        }
     }
 
     /// Asks for an IO buffer size, kept within what the aggregate allows.
@@ -550,6 +557,8 @@ final class SinkRunner: @unchecked Sendable {
     /// What was built, for the event log.
     var summary: String {
         var parts = ["\(plan.routes.count) cable\(plan.routes.count == 1 ? "" : "s")"]
+        let shared = plan.subDevices.dropFirst().filter(\.sameClock).count
+        if shared > 0 { parts.append("\(shared) device\(shared == 1 ? "" : "s") on the same clock (no drift compensation)") }
         for device in plan.converted {
             parts.append("converts \(device.uid) from \(formatSampleRate(device.sampleRate)) to \(formatSampleRate(plan.sampleRate))")
         }

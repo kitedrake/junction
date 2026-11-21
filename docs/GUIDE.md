@@ -89,7 +89,23 @@ Click the device on the canvas to see its settings in the inspector:
   "Sample rates" in section 7), so you don't have to match them.
 
 In other apps the device appears under its name, both as a microphone (what Junction sends into it) and as a
-speaker. Anything an app plays into it comes back out of it too.
+speaker. Anything an app plays into it comes back out of it too. Below those settings:
+
+- **Apps see it as**: **Input and output** (the default), **Input only** (apps list it as a microphone only, for a
+  recording or call app) or **Output only** (apps list it as a speaker only, for an app you want to capture). Inside
+  Junction its canvas works the same either way. Apps that had picked it keep it after a change; macOS may take a
+  moment to update their lists.
+- **Icon**: the picture Audio MIDI Setup and some apps show for it.
+- **Hidden from apps**: leaves it out of every app's device list; Junction still routes it. Handy for a device you
+  only use between Junction canvases or for monitoring.
+- **Volume**: one slider and **Mute** per side apps see: what is played into it and what is recorded from it. These
+  are the same controls Sound settings and the keyboard volume keys change (when the device is the Mac's output), so
+  a change made there shows up here too.
+- **Channel names**: name the channels (for example "Voice" and "Chat L"). The names show on the canvas and in apps
+  that list channels, such as Audio MIDI Setup and DAWs.
+
+The sidebar shows "input only", "output only" or "hidden" under a device's name, and right-clicking a device offers
+the same choices.
 
 To delete a device, right-click it in the sidebar and choose **Delete Virtual Device…**. Its canvas goes with it.
 

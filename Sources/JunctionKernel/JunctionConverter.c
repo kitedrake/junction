@@ -1,7 +1,8 @@
 // Sample-rate conversion between two devices with their own clocks. The source device's IOProc writes into a
 // single-producer, single-consumer ring; the sink's IOProc reads it through a polyphase windowed-sinc resampler.
 // The resampling ratio follows the two clocks' measured rates and is nudged slowly so the ring stays at its target
-// fill. Underruns and overruns fade out and back in instead of clicking. No locks or allocation after creation.
+// fill; two devices on one clock (the same clock domain) keep the nominal ratio. Underruns and overruns fade out and
+// back in instead of clicking. No locks or allocation after creation.
 #include "JunctionKernel.h"
 
 #include <mach/mach_time.h>
@@ -39,6 +40,7 @@ struct JKConverter {
     float *ring;                    // per channel 2 × capacity: each frame is stored twice so a window never wraps
     float *filter;                  // (kPhases + 1) rows of kTaps coefficients
     double inputRate, outputRate;   // nominal
+    int sameClock;                  // one clock: keep the nominal ratio
     double ticksPerSecond;
     // Shared between the two sides.
     _Atomic uint64_t written;       // frames written so far (producer)
@@ -159,6 +161,10 @@ void jk_converter_destroy(JKConverter *c) {
 }
 
 uint32_t jk_converter_channels(const JKConverter *c) { return c->channels; }
+
+void jk_converter_set_same_clock(JKConverter *c, int sameClock) { c->sameClock = sameClock != 0; }
+
+int jk_converter_same_clock(const JKConverter *c) { return c->sameClock; }
 
 /// Updates a meter from one IO cycle's time stamp; returns 1 when the measured rate changed.
 static int Measure(RateMeter *m, const AudioTimeStamp *time, double ticksPerSecond) {
@@ -311,7 +317,11 @@ void jk_converter_read(JKConverter *c, float *output, uint32_t stride, uint32_t 
         count = available < 0 ? 0 : (uint32_t)fmin(frames, floor(available / c->ratio) + 1);
     }
 
-    if (after == Keep) {
+    if (after == Keep && c->sameClock) {
+        // One clock: the rates can't drift apart, so the nominal ratio is exact (measuring would only add jitter).
+        c->ratio = c->inputRate / c->outputRate;
+        atomic_store_explicit(&c->ratioBits, Bits64(c->ratio), memory_order_relaxed);
+    } else if (after == Keep) {
         // Follow the clocks: the measured rates give the ratio, and the fill's distance from its target nudges it.
         double seconds = frames / c->outputRate;
         c->averageFill += (fill + captured - c->averageFill) * fmin(1, seconds / 0.5);
