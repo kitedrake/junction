@@ -116,6 +116,15 @@ public final class Router: @unchecked Sendable {
         queue.sync { self.applyNow(RoutingPlan()) }
     }
 
+    /// Builds every sink again (cross-faded) and retries failed ones at once, e.g. after a permission was granted:
+    /// a sink that started without it may be running on silence.
+    public func rebuildAll() {
+        queue.async {
+            self.failures = [:]
+            self.applyNow(self.lastPlan, rebuildingAll: true)
+        }
+    }
+
     /// After the Mac wakes, IO takes a moment to resume: start counting stalls afresh.
     public func resetHealth() {
         queue.async { self.progress = [:] }
@@ -143,7 +152,7 @@ public final class Router: @unchecked Sendable {
         return result
     }
 
-    private func applyNow(_ plan: RoutingPlan) {
+    private func applyNow(_ plan: RoutingPlan, rebuildingAll: Bool = false) {
         lastPlan = plan
         let wanted = Dictionary(plan.sinks.map { ($0.sinkNode, $0) }, uniquingKeysWith: { first, _ in first })
         var retiring: [SinkRunner] = []
@@ -161,7 +170,7 @@ public final class Router: @unchecked Sendable {
         let now = Date()
         var processes: [HAL.AudioProcess]?
         for sink in plan.sinks {
-            if let runner = runners[sink.sinkNode], runner.plan.structureKey == sink.structureKey {
+            if let runner = runners[sink.sinkNode], runner.plan.structureKey == sink.structureKey, !rebuildingAll {
                 runner.update(gains: sink)
                 continue
             }

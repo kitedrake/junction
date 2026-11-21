@@ -218,8 +218,13 @@ macOS asks for two permissions the first time Junction needs them:
 - **Microphone**: to read any input, including Junction's own virtual devices.
 - **System Audio Recording**: for System Audio and app nodes.
 
-If you said no, change it in **System Settings › Privacy & Security** under **Microphone** and **Screen & System
-Audio Recording**. The node shows a reminder when a permission is missing.
+If you said no:
+
+- **Microphone**: a banner at the top of the canvas says so. Click **Open System Settings** and turn Junction on.
+  Routing starts again by itself.
+- **System Audio Recording**: macOS doesn't tell apps whether this one is allowed. If an App or System Audio item
+  hears nothing while the apps it captures are playing, it shows a yellow triangle. Select it and click **Open
+  Privacy Settings…**, then turn Junction on under **Screen & System Audio Recording**.
 
 If you build Junction yourself, macOS may ask again after each rebuild.
 

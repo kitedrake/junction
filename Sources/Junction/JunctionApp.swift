@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import JunctionCore
 import SwiftUI
 
@@ -149,6 +150,8 @@ struct RootView: View {
                 .overlay(alignment: .top) {
                     if !model.inventory.driver.isInstalled && !model.graph.virtualDevices.isEmpty {
                         DriverBanner()
+                    } else if model.graph.isRoutingOn, model.needsMicrophone, model.microphoneAccess != .authorized {
+                        MicrophoneBanner()
                     }
                 }
                 .overlay {
@@ -274,6 +277,33 @@ struct DriverBanner: View {
                     .buttonStyle(.glassProminent)
                     .controlSize(.large)
                     .disabled(model.isInstallingDriver || model.isDemo)
+            }
+        }
+        .padding(.top, 14)
+    }
+}
+
+/// Routing reads audio inputs (every sink reads its device's own inputs), which needs macOS's Microphone permission.
+struct MicrophoneBanner: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let undecided = model.microphoneAccess == .notDetermined
+        GlassEffectContainer(spacing: 8) {
+            HStack(spacing: 8) {
+                Label(undecided ? "Routing needs permission to use audio inputs."
+                                : "Junction isn't allowed to use audio inputs, so routing can't run.",
+                      systemImage: "mic.slash.fill")
+                    .symbolRenderingMode(.multicolor)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .glassEffect(.regular, in: .capsule)
+                    .help("macOS calls it the Microphone permission. It covers microphones, audio interfaces and Junction's own virtual devices.")
+                Button(undecided ? "Allow…" : "Open System Settings") {
+                    if undecided { model.requestMicrophone() } else { model.openPrivacySettings(.microphone) }
+                }
+                .buttonStyle(.glassProminent)
+                .controlSize(.large)
             }
         }
         .padding(.top, 14)

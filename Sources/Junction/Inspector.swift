@@ -88,6 +88,10 @@ private struct NodeInspector: View {
                         .foregroundStyle(model.isFailing(node.id) ? .red : .orange)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                if model.silentTaps.contains(node.id) {
+                    Button("Open Privacy Settings…") { model.openPrivacySettings(.systemAudio) }
+                        .controlSize(.small)
+                }
             }
         }
 

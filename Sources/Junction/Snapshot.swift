@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import JunctionCore
 import SwiftUI
 
@@ -109,6 +110,9 @@ enum Snapshot {
             model.setDemoState(inventory: outdated, statuses: demoStatuses, meters: demoMeters)
             await both("driver-update")
             model.setDemoState(inventory: demoInventory, statuses: demoStatuses, meters: demoMeters)
+            model.setDemoMicrophoneAccess(.denied)
+            await both("no-microphone")  // the banner asking to allow audio inputs
+            model.setDemoMicrophoneAccess(.authorized)
 
             model.graph = Graph()
             model.selection = nil

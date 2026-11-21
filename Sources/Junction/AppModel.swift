@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import CoreAudio
 import JunctionCore
 import Observation
@@ -37,6 +38,11 @@ final class AppModel {
     var showStreamTemplate = false
     /// A problem to show in an alert (driver install, publishing).
     var alert: String?
+    /// macOS's Microphone permission, which covers every audio input: microphones, interfaces, Junction's devices.
+    private(set) var microphoneAccess: AVAuthorizationStatus = .authorized
+    /// App and System Audio nodes that have heard nothing for a while although apps they capture are playing: most
+    /// likely Junction may not record system audio.
+    private(set) var silentTaps: Set<UUID> = []
     private(set) var isInstallingDriver = false
     /// The known chat apps (`Templates.chatApps`) installed on this Mac.
     private(set) var installedChatApps: [AppRef] = []
@@ -51,6 +57,9 @@ final class AppModel {
     @ObservationIgnored private var deviceWatcher: HAL.DeviceWatcher?
     @ObservationIgnored private var watchedUIDs: Set<String> = []
     @ObservationIgnored private var wakeObserver: NSObjectProtocol?
+    /// When each running app or System Audio node last carried sound (or started running).
+    @ObservationIgnored private var heard: [UUID: Date] = [:]
+    @ObservationIgnored private var askedForMicrophone = false
     @ObservationIgnored private var restartTask: Task<Void, Never>?
     @ObservationIgnored private var lastCoreAudioRestart: Date?
     @ObservationIgnored private var saveTask: Task<Void, Never>?
@@ -118,9 +127,13 @@ final class AppModel {
             MainActor.assumeIsolated {
                 AppModel.shared.refreshInventory()
                 AppModel.shared.refreshInstalledChatApps()
+                AppModel.shared.refreshPermissions()
+                AppModel.shared.checkSilentTaps()
             }
         })
+        microphoneAccess = AVCaptureDevice.authorizationStatus(for: .audio)
         replan(force: true)
+        refreshPermissions()
     }
 
     func stop() {
@@ -129,6 +142,12 @@ final class AppModel {
         restartTask?.cancel()
         router?.stopAll()
         saveNow()
+    }
+
+    /// Demo mode: pretend macOS gave this answer about the Microphone permission (for screenshots).
+    func setDemoMicrophoneAccess(_ status: AVAuthorizationStatus) {
+        guard isDemo else { return }
+        microphoneAccess = status
     }
 
     /// Demo mode sets the system picture directly.
@@ -300,12 +319,84 @@ final class AppModel {
             return
         }
         let fresh = router.takeMeters()
+        let now = Date()
+        for (key, value) in fresh where key.isOutput && value > 0.0005 { heard[key.node] = now }
         var next: [PortKey: Float] = [:]
         for key in Set(fresh.keys).union(meters.keys) {
             let value = max(fresh[key] ?? 0, (meters[key] ?? 0) * 0.72)
             if value > 0.0005 { next[key] = value }
         }
         if next != meters { meters = next }
+    }
+
+    // MARK: Permissions
+
+    enum PrivacyPane: String {
+        case microphone = "Privacy_Microphone"
+        case systemAudio = "Privacy_ScreenCapture"  // Screen & System Audio Recording
+    }
+
+    func openPrivacySettings(_ pane: PrivacyPane) {
+        guard !isDemo, let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane.rawValue)")
+        else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    /// Whether routing reads any audio input: a sink's aggregate reads its device's own inputs and every source device.
+    var needsMicrophone: Bool {
+        plan.sinks.contains { $0.subDevices.contains { $0.inputChannels > 0 } }
+    }
+
+    /// Follows the Microphone permission. When it is granted, every sink is built again (one that started without it
+    /// may be running on silence). When routing needs it and macOS hasn't asked yet, asks now; the banner says why.
+    func refreshPermissions() {
+        guard !isDemo else { return }
+        let status = AVCaptureDevice.authorizationStatus(for: .audio)
+        if status != microphoneAccess {
+            let granted = status == .authorized
+            microphoneAccess = status
+            Self.log.notice("Microphone permission: \(String(describing: status.rawValue), privacy: .public)")
+            if granted { router?.rebuildAll() }
+        }
+        if status == .notDetermined, needsMicrophone, graph.isRoutingOn, !askedForMicrophone { requestMicrophone() }
+    }
+
+    func requestMicrophone() {
+        guard !isDemo else { return }
+        askedForMicrophone = true
+        AVCaptureDevice.requestAccess(for: .audio) { _ in
+            Task { @MainActor in AppModel.shared.refreshPermissions() }
+        }
+    }
+
+    /// There is no way to ask macOS whether Junction may record system audio: without the permission, taps simply
+    /// deliver silence. So an app or System Audio node that has heard nothing for 8 s while apps it captures are
+    /// playing gets a hint (an app can also play silence, so the hint stays a question).
+    func checkSilentTaps() {
+        guard !isDemo else { return }
+        let now = Date()
+        var running: Set<UUID> = []
+        if graph.isRoutingOn {
+            for sink in plan.sinks where statuses[sink.sinkNode]?.state == .running {
+                running.formUnion(sink.taps.map(\.node))
+            }
+        }
+        heard = heard.filter { running.contains($0.key) }
+        for node in running where heard[node] == nil { heard[node] = now }
+        let playing = inventory.apps.filter { $0.isPlaying && $0.bundleID != Bundle.main.bundleIdentifier }
+        var silent: Set<UUID> = []
+        for id in running {
+            guard let node = graph.node(id), let last = heard[id], now.timeIntervalSince(last) > 8 else { continue }
+            switch node.kind {
+            case .application(let app):
+                if playing.contains(where: { $0.bundleID == app.bundleID }) { silent.insert(id) }
+            case .systemAudio(let excluded):
+                if playing.contains(where: { app in !excluded.contains { $0.bundleID == app.bundleID } }) { silent.insert(id) }
+            default:
+                break
+            }
+        }
+        if silent != silentTaps { silentTaps = silent }
     }
 
     // MARK: Driver
@@ -604,6 +695,9 @@ final class AppModel {
     func issues(for node: UUID) -> [String] {
         var result = plan.issues[node] ?? []
         if let status = statuses[node], let message = status.message { result.insert(message, at: 0) }
+        if silentTaps.contains(node) {
+            result.append("No sound yet, although apps it captures are playing. If you expect some, check that Junction may record system audio: System Settings › Privacy & Security › Screen & System Audio Recording.")
+        }
         return result
     }
 

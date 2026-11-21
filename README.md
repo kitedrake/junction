@@ -81,7 +81,11 @@ stops moving (checked every 2 s, e.g. after sleep). Routing that fails to start 
 60 seconds, and the node says why and when.
 
 macOS asks for two permissions the first time routing needs them: **Microphone** (reading any input, including
-Junction's own devices) and **System Audio Recording** (App and System Audio nodes). With ad-hoc signing macOS asks
+Junction's own devices) and **System Audio Recording** (App and System Audio nodes). Junction asks for Microphone
+access itself as soon as routing needs it; if it's refused, a banner opens the right System Settings page, and
+routing is rebuilt once it's allowed. macOS offers no way to check System Audio Recording, so an App or System Audio
+node that hears nothing for 8 s while the apps it captures are playing shows a hint with a button to that page
+instead. With ad-hoc signing macOS asks
 again after every rebuild; build with `SIGN_IDENTITY="Apple Development: …" ./build.sh` (or the older
 `JUNCTION_SIGN_IDENTITY`) to keep them. A Developer ID identity also turns on the hardened runtime with
 `Resources/Junction.entitlements` (audio input), as notarization requires.
