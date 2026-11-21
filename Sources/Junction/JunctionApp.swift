@@ -29,6 +29,9 @@ struct JunctionApp: App {
         }
         .defaultSize(width: 1240, height: 760)
         .commands {
+            if let updates = Updates.shared {
+                CommandGroup(after: .appInfo) { UpdateCommands(updates: updates) }
+            }
             CommandGroup(replacing: .newItem) {
                 Button("New Virtual Device") { model.addVirtualDevice() }
                     .keyboardShortcut("n")
@@ -121,6 +124,12 @@ struct MenuBarContent: View {
         Button("Open Junction") {
             openWindow(id: "main")
             NSApp.activate()
+        }
+        if let updates = Updates.shared {
+            Button("Check for Updates…") {
+                NSApp.activate()
+                updates.checkNow()
+            }
         }
         Button("Quit Junction") { NSApp.terminate(nil) }
             .keyboardShortcut("q")

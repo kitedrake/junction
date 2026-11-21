@@ -6,6 +6,10 @@ import PackageDescription
 let package = Package(
     name: "Junction",
     platforms: [.macOS(.v26)],
+    dependencies: [
+        // In-app updates (release builds only; see build.sh). Pinned: bump deliberately.
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.1"),
+    ],
     targets: [
         // Real-time mixing kernel (the IOProc), in C so the audio thread never touches ARC, locks or allocation.
         .target(
@@ -22,7 +26,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "Junction",
-            dependencies: ["JunctionCore"],
+            dependencies: ["JunctionCore", .product(name: "Sparkle", package: "Sparkle")],
             path: "Sources/Junction",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),

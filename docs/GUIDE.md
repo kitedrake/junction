@@ -236,6 +236,10 @@ dashed) and explains why on the node.
 - An older copy of Junction tells you a newer driver is installed and doesn't offer to replace it.
 - To remove the driver: **Routing › Uninstall Driver…**. Your virtual devices disappear from all apps.
 
+Junction itself updates through **Junction › Check for Updates…** (also in the menu bar menu). The second time you
+open it, Junction asks whether to check automatically. Updating the app doesn't touch the driver; a new driver, when
+there is one, is offered as above.
+
 ## 14. Troubleshooting
 
 | Problem | Try this |

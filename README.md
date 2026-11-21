@@ -71,13 +71,16 @@ is copied to `/Library/Audio/Plug-Ins/HAL/JunctionDriver.driver` and Core Audio 
 moment). By hand: `sudo sh scripts/install-driver.sh build/JunctionDriver.driver`; remove it with **Routing ›
 Uninstall Driver…** or `sudo sh scripts/uninstall-driver.sh`.
 
-Each copy of Junction carries its own driver. When it is newer than the installed one, the sidebar, the menu bar and
-the Routing menu offer **Update Driver…** with both versions; an older copy of Junction says so and doesn't offer to go
+Each copy of Junction carries its own driver, versioned separately from the app (`Driver/VERSION`, bumped only when
+the driver changes, so an app update doesn't ask for the driver again). When it is newer than the installed one,
+the sidebar, the menu bar and the Routing menu offer **Update Driver…** with both versions; an older copy of Junction says so and doesn't offer to go
 back. Whenever Core Audio restarts (a driver install or update, or a crash), Junction rebuilds its routing by itself.
 
 macOS asks for two permissions the first time routing needs them: **Microphone** (reading any input, including
 Junction's own devices) and **System Audio Recording** (App and System Audio nodes). With ad-hoc signing macOS asks
-again after every rebuild; build with `JUNCTION_SIGN_IDENTITY="Apple Development: …" ./build.sh` to keep them.
+again after every rebuild; build with `SIGN_IDENTITY="Apple Development: …" ./build.sh` (or the older
+`JUNCTION_SIGN_IDENTITY`) to keep them. A Developer ID identity also turns on the hardened runtime with
+`Resources/Junction.entitlements` (audio input), as notarization requires.
 
 Requires macOS 26 (Liquid Glass and app capture by bundle ID) and Xcode 26 or newer; the scripts use Xcode's toolchain.
 
@@ -129,6 +132,34 @@ and rate, reports a rate set from outside, disappears and returns); it opens no 
 password-protected step in the app.
 
 The icon is drawn by `icon/make_icon.swift`; `icon/make-icns.sh` rebuilds `Resources/AppIcon.icns`.
+
+## Updates and releases
+
+Released copies update themselves with [Sparkle](https://sparkle-project.org) 2.10.1 (pinned in
+`Package.swift`). A plain `./build.sh`, and omso Builder's builds, have no update feed: they never check for
+updates and show no update menu items.
+
+A release build gets its feed and key from the environment; the release tool in the `software-site` repository
+sets them:
+
+| Variable | What it does |
+| --- | --- |
+| `UPDATE_FEED_URL` | the update feed, `<site>/updates/junction/appcast.xml` |
+| `UPDATE_PUBLIC_KEY` | the EdDSA public key; an update signed with any other key is refused |
+| `SIGN_IDENTITY` | codesign identity: a Developer ID for releases (default: ad-hoc) |
+
+Such a build has **Check for Updates…** and **Check for Updates Automatically** in the app menu, and **Check for Updates…** in the menu bar menu. Sparkle
+asks on the second launch whether to check automatically, and sends nothing before that. A check downloads the
+feed from the site; the request names the app and its version, and system profiling stays off, so nothing about
+the Mac is sent (the server sees the IP address, as with any web request).
+
+To release: bump `VERSION`, commit, then run `python3 release.py junction --notes "…"` in the site repository.
+`sh scripts/test-update.sh junction` there tests a real update end to end with a throwaway key, including refusing an
+update signed with another key. Sparkle's XPC services are left out of the app because Junction isn't sandboxed.
+
+An app update replaces Junction.app only. The driver inside it is offered separately, as above, and only when
+`Driver/VERSION` went up. A Developer ID build with the hardened runtime hasn't been tried yet: check microphone and
+system-audio permissions and **Install Driver…** with the first one.
 
 ## Known limits
 
