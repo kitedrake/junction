@@ -33,6 +33,8 @@ struct Sidebar: View {
                 Text("Virtual Devices")
             }
 
+            ScenesSection()
+
             Section("Sources") {
                 PaletteRow(kind: .systemAudio(excluding: []), role: .source, title: "System Audio", detail: "Everything apps play")
                 PaletteRow(kind: .defaultInput, role: .source, title: "Default Input",

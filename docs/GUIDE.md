@@ -18,12 +18,14 @@ videos, and the people you're talking to on Discord don't hear themselves on str
 7. [Levels and muting](#7-levels-and-muting)
 8. [Leave apps out](#8-leave-apps-out)
 9. [Stream without your voice chat (OBS and Discord)](#9-stream-without-your-voice-chat-obs-and-discord)
-10. [Turning routing on and off](#10-turning-routing-on-and-off)
-11. [Permissions](#11-permissions)
-12. [No feedback loops](#12-no-feedback-loops)
-13. [Updating or removing the driver](#13-updating-or-removing-the-driver)
-14. [Troubleshooting](#14-troubleshooting)
-15. [Shortcuts](#15-shortcuts)
+10. [Podcast, DAW and call templates](#10-podcast-daw-and-call-templates)
+11. [Scenes](#11-scenes)
+12. [Turning routing on and off](#12-turning-routing-on-and-off)
+13. [Permissions](#13-permissions)
+14. [No feedback loops](#14-no-feedback-loops)
+15. [Updating or removing the driver](#15-updating-or-removing-the-driver)
+16. [Troubleshooting](#16-troubleshooting)
+17. [Shortcuts](#17-shortcuts)
 
 ## 1. Install Junction
 
@@ -56,9 +58,9 @@ the sidebar and the canvas offer **Install Driver…**.
   <img src="screenshots/canvas-dark.png" alt="The Junction window: sidebar, the Stream Mix canvas, and the inspector">
 </picture>
 
-- **Sidebar** (left): your **virtual devices**, each with an on/off switch. Below them, everything you can add:
-  **Sources** (System Audio, your input devices), **Apps** that have played sound, and **Outputs** (speakers,
-  headphones, interfaces).
+- **Sidebar** (left): your **virtual devices**, each with an on/off switch, and your **scenes** (section 11). Below
+  them, everything you can add: **Sources** (System Audio, your input devices), **Apps** that have played sound, and
+  **Outputs** (speakers, headphones, interfaces).
 - **Canvas** (middle): every virtual device has its own canvas. Click a device in the sidebar to see it. Sources sit
   on the left and feed the device; outputs sit on the right and let you hear it.
 - **Inspector** (right): settings and levels for whatever you select. Show or hide it with the button at the top
@@ -277,7 +279,7 @@ captures it, so you hear it only where you route it.
   <img src="screenshots/stream-template-dark.png" alt="The Stream Without Chat window with Discord ticked" width="72%">
 </picture>
 
-1. Choose **Stream Without Chat…** (File menu, the **+** menu, or the empty canvas).
+1. Choose **Stream Without Chat…** (File menu, the **+** menu, or the **Templates** menu on the empty canvas).
 2. Keep the name **Stream Mix** (or pick your own), tick your chat app (Discord is ticked if it's installed), and
    click **Create**. You get a "Stream Mix" device fed by System Audio with your chat app left out.
 3. In **OBS**: add an **Audio Input Capture** source and choose **Stream Mix**. Remove or mute any other
@@ -287,16 +289,75 @@ captures it, so you hear it only where you route it.
 Check it: play a video and talk on Discord. OBS's meter for Stream Mix should move with the video, not with the
 voices from Discord.
 
-## 10. Turning routing on and off
+## 10. Podcast, DAW and call templates
+
+Next to **Stream Without Chat…** (File menu, the **+** menu, and the **Templates** menu on the empty canvas and in the
+inspector) are three more templates. Each makes a virtual microphone, a device apps see as an input only, and wires it
+on its canvas. Choosing the same name again reuses that device (and turns it on).
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="screenshots/podcast-template-light.png">
+  <img src="screenshots/podcast-template-dark.png" alt="The Podcast window: two microphones and a call app" width="72%">
+</picture>
+
+- **Podcast…**: pick two microphones (any input of any device, or the default input) and the call app. Each gets a
+  channel pair of its own on the **Podcast** device: microphone 1 on channels 1–2, microphone 2 on 3–4, the call on
+  5–6, with the channels named to match. In your recording app choose **Podcast** as the input and record three
+  stereo tracks, so every voice can be edited on its own. Leave a microphone or the call at **None** to skip it.
+- **DAW into a Call…**: pick your music app and, if you want to talk over it, a microphone. The **DAW to Call**
+  device carries what the music app plays; choose it as the microphone in the call app, and turn off the call app's
+  noise suppression and echo cancellation so music comes through. You keep hearing the music app as usual.
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="screenshots/daw-into-call-template-light.png">
+  <img src="screenshots/daw-into-call-template-dark.png" alt="The DAW into a Call window" width="72%">
+</picture>
+
+- **Call into the DAW…**: pick the call app. The **Call to DAW** device carries the call's audio; choose it as an
+  input in your music app and record channels 1–2 on a stereo track.
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="screenshots/call-into-daw-template-light.png">
+  <img src="screenshots/call-into-daw-template-dark.png" alt="The Call into the DAW window" width="72%">
+</picture>
+
+The apps on offer are the ones using audio now and the known chat or music apps installed on your Mac; **Choose
+App…** picks any other.
+
+## 11. Scenes
+
+A scene remembers a whole setup so you can come back to it in one step: which virtual devices are on, their volumes
+and mutes, and every canvas with its nodes, cables, levels and mutes. Use one per show, session or room.
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="screenshots/scene-menu-light.png">
+  <img src="screenshots/scene-menu-dark.png" alt="The Routing menu listing the Streaming and Recording Only scenes, Streaming checked" width="60%">
+</picture>
+
+- **Save one**: **Routing › New Scene from Current Setup…**, or **New Scene** in the sidebar's **Scenes** section.
+  Give it a name and click **Save**.
+- **Switch**: choose it in the **Routing** menu (the first nine also with ⌃⌘1…⌃⌘9), in the **menu bar** icon's menu,
+  or click it in the sidebar. The scene you are in is checked; once you change something, none is.
+- **Change one**: right-click it in the sidebar for **Update from Current Setup**, **Rename…** and **Delete Scene**.
+  Switching, saving, renaming and deleting can all be undone (⌘Z).
+
+Switching changes only what differs. A destination whose wiring is the same in both scenes keeps playing and just
+takes the scene's levels; the ones that change are rebuilt next to the running ones and cross-faded, without a gap.
+Turning a device off in a scene takes it away from apps while that scene is on.
+
+Scenes don't change a device's name, channels, sample rate or direction. A virtual device made after a scene stays as
+it is when you switch to that scene; deleting a device removes it from every scene.
+
+## 12. Turning routing on and off
 
 - The **power button** in the toolbar, **Routing › Routing On** (⇧⌘R), or the **menu bar icon** turn all routing on
   or off. When it's off, your virtual devices still exist but stay silent.
 - **Closing the window** keeps routing going from the menu bar. **Quitting** Junction stops it.
-- The menu bar icon also switches each virtual device on or off, and offers driver updates.
+- The menu bar icon also switches scenes and each virtual device on or off, and offers driver updates.
 - **Junction › Settings…** (also in the menu bar icon's menu) has **Open at login**, so routing is ready after a
   restart, and **Show in Dock**: turn it off to keep Junction in the menu bar only.
 
-## 11. Permissions
+## 13. Permissions
 
 macOS asks for two permissions the first time Junction needs them:
 
@@ -313,7 +374,7 @@ If you said no:
 
 If you build Junction yourself, macOS may ask again after each rebuild.
 
-## 12. No feedback loops
+## 14. No feedback loops
 
 Sending a device's sound back into itself would make it ring louder and louder. Junction prevents that:
 
@@ -325,7 +386,7 @@ Sending a device's sound back into itself would make it ring louder and louder. 
 If you change Sound settings later in a way that would close a loop, Junction stops using that cable (it turns
 dashed) and explains why on the node.
 
-## 13. Updating or removing the driver
+## 15. Updating or removing the driver
 
 - When a new Junction comes with a newer driver, the sidebar and the menu bar show **Driver update available** with
   both version numbers. Click **Update Driver…**: your password, then a short silence while audio restarts.
@@ -337,11 +398,11 @@ Junction itself updates through **Junction › Check for Updates…** (also in t
 open it, Junction asks whether to check automatically. Updating the app doesn't touch the driver; a new driver, when
 there is one, is offered as above.
 
-## 14. Troubleshooting
+## 16. Troubleshooting
 
 | Problem | Try this |
 | --- | --- |
-| OBS hears nothing from the device | Is routing on (power button)? Is the device switched on in the sidebar? Are its cables solid, not dashed? Check both permissions (section 11). |
+| OBS hears nothing from the device | Is routing on (power button)? Is the device switched on in the sidebar? Are its cables solid, not dashed? Check both permissions (section 13). |
 | My voice chat is still on stream | Select System Audio and check that the chat app is in its **Leave out** list. Safari and other apps built on Safari share one process, so they can only be left out together. |
 | I hear things twice | An output on the device's canvas plays the device on top of what apps already play there. Remove the output, or use headphones that apps don't play on. |
 | Crackles or odd pitch | Crackles usually mean the buffer is too small: select the device or output and choose a bigger **Buffer size**. A node with a yellow triangle about sample rates is combined without conversion: select the virtual device or output it is wired to and set **Conversion** to **Automatic**, or set both devices to the same rate in Audio MIDI Setup. |
@@ -356,12 +417,13 @@ To report a problem, open the Routing Log and click **Copy Report**, then paste 
 Junction and macOS versions, your audio devices and apps, your setup and recent routing events. It names your
 devices and apps, so read it before sharing it.
 
-## 15. Shortcuts
+## 17. Shortcuts
 
 | Action | Shortcut |
 | --- | --- |
 | New virtual device | ⌘N |
 | Routing on/off | ⇧⌘R |
+| Switch to scene 1–9 | ⌃⌘1 … ⌃⌘9 |
 | Show or hide the inspector | ⌥⌘I |
 | Routing Log | ⌥⌘L |
 | Settings | ⌘, |

@@ -8,6 +8,7 @@ enum Demo {
     static let discord = AppRef(bundleID: "com.hnc.Discord", name: "Discord")
     /// Chat apps the made-up Mac has installed (screenshots never show the real Mac's apps).
     static let installedChatApps: Set<String> = ["com.hnc.Discord", "us.zoom.xos", "com.apple.FaceTime"]
+    static let installedDAWApps: Set<String> = ["com.apple.logic10", "com.apple.garageband10"]
 
     @MainActor static func load(into model: AppModel) {
         let stream = VirtualDevice(name: "Stream Mix", icon: .stream)
@@ -38,6 +39,12 @@ enum Demo {
             cable(recordingMic, 0, recordingNode, 0), cable(recordingMic, 0, recordingNode, 1),
             cable(chat, 0, recordingNode, 2), cable(chat, 1, recordingNode, 3),
         ]
+        // Two scenes: everything (the current setup), and only the recorder with the mic louder.
+        var recordingOnly = graph
+        recordingOnly.virtualDevices[0].isEnabled = false
+        if let index = recordingOnly.nodes.firstIndex(where: { $0.id == recordingMic.id }) { recordingOnly.nodes[index].gainDB = 3 }
+        graph.scenes = [RoutingScene(name: "Streaming", capturing: graph),
+                        RoutingScene(name: "Recording Only", capturing: recordingOnly)]
         model.graph = graph
         model.showCanvas(stream.id)
         let inventory = Inventory(
@@ -127,6 +134,12 @@ enum Snapshot {
                 await both("second-canvas")
                 model.showCanvas(first)
             }
+            // The Routing menu open on its scenes (the sidebar lists them too).
+            for (appearance, suffix) in [(NSAppearance.Name.aqua, "light"), (.darkAqua, "dark")] {
+                NSApp.appearance = NSAppearance(named: appearance)
+                try? await Task.sleep(for: .milliseconds(800))
+                captureMenu("Routing", folder, "scene-menu-\(suffix)")
+            }
 
             let demoInventory = model.inventory, demoStatuses = model.statuses, demoMeters = model.meters
             var outdated = demoInventory
@@ -144,11 +157,14 @@ enum Snapshot {
             model.setDemoState(inventory: model.inventory, statuses: [:], meters: [:])
             await both("empty")
 
-            model.showStreamTemplate = true
-            try? await Task.sleep(for: .milliseconds(600))
-            await both("stream-template", sheet: true)
-            model.showStreamTemplate = false
-            try? await Task.sleep(for: .milliseconds(500))
+            for (kind, name) in [(TemplateKind.stream, "stream-template"), (.podcast, "podcast-template"),
+                                 (.dawIntoCall, "daw-into-call-template"), (.callIntoDAW, "call-into-daw-template")] {
+                model.template = kind
+                try? await Task.sleep(for: .milliseconds(600))
+                await both(name, sheet: true)
+                model.template = nil
+                try? await Task.sleep(for: .milliseconds(500))
+            }
 
             model.addVirtualDevice()
             await both("new-device")  // a canvas with only its device: the hint
@@ -215,6 +231,26 @@ enum Snapshot {
     @MainActor static func capture(_ folder: URL, _ name: String) {
         guard let window = mainWindow else { return }
         screencapture(["-x", "-o", "-l", "\(window.windowNumber)"], folder, name)
+    }
+
+    /// Opens a menu of the menu bar over the main window, beside the sidebar, and captures that part of the screen
+    /// (a menu is a window of its own that closes when anything else is clicked, so a timer captures it while open).
+    @MainActor static func captureMenu(_ title: String, _ folder: URL, _ name: String) {
+        guard let window = mainWindow, let view = window.contentView,
+              let menu = NSApp.mainMenu?.items.first(where: { $0.title == title })?.submenu,
+              let top = NSScreen.screens.first?.frame.maxY else { return }
+        let point = NSPoint(x: 300, y: view.isFlipped ? 40 : view.bounds.height - 40)
+        let origin = window.convertPoint(toScreen: view.convert(point, to: nil))
+        // screencapture -R counts from the top left of the main screen.
+        let area = "\(Int(origin.x) - 20),\(Int(top - origin.y) - 20),480,\(Int(min(window.frame.height - 60, 460)))"
+        let timer = Timer(timeInterval: 0.8, repeats: false) { _ in
+            MainActor.assumeIsolated {
+                screencapture(["-x", "-R", area], folder, name)
+                NSApp.mainMenu?.items.first { $0.title == title }?.submenu?.cancelTracking()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        menu.popUp(positioning: nil, at: point, in: view)
     }
 
     /// A sheet is a window of its own.

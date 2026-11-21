@@ -219,6 +219,7 @@ final class PlannerTests: XCTestCase {
         XCTAssertEqual(loadedDevice.inputVolume, 1)
         XCTAssertFalse(loadedDevice.outputMuted || loadedDevice.inputMuted)
         XCTAssertEqual(loadedDevice.name, device.name)
+        XCTAssertEqual(loaded.scenes, [], "schema 3 files have no scenes")
 
         // Schema 4 keeps the choice.
         var changed = loaded
@@ -238,8 +239,11 @@ final class PlannerTests: XCTestCase {
         dressed.virtualDevices[0].isHidden = true
         dressed.virtualDevices[0].outputVolume = 0.25
         dressed.virtualDevices[0].inputMuted = true
+        // …and scenes.
+        dressed.scenes = [RoutingScene(name: "Dressed", capturing: dressed)]
         try store.save(dressed)
         XCTAssertEqual(store.load(), dressed)
+        XCTAssertTrue(try String(contentsOf: store.graphURL, encoding: .utf8).contains("\"name\" : \"Dressed\""))
     }
 
     func testDeviceOptionsInTheDriverConfiguration() throws {

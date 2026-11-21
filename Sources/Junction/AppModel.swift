@@ -45,7 +45,10 @@ final class AppModel {
     /// A virtual device waiting for the user to confirm its deletion.
     var deviceToDelete: UUID?
     var showInspector = true
-    var showStreamTemplate = false
+    /// The template sheet that is open.
+    var template: TemplateKind?
+    /// The scene being named (a new one, or one being renamed).
+    var sceneNaming: SceneNaming?
     /// A problem to show in an alert (driver install, publishing).
     var alert: String?
     /// macOS's Microphone permission, which covers every audio input: microphones, interfaces, Junction's devices.
@@ -58,6 +61,8 @@ final class AppModel {
     private(set) var isInstallingDriver = false
     /// The known chat apps (`Templates.chatApps`) installed on this Mac.
     private(set) var installedChatApps: [AppRef] = []
+    /// The known music apps (`Templates.dawApps`) installed on this Mac.
+    private(set) var installedDAWApps: [AppRef] = []
 
     /// Screenshots and demos: made-up devices, nothing saved, nothing routed.
     let isDemo: Bool
@@ -356,11 +361,15 @@ final class AppModel {
 
     /// Apps installed or removed while Junction runs show up within a few seconds. Demo mode uses made-up apps.
     private func refreshInstalledChatApps() {
-        let installed = Templates.chatApps.filter { app in
-            isDemo ? Demo.installedChatApps.contains(app.bundleID)
-                : NSWorkspace.shared.urlForApplication(withBundleIdentifier: app.bundleID) != nil
+        func installed(_ apps: [AppRef], demo: Set<String>) -> [AppRef] {
+            apps.filter { app in
+                isDemo ? demo.contains(app.bundleID) : NSWorkspace.shared.urlForApplication(withBundleIdentifier: app.bundleID) != nil
+            }
         }
-        if installed != installedChatApps { installedChatApps = installed }
+        let chat = installed(Templates.chatApps, demo: Demo.installedChatApps)
+        if chat != installedChatApps { installedChatApps = chat }
+        let daws = installed(Templates.dawApps, demo: Demo.installedDAWApps)
+        if daws != installedDAWApps { installedDAWApps = daws }
     }
 
     /// The apps to offer for leaving out of a stream: using audio now, installed chat apps, and `picked`.
@@ -998,15 +1007,74 @@ final class AppModel {
 
     /// Makes the "stream without chat" setup and shows its canvas.
     func addStreamWithoutChat(excluding apps: [AppRef], deviceName: String) {
+        addTemplate("Stream Without Chat", deviceName: deviceName) {
+            Templates.streamWithoutChat(&$0, excluding: apps, deviceName: deviceName)
+        }
+    }
+
+    /// Makes a template's setup (one undo step) and shows its device's canvas.
+    func addTemplate(_ name: String, deviceName: String, _ make: (inout Graph) -> VirtualDevice) {
         guard graph.virtualDevices.count < VirtualDevice.maximumCount
                 || graph.virtualDevices.contains(where: { $0.name == deviceName }) else {
             alert = "Junction can publish up to \(VirtualDevice.maximumCount) virtual devices."
             return
         }
         var device: VirtualDevice?
-        edit("Stream Without Chat") { device = Templates.streamWithoutChat(&$0, excluding: apps, deviceName: deviceName) }
+        edit(name) { device = make(&$0) }
         if let device { pickedCanvas = device.id }
         selection = nil
+    }
+
+    /// Apps to offer a template: using audio now, the installed ones of `known`, and `picked`.
+    func appCandidates(installed: [AppRef], picked: [AppRef] = []) -> [AppRef] {
+        Templates.appCandidates(usingAudio: inventory.apps.map(\.ref), installed: installed, picked: picked)
+    }
+
+    // MARK: Scenes
+
+    /// Saves the current setup as a new scene.
+    func addScene(named name: String) {
+        let scene = RoutingScene(name: sceneName(name), capturing: graph)
+        edit("New Scene") { $0.scenes.append(scene) }
+    }
+
+    /// Replaces a scene with the current setup.
+    func updateScene(_ id: UUID) {
+        edit("Update Scene") { graph in
+            guard let index = graph.scenes.firstIndex(where: { $0.id == id }) else { return }
+            graph.scenes[index] = RoutingScene(id: id, name: graph.scenes[index].name, capturing: graph)
+        }
+    }
+
+    func renameScene(_ id: UUID, to name: String) {
+        let name = sceneName(name)
+        edit("Rename Scene") { graph in
+            guard let index = graph.scenes.firstIndex(where: { $0.id == id }) else { return }
+            graph.scenes[index].name = name
+        }
+    }
+
+    func deleteScene(_ id: UUID) {
+        let name = graph.scenes.first { $0.id == id }?.name ?? "Scene"
+        edit("Delete \(name)") { $0.scenes.removeAll { $0.id == id } }
+    }
+
+    /// Switches to a scene (one undo step). Only canvases that differ change, so the router rebuilds, cross-faded,
+    /// just the sinks whose structure changed; the others keep playing with their new levels.
+    func switchToScene(_ id: UUID) {
+        guard let scene = graph.scenes.first(where: { $0.id == id }) else { return }
+        let inventory = inventory
+        if edit("Switch to \(scene.name)", { Scenes.apply(scene, to: &$0, inventory: inventory) }) {
+            note("Switched to scene \(scene.name)")
+        }
+    }
+
+    /// The scene the setup is in right now, if any.
+    var currentScene: UUID? { graph.scenes.first { Scenes.isCurrent($0, in: graph) }?.id }
+
+    private func sceneName(_ name: String) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty ? Scenes.newName(in: graph) : trimmed
     }
 
     // MARK: Status for the canvas

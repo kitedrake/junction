@@ -271,7 +271,7 @@ public struct Graph: Codable, Equatable, Sendable {
     /// 1: one shared canvas. 2: a canvas per virtual device. 3: nodes can set a buffer size (`Node.bufferFrames`;
     /// absent in older files, which means macOS's default). 4: receiving nodes choose sample-rate conversion
     /// (`Node.rateConversion`), and virtual devices have a direction, channel names, an icon, a hidden switch and a
-    /// volume and mute per side.
+    /// volume and mute per side, and the graph keeps named scenes (`scenes`; absent in older files, which means none).
     public static let currentSchema = 4
     public var schema = Graph.currentSchema
     public var virtualDevices: [VirtualDevice] = []
@@ -279,12 +279,27 @@ public struct Graph: Codable, Equatable, Sendable {
     public var cables: [Cable] = []
     /// The master switch: when off, nothing is routed (virtual devices stay published).
     public var isRoutingOn = true
+    /// Saved setups to switch between (see `RoutingScene`).
+    public var scenes: [RoutingScene] = []
 
-    public init(virtualDevices: [VirtualDevice] = [], nodes: [Node] = [], cables: [Cable] = [], isRoutingOn: Bool = true) {
+    public init(virtualDevices: [VirtualDevice] = [], nodes: [Node] = [], cables: [Cable] = [], isRoutingOn: Bool = true,
+                scenes: [RoutingScene] = []) {
         self.virtualDevices = virtualDevices
         self.nodes = nodes
         self.cables = cables
         self.isRoutingOn = isRoutingOn
+        self.scenes = scenes
+    }
+
+    /// Files from before scenes have no `scenes`: they load with none (see `upgrade`).
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        schema = try values.decode(Int.self, forKey: .schema)
+        virtualDevices = try values.decode([VirtualDevice].self, forKey: .virtualDevices)
+        nodes = try values.decode([Node].self, forKey: .nodes)
+        cables = try values.decode([Cable].self, forKey: .cables)
+        isRoutingOn = try values.decode(Bool.self, forKey: .isRoutingOn)
+        scenes = try values.decodeIfPresent([RoutingScene].self, forKey: .scenes) ?? []
     }
 
     public func node(_ id: UUID) -> Node? { nodes.first { $0.id == id } }
@@ -307,24 +322,30 @@ public struct Graph: Codable, Equatable, Sendable {
         cables.removeAll { $0.from.node == id || $0.to.node == id }
     }
 
-    /// Removes a virtual device and its canvas: its nodes and cables.
+    /// Removes a virtual device and its canvas: its nodes and cables, also from the scenes.
     public mutating func removeVirtualDevice(_ id: UUID) {
         let gone = Set(nodes.filter { $0.canvas == id || $0.kind == .virtualDevice(id) }.map(\.id))
         nodes.removeAll { gone.contains($0.id) }
         cables.removeAll { gone.contains($0.from.node) || gone.contains($0.to.node) }
         virtualDevices.removeAll { $0.id == id }
+        let devices = Set(virtualDevices.map(\.id))
+        for index in scenes.indices { scenes[index].keepOnly(devices) }
     }
 
     /// Brings a loaded graph up to date: converts the shared canvas of schema 1, turns on sample-rate conversion and
-    /// sets the device options for files from before they existed, then tidies the canvases.
+    /// sets the device options for files from before they existed, then tidies the canvases. Scenes are new in schema
+    /// 4: older files have none, and scenes naming deleted devices lose those parts.
     public mutating func upgrade() {
         if schema < 2 { moveToCanvases() }
         if schema < 4 {
             convertRates()
             convertDevices()
+            scenes = []
         }
         schema = Graph.currentSchema
         tidyCanvases()
+        let devices = Set(virtualDevices.map(\.id))
+        for index in scenes.indices { scenes[index].keepOnly(devices) }
     }
 
     /// Schema 1 had one shared canvas. Each node moves to the canvas of the virtual device it is wired to (copied, with

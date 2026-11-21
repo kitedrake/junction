@@ -36,12 +36,16 @@ struct JunctionApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("New Virtual Device") { model.addVirtualDevice() }
                     .keyboardShortcut("n")
-                Button("Stream Without Chat…") { model.showStreamTemplate = true }
+                TemplateMenuItems()
+                    .environment(model)
             }
             EditCommands(model: model)
             CommandMenu("Routing") {
                 Toggle("Routing On", isOn: Binding(get: { model.graph.isRoutingOn }, set: { model.graph.isRoutingOn = $0 }))
                     .keyboardShortcut("r", modifiers: [.command, .shift])
+                Divider()
+                SceneMenuItems(shortcuts: true)
+                    .environment(model)
                 Divider()
                 Group {
                     switch model.driverUpdate {
@@ -176,6 +180,10 @@ struct MenuBarContent: View {
 
     var body: some View {
         Toggle("Routing On", isOn: Binding(get: { model.graph.isRoutingOn }, set: { model.graph.isRoutingOn = $0 }))
+        if !model.graph.scenes.isEmpty {
+            Divider()
+            SceneMenuItems(offersNew: false)
+        }
         if !model.graph.virtualDevices.isEmpty {
             Divider()
             Text("Virtual Devices")
@@ -265,8 +273,11 @@ struct RootView: View {
             InspectorView()
                 .inspectorColumnWidth(min: 260, ideal: 300, max: 400)
         }
-        .sheet(isPresented: $model.showStreamTemplate) {
-            StreamTemplateSheet()
+        .sheet(item: $model.template) { kind in
+            TemplateSheet(kind: kind)
+        }
+        .sheet(item: $model.sceneNaming) { naming in
+            SceneNameSheet(naming: naming)
         }
         .confirmationDialog(deleteTitle, isPresented: Binding(get: { model.deviceToDelete != nil },
                                                               set: { if !$0 { model.deviceToDelete = nil } })) {
@@ -343,7 +354,7 @@ struct AddMenuItems: View {
         .disabled(model.canvas == nil)
         Divider()
         Button("New Virtual Device") { model.addVirtualDevice() }
-        Button("Stream Without Chat…") { model.showStreamTemplate = true }
+        TemplateMenuItems()
     }
 
     private func add(_ kind: NodeKind, _ role: NodeRole) { model.addNode(kind, as: role, at: spot()) }
@@ -433,9 +444,11 @@ struct EmptyCanvas: View {
                 Button("New Virtual Device") { model.addVirtualDevice() }
                     .buttonStyle(.glassProminent)
                     .controlSize(.large)
-                Button("Stream Without Chat…") { model.showStreamTemplate = true }
+                Menu("Templates") { TemplateMenuItems() }
+                    .menuStyle(.button)
                     .buttonStyle(.glass)
                     .controlSize(.large)
+                    .fixedSize()
             }
             Text("Each virtual device gets its own canvas: sources on the left feed it, outputs on the right play it.")
                 .font(.callout)

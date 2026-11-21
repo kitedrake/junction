@@ -66,7 +66,7 @@ Junction**), so it is heard only where you route it.
 
 ### Stream without chat
 
-**Stream Without Chat…** (File menu, empty canvas, inspector) builds the common setup in one step: a virtual device
+**Stream Without Chat…** (File menu, the + menu, the empty canvas's and inspector's Templates menu) builds the common setup in one step: a virtual device
 ("Stream Mix") fed by System Audio with Discord (or any chat app) left out. It offers the apps using audio and the
 chat apps installed on your Mac; **Choose App…** adds any other. In OBS add an Audio Input Capture source
 for "Stream Mix": viewers hear the desktop, music, games and DAW; the people in the call don't hear themselves. Your
@@ -75,6 +75,35 @@ own monitoring is unchanged.
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/stream-template-light.png">
   <img src="docs/screenshots/stream-template-dark.png" alt="The Stream Without Chat sheet" width="60%">
+</picture>
+
+### More templates
+
+Next to it, three more sheets build a virtual microphone (an input-only device) in one step:
+
+- **Podcast…**: two microphones and a call into a recorder device, each on a channel pair of its own (microphone 1
+  on channels 1–2, microphone 2 on 3–4, the call on 5–6), so the recording app gets every voice on separate tracks.
+  Two inputs of one interface share its node.
+- **DAW into a Call…**: what a music app plays (optionally with your microphone) as the call app's microphone.
+- **Call into the DAW…**: the call app's audio as an input the music app records.
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/podcast-template-light.png">
+  <img src="docs/screenshots/podcast-template-dark.png" alt="The Podcast sheet" width="60%">
+</picture>
+
+### Scenes
+
+A **scene** saves which virtual devices are on, their volumes and mutes, and every canvas with its levels and mutes.
+**New Scene from Current Setup…** (Routing menu, the sidebar's Scenes section) saves one; switch between them from
+the **Routing** menu (⌃⌘1…⌃⌘9), the **menu bar** icon or the sidebar, where a scene's context menu also updates,
+renames or deletes it. Switching changes only the canvases that differ: sinks that stay the same keep playing (with
+their new levels) and the others are rebuilt with the usual cross-fade. Devices made after a scene are left as they
+are; a deleted device leaves every scene.
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/scene-menu-light.png">
+  <img src="docs/screenshots/scene-menu-dark.png" alt="The Routing menu listing the Streaming and Recording Only scenes" width="60%">
 </picture>
 
 *Screenshots made with Junction's snapshot mode on a made-up set of devices (see Development); GitHub shows the
@@ -144,10 +173,11 @@ Three parts:
    leave a gap or click. When apps start or quit, taps are updated in place.
 
 The graph is saved to `~/Library/Application Support/Junction/graph.json` (schema 4: nodes belong to a device's
-canvas, and receiving nodes can set a buffer size and sample-rate conversion). A schema 1 file from the
+canvas, receiving nodes can set a buffer size and sample-rate conversion, and named scenes are kept in `scenes`). A schema 1 file from the
 shared-canvas versions is converted on load: each node moves to the canvas of the device it was wired to (unwired
 ones to the first device), and cables between devices are dropped. Schema 2 files load with automatic buffer sizes;
-schema 2 and 3 files get sample-rate conversion set to Automatic.
+schema 2 and 3 files get sample-rate conversion set to Automatic and start with no scenes (a schema 4 file without
+`scenes` has none either); parts of a scene naming a deleted device are dropped on load.
 
 ## Development
 

@@ -50,8 +50,10 @@ private struct Overview: View {
                 Help(symbol: "cursorarrow.click", text: "To remove a cable, drag it off the channel it plugs into and let go on empty canvas, or click it and press Delete.")
                 Help(symbol: "mic", text: "Apps see each virtual device as a microphone (what you send into it) and as a speaker; its inspector can make it one or the other, or hide it.")
             }
-            Button("Stream Without Chat…") { model.showStreamTemplate = true }
+            Menu("Templates") { TemplateMenuItems() }
+                .menuStyle(.button)
                 .buttonStyle(.glass)
+                .fixedSize()
         }
     }
 }
