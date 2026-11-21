@@ -20,12 +20,13 @@ videos, and the people you're talking to on Discord don't hear themselves on str
 9. [Stream without your voice chat (OBS and Discord)](#9-stream-without-your-voice-chat-obs-and-discord)
 10. [Podcast, DAW and call templates](#10-podcast-daw-and-call-templates)
 11. [Scenes](#11-scenes)
-12. [Turning routing on and off](#12-turning-routing-on-and-off)
-13. [Permissions](#13-permissions)
-14. [No feedback loops](#14-no-feedback-loops)
-15. [Updating or removing the driver](#15-updating-or-removing-the-driver)
-16. [Troubleshooting](#16-troubleshooting)
-17. [Shortcuts](#17-shortcuts)
+12. [MIDI controllers](#12-midi-controllers)
+13. [Turning routing on and off](#13-turning-routing-on-and-off)
+14. [Permissions](#14-permissions)
+15. [No feedback loops](#15-no-feedback-loops)
+16. [Updating or removing the driver](#16-updating-or-removing-the-driver)
+17. [Troubleshooting](#17-troubleshooting)
+18. [Shortcuts](#18-shortcuts)
 
 ## 1. Install Junction
 
@@ -158,7 +159,7 @@ device's own, and only while the app is playing into the device; when the app st
 DJ Deck" and its cables turn dashed until it plays again.
 
 This needs the Junction driver and **Junction Driver Installer** (allowed in System Settings › General › Login Items &
-Extensions; see section 15): the driver keeps each app's sound in a buffer of its own and the installer hands it to
+Extensions; see section 16): the driver keeps each app's sound in a buffer of its own and the installer hands it to
 Junction only. Without the installer the node shows why it hears nothing.
 
 You don't need an output for a device that another app records (like OBS): add one only when you want to listen
@@ -428,7 +429,56 @@ Turning a device off in a scene takes it away from apps while that scene is on.
 Scenes don't change a device's name, channels, sample rate or direction. A virtual device made after a scene stays as
 it is when you switch to that scene; deleting a device removes it from every scene.
 
-## 12. Turning routing on and off
+## 12. MIDI controllers
+
+Any MIDI controller can work Junction's levels and switches: faders, knobs, endless encoders, buttons, pads and keys,
+and program changes. Plug it in (USB, Bluetooth or a network session) and map its controls with **MIDI Learn**:
+
+1. Click the **keyboard button** (a small piano keyboard) beside what you want to control:
+   - a **cable's level** (in the cable's inspector, or beside each connection in a node's inspector),
+   - a node's **Mute**,
+   - an effect's switch, to **bypass** it,
+   - a virtual device's **Available to apps** switch,
+   - or, for a **scene**, right-click it in the sidebar and choose **Learn MIDI Control**.
+2. A banner above the canvas asks you to move a control. Turn a knob, push a fader, press a pad or send a program
+   change: that control now drives it, and the keyboard button is highlighted (point at it to see which control). **Cancel** (or Esc) stops listening.
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="screenshots/midi-learn-light.png">
+  <img src="screenshots/midi-learn-dark.png" alt="MIDI Learn waiting for a control for the microphone's mute, with a banner above the canvas">
+</picture>
+
+How controls behave:
+
+- **Levels** take faders, knobs and endless encoders. A fader or knob **picks up** the level first: if it isn't where
+  the level is, moving it does nothing until it reaches (or passes) the level, so the sound never jumps. The same
+  happens after you change the level on screen. Two thirds of the way up (100 of 127) is 0 dB; the top is +12 dB, the
+  bottom silence. An encoder nudges the level by 0.5 dB a step from wherever it is.
+- **Mutes, bypasses and device switches** flip with each press of a button, pad or key, or with a program change.
+  Read as a knob, the top half is on (muted, bypassed, available) and the bottom half off; an encoder turned up turns
+  it on, down off.
+- **Scenes** switch on a press, a key, a program change, or a knob passing halfway.
+
+Learning another control for the same thing replaces the old one. The keyboard button's right-click menu forgets a
+mapping.
+
+**Settings › MIDI** lists the controllers Junction hears and every mapping, with what it drives and the control that
+drives it. For each knob or fader you can choose how its values are read: **Knob or fader**, **Button**, or one of the
+three kinds of **encoder** (endless encoders send different values for up and down; if yours moves the wrong way or in
+big jumps, try another). The **−** button removes a mapping; Undo (⌘Z) brings it back.
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="screenshots/midi-settings-light.png">
+  <img src="screenshots/midi-settings-dark.png" alt="Settings listing a fader on the microphone's level, a pad muting System Audio, a button bypassing the noise gate and program changes switching scenes" width="72%">
+</picture>
+
+MIDI works wherever routing runs: with **Keep routing after quitting Junction** on (section 13), your controller keeps
+working after you quit Junction, and Junction finds the changes when you open it again. Deleting a node, cable, effect,
+device or scene removes the mappings that drive it, unless a scene still holds it: then the mapping works again once
+you switch to that scene. Moving a control isn't an undo step (the controller still shows where it is); learning one
+is.
+
+## 13. Turning routing on and off
 
 - The **power button** in the toolbar, **Routing › Routing On** (⇧⌘R), or the **menu bar icon** turn all routing on
   or off. When it's off, your virtual devices still exist but stay silent.
@@ -438,7 +488,8 @@ it is when you switch to that scene; deleting a device removes it from every sce
 - **Junction › Settings…** (also in the menu bar icon's menu) has **Open at login**, so routing is ready after a
   restart (Junction then starts in the menu bar, without its window), and **Show in Dock**: turn it off to keep
   Junction in the menu bar only. It also shows whether the driver installs without a password (section 2), turns
-  crash reports on (section 16) and uninstalls Junction (section 15).
+  crash reports on (section 17) and uninstalls Junction (section 16). Its **MIDI** section lists your MIDI
+  mappings (section 12).
 
 ### Routing in the background
 
@@ -458,10 +509,10 @@ when it needs it and sends it every change you make.
 
 If you build Junction yourself, routing runs inside Junction unless you build with `ROUTING_HELPER=1`.
 
-## 13. Permissions
+## 14. Permissions
 
 macOS asks for two permissions the first time Junction needs them. They belong to the process that routes:
-**Junction**, or **Junction Helper** when routing runs in the background (see section 12). The prompts and banners
+**Junction**, or **Junction Helper** when routing runs in the background (see section 13). The prompts and banners
 say which.
 
 - **Microphone**: to read any input, including Junction's own virtual devices.
@@ -477,7 +528,7 @@ If you said no:
 
 If you build Junction yourself, macOS may ask again after each rebuild.
 
-## 14. No feedback loops
+## 15. No feedback loops
 
 Sending a device's sound back into itself would make it ring louder and louder. Junction prevents that:
 
@@ -491,7 +542,7 @@ Sending a device's sound back into itself would make it ring louder and louder. 
 If you change Sound settings later in a way that would close a loop, Junction stops using that cable (it turns
 dashed) and explains why on the node.
 
-## 15. Updating or removing the driver
+## 16. Updating or removing the driver
 
 - When a new Junction comes with a newer driver, the sidebar and the menu bar show **Driver update available** with
   both version numbers. Click **Update Driver…**: your password, then a short silence while audio restarts.
@@ -518,11 +569,11 @@ Junction itself updates through **Junction › Check for Updates…** (also in t
 open it, Junction asks whether to check automatically. Updating the app doesn't touch the driver; a new driver, when
 there is one, is offered as above.
 
-## 16. Troubleshooting
+## 17. Troubleshooting
 
 | Problem | Try this |
 | --- | --- |
-| OBS hears nothing from the device | Is routing on (power button)? Is the device switched on in the sidebar? Are its cables solid, not dashed? Check both permissions (section 13). |
+| OBS hears nothing from the device | Is routing on (power button)? Is the device switched on in the sidebar? Are its cables solid, not dashed? Check both permissions (section 14). |
 | My voice chat is still on stream | Select System Audio and check that the chat app is in its **Leave out** list. Safari and other apps built on Safari share one process, so they can only be left out together. |
 | I hear things twice | An output on the device's canvas plays the device on top of what apps already play there. Remove the output, or use headphones that apps don't play on. |
 | Crackles or odd pitch | Crackles usually mean the buffer is too small: select the device or output and choose a bigger **Buffer size**. A node with a yellow triangle about sample rates is combined without conversion: select the virtual device or output it is wired to and set **Conversion** to **Automatic**, or set both devices to the same rate in Audio MIDI Setup. |
@@ -549,7 +600,7 @@ report as Copy Report, followed by the crash log macOS wrote. Nothing is sent un
 - **Copy Report** copies it, to paste into a bug report yourself. Copies of Junction built from source can only copy.
 - **Don't Send** leaves it. Each crash is offered once; crashes from before you turned the setting on never are.
 
-## 17. Shortcuts
+## 18. Shortcuts
 
 | Action | Shortcut |
 | --- | --- |
@@ -573,6 +624,7 @@ report as Copy Report, followed by the crash log macOS wrote. Nothing is sent un
 | Move between channels | ↑ ↓ ← → |
 | Connect a channel from the keyboard | Return, pick a channel, Return |
 | Back from the channels to the canvas | Escape |
+| Stop MIDI Learn | Escape (while its banner shows) |
 | Tidy Up | ⌃⌘T |
 | Reset a fader to 0 dB | Option-click, Command-click or double-click |
 | Add something where you click | Right-click the canvas |

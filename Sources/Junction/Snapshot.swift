@@ -22,6 +22,9 @@ enum Demo {
     static let missingPlugin = Effect(type: "aufx", subtype: "vrdr", manufacturer: "Exmp", state: Data([0x62, 0x70, 0x6C, 0x69]),
                                       name: "Vocal Rider", vendor: "Example Audio")
 
+    /// The made-up MIDI controller the mappings were learned from.
+    static let midiController = "Desk Controller"
+
     @MainActor static func load(into model: AppModel) {
         let stream = VirtualDevice(name: "Stream Mix", icon: .stream)
         // A microphone only, for a recording app, with its channels named.
@@ -69,6 +72,16 @@ enum Demo {
         if let index = recordingOnly.nodes.firstIndex(where: { $0.id == recordingMic.id }) { recordingOnly.nodes[index].gainDB = 3 }
         graph.scenes = [RoutingScene(name: "Streaming", capturing: graph),
                         RoutingScene(name: "Recording Only", capturing: recordingOnly)]
+        // A made-up controller: a fader on the mic's level, a pad muting System Audio, a button bypassing the
+        // gate, and program changes switching the scenes.
+        let micCable = graph.cables[2]
+        graph.midi = [
+            MIDIMapping(target: .cableLevel(micCable.id), trigger: .controller(channel: 0, number: 7), controller: midiController),
+            MIDIMapping(target: .nodeMute(system.id), trigger: .note(channel: 9, number: 36), controller: midiController),
+            MIDIMapping(target: .effectBypass(gate.id), trigger: .controller(channel: 0, number: 64), controller: midiController),
+            MIDIMapping(target: .scene(graph.scenes[0].id), trigger: .program(channel: 0, number: 0), controller: midiController),
+            MIDIMapping(target: .scene(graph.scenes[1].id), trigger: .program(channel: 0, number: 1), controller: midiController),
+        ]
         model.graph = graph
         model.showCanvas(stream.id)
         let inventory = Inventory(
@@ -120,6 +133,7 @@ enum Demo {
         model.selection = .node(system.id)
         // Settings as a released build shows them before the driver installer is allowed: crash reports on.
         model.setDemoDriverInstaller(.requiresApproval, offersCrashReports: true)
+        model.setDemoMIDI(learning: nil, sources: [midiController])
         EventLog.shared.add(.info, "Stream Mix: started. 4 cables, System Audio leaves out 3 processes, buffer 512 frames, about 12 ms")
         EventLog.shared.add(.error, "AirPods Pro: Couldn't combine the devices (the device went away). Attempt 1; trying again in 2 s.")
         EventLog.shared.add(.info, "AirPods Pro: started. 2 cables, buffer 512 frames, about 9 ms")
@@ -176,6 +190,14 @@ enum Snapshot {
                 model.selection = .node(mic.id)
             }
             await both("effects")
+            // MIDI learn waiting for a control for the mic's mute.
+            if let mic = model.canvasNodes.first(where: { !$0.effects.isEmpty && $0.kind == .defaultInput }) {
+                model.setDemoMIDI(learning: .nodeMute(mic.id), sources: [Demo.midiController])
+                await both("midi-learn")
+                model.setDemoMIDI(learning: nil, sources: [Demo.midiController])
+            }
+            // Settings listing the made-up controller's mappings.
+            await captureSettings(folder, "midi-settings")
             // The plugin picker, listing the made-up Mac's effect Audio Units.
             if let mic = model.canvasNodes.first(where: { !$0.effects.isEmpty && $0.kind == .defaultInput }) {
                 model.showPluginPicker(for: mic.id)
@@ -256,24 +278,8 @@ enum Snapshot {
             model.addStreamWithoutChat(excluding: [Demo.discord], deviceName: "Stream Mix")
             await both("no-driver")
 
-            if let appMenu = NSApp.mainMenu?.items.first?.submenu,
-               let index = appMenu.items.firstIndex(where: { $0.title.hasPrefix("Settings") }) {
-                appMenu.performActionForItem(at: index)
-            }
-            try? await Task.sleep(for: .milliseconds(800))
-            if let settings = NSApp.windows.first(where: { $0.isVisible && $0 != mainWindow && $0.contentView != nil
-                && ($0.identifier?.rawValue.localizedCaseInsensitiveContains("settings") ?? false) }) {
-                for (appearance, suffix) in [(NSAppearance.Name.aqua, "light"), (.darkAqua, "dark")] {
-                    NSApp.appearance = NSAppearance(named: appearance)
-                    try? await Task.sleep(for: .milliseconds(600))
-                    screencapture(["-x", "-o", "-l", "\(settings.windowNumber)"], folder, "settings-\(suffix)")
-                }
-                settings.close()
-            } else {
-                let windows = NSApp.windows.map { "\($0.title)|\($0.identifier?.rawValue ?? "-")|\($0.isVisible)" }
-                FileHandle.standardError.write(Data("Couldn't open the Settings window for a screenshot: \(windows)\n".utf8))
-            }
-            NSApp.windows.first { $0.isVisible && $0.contentView != nil }?.makeKeyAndOrderFront(nil)
+            model.setDemoMIDI(learning: nil, sources: [])
+            await captureSettings(folder, "settings")
 
             if let routing = NSApp.mainMenu?.items.first(where: { $0.title == "Routing" })?.submenu,
                let index = routing.items.firstIndex(where: { $0.title == "Show Routing Log" }) {
@@ -295,6 +301,28 @@ enum Snapshot {
             await both("minimum-size")
             NSApp.terminate(nil)
         }
+    }
+
+    /// Opens Settings, captures it in both appearances as `<name>-light.png` and `<name>-dark.png`, and closes it.
+    @MainActor static func captureSettings(_ folder: URL, _ name: String) async {
+        if let appMenu = NSApp.mainMenu?.items.first?.submenu,
+           let index = appMenu.items.firstIndex(where: { $0.title.hasPrefix("Settings") }) {
+            appMenu.performActionForItem(at: index)
+        }
+        try? await Task.sleep(for: .milliseconds(800))
+        if let settings = NSApp.windows.first(where: { $0.isVisible && $0 != mainWindow && $0.contentView != nil
+            && ($0.identifier?.rawValue.localizedCaseInsensitiveContains("settings") ?? false) }) {
+            for (appearance, suffix) in [(NSAppearance.Name.aqua, "light"), (.darkAqua, "dark")] {
+                NSApp.appearance = NSAppearance(named: appearance)
+                try? await Task.sleep(for: .milliseconds(600))
+                screencapture(["-x", "-o", "-l", "\(settings.windowNumber)"], folder, "\(name)-\(suffix)")
+            }
+            settings.close()
+        } else {
+            let windows = NSApp.windows.map { "\($0.title)|\($0.identifier?.rawValue ?? "-")|\($0.isVisible)" }
+            FileHandle.standardError.write(Data("Couldn't open the Settings window for a screenshot: \(windows)\n".utf8))
+        }
+        NSApp.windows.first { $0.isVisible && $0.contentView != nil }?.makeKeyAndOrderFront(nil)
     }
 
     @MainActor static func resize(_ width: CGFloat, _ height: CGFloat) {

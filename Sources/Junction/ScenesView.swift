@@ -55,6 +55,13 @@ struct ScenesSection: View {
                             .foregroundStyle(current == scene.id ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
                         Text(scene.name).lineLimit(1)
                         Spacer(minLength: 4)
+                        if model.midiLearning == .scene(scene.id) {
+                            Image(systemName: "pianokeys.inverse").symbolEffect(.pulse).foregroundStyle(.tint)
+                                .help("Move a control on your MIDI controller to switch to this scene")
+                        } else if let mapping = model.midiMapping(for: .scene(scene.id)) {
+                            Image(systemName: "pianokeys").foregroundStyle(.secondary)
+                                .help("MIDI: \(mapping.trigger.title)")
+                        }
                     }
                     .contentShape(Rectangle())
                 }
@@ -65,6 +72,13 @@ struct ScenesSection: View {
                     Button("Switch to \(scene.name)") { model.switchToScene(scene.id) }
                     Button("Update from Current Setup") { model.updateScene(scene.id) }
                     Button("Rename…") { model.sceneNaming = .rename(scene.id) }
+                    Divider()
+                    Button(model.midiLearning == .scene(scene.id) ? "Stop MIDI Learn" : "Learn MIDI Control") {
+                        model.learnMIDI(.scene(scene.id))
+                    }
+                    if let mapping = model.midiMapping(for: .scene(scene.id)) {
+                        Button("Forget MIDI Control (\(mapping.trigger.title))") { model.removeMIDIMapping(mapping.id) }
+                    }
                     Divider()
                     Button("Delete Scene", role: .destructive) { model.deleteScene(scene.id) }
                 }

@@ -56,6 +56,10 @@ final class AppModel {
     private(set) var plugins: [PluginInfo] = []
     /// Effects offered for bypass that the user chose to keep running.
     private(set) var keptStallingEffects: Set<UUID> = []
+    /// The control MIDI learn is waiting for a MIDI message for (nil: not learning).
+    private(set) var midiLearning: MIDITarget?
+    /// The MIDI controllers the process that routes listens to.
+    private(set) var midiSources: [String] = []
     /// A problem to show in an alert (driver install, publishing).
     var alert: String?
     /// macOS's Microphone permission, which covers every audio input: microphones, interfaces, Junction's devices.
@@ -108,6 +112,9 @@ final class AppModel {
     @ObservationIgnored private var helper: RoutingClient?
     /// Peak levels the helper sent since the meters were last read.
     @ObservationIgnored private var helperMeters: [PortKey: Float] = [:]
+    /// MIDI input and control, while routing runs inside the app (Junction Helper has its own otherwise).
+    @ObservationIgnored private var midiInput: MIDIInput?
+    @ObservationIgnored private var midiControl = MIDIControl()
     @ObservationIgnored private var watcher: HAL.SystemWatcher?
     @ObservationIgnored private var restartWatcher: HAL.SystemWatcher?
     /// Watches the rate and channel layout of every device a sink uses, so a change rebuilds that sink at once.
@@ -267,6 +274,13 @@ final class AppModel {
         router?.observeEffectStates { effect, state in
             Task { @MainActor in AppModel.shared.adoptEffectState(effect, state) }
         }
+        guard !isDemo, !RoutingHelper.isTesting else { return }
+        midiControl.learn(midiLearning)  // learning that had started in the helper goes on here
+        midiInput = MIDIInput(name: "Junction", queue: .main, onMessages: { messages, source in
+            MainActor.assumeIsolated { AppModel.shared.receiveMIDI(messages, from: source) }
+        }, onSources: { sources in
+            MainActor.assumeIsolated { AppModel.shared.midiSources = sources }
+        })
     }
 
     /// Connects to Junction Helper (launchd starts it); it routes what the app sends it.
@@ -284,6 +298,8 @@ final class AppModel {
         case .connected(let state):
             statuses = state.statuses
             microphoneAccess = Self.authorization(state.permission)
+            midiSources = state.midiSources
+            if midiLearning != nil { helper?.learnMIDI(midiLearning) }  // after the helper restarted
             Self.log.notice("Connected to \(state.processName, privacy: .public) (process \(state.processID))")
             refreshPermissions()
         case .notice(.statuses(let fresh)):
@@ -297,6 +313,10 @@ final class AppModel {
             refreshPermissions()
         case .notice(.effectState(let effect, let state)):
             adoptEffectState(effect, state)
+        case .notice(.midi(let actions)):
+            adoptMIDI(actions)
+        case .notice(.midiSources(let sources)):
+            midiSources = sources
         case .unavailable(let reason):
             // Route here instead, so audio keeps going.
             guard helper != nil else { return }
@@ -1113,7 +1133,11 @@ final class AppModel {
     /// drag, a fader). Routing, inventory and driver updates change `graph` directly and aren't undone.
     @discardableResult
     private func edit(_ name: String, coalescing key: String? = nil, _ change: (inout Graph) -> Void) -> Bool {
-        let changed = history.perform(name, coalescing: key, change)
+        // A mapping whose node, cable, effect, device or scene went goes with it (in the same undo step).
+        let changed = history.perform(name, coalescing: key) { graph in
+            change(&graph)
+            graph.pruneMIDI()
+        }
         if changed { historyVersion += 1 }
         return changed
     }
@@ -1548,6 +1572,81 @@ final class AppModel {
     private func sceneName(_ name: String) -> String {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
         return trimmed.isEmpty ? Scenes.newName(in: graph) : trimmed
+    }
+
+    // MARK: MIDI
+
+    /// MIDI learn: the next control moved on any MIDI controller drives `target`. Again, or nil, stops it.
+    func learnMIDI(_ target: MIDITarget?) {
+        let target = target == midiLearning ? nil : target
+        midiLearning = target
+        if let helper { helper.learnMIDI(target) } else { midiControl.learn(target) }
+    }
+
+    func cancelMIDILearn() { if midiLearning != nil { learnMIDI(nil) } }
+
+    func midiMapping(for target: MIDITarget) -> MIDIMapping? { graph.midiMapping(for: target) }
+
+    /// What a mapping drives, in words.
+    func describe(_ target: MIDITarget) -> String { graph.describe(target, inventory: inventory) }
+
+    func removeMIDIMapping(_ id: UUID) {
+        edit("Remove MIDI Control") { $0.midi.removeAll { $0.id == id } }
+    }
+
+    func setMIDIMode(_ id: UUID, _ mode: MIDIControlMode) {
+        edit("Change MIDI Control") { graph in
+            guard let index = graph.midi.firstIndex(where: { $0.id == id }) else { return }
+            graph.midi[index].mode = mode
+        }
+    }
+
+    /// Messages from a controller while routing runs here.
+    private func receiveMIDI(_ messages: [MIDIMessage], from source: String?) {
+        var working = graph
+        var actions: [MIDIAction] = []
+        for message in messages {
+            for action in midiControl.handle(message, from: source, graph: working)
+            where action.apply(to: &working, inventory: inventory) {
+                actions.append(action)
+            }
+        }
+        adoptMIDI(actions, log: true)
+    }
+
+    /// Makes the changes MIDI made where routing runs. Moving a control isn't an undo step (the controller still shows
+    /// where it is); a learned mapping is.
+    private func adoptMIDI(_ actions: [MIDIAction], log: Bool = false) {
+        var updated = graph
+        var learned: [MIDIMapping] = []
+        for action in actions {
+            if case .learned(let mapping) = action {
+                learned.append(mapping)
+            } else {
+                action.apply(to: &updated, inventory: inventory)
+                if log, case .scene(let id) = action, let scene = graph.scenes.first(where: { $0.id == id }) {
+                    note("Switched to scene \(scene.name) from MIDI")
+                }
+            }
+        }
+        if updated != graph { graph = updated }
+        guard !learned.isEmpty else { return }
+        midiLearning = nil
+        let inventory = inventory
+        edit("Learn MIDI Control") { graph in
+            for mapping in learned { MIDIAction.learned(mapping).apply(to: &graph, inventory: inventory) }
+        }
+        endEditing()
+        if log, let mapping = learned.last {
+            note("MIDI learn: \(mapping.trigger.title) now drives \(describe(mapping.target))")
+        }
+    }
+
+    /// Snapshot mode: show MIDI learn waiting for a control, and made-up controllers.
+    func setDemoMIDI(learning: MIDITarget?, sources: [String]) {
+        guard isDemo else { return }
+        midiLearning = learning
+        midiSources = sources
     }
 
     // MARK: Status for the canvas

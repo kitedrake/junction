@@ -46,6 +46,7 @@ final class HelperHost {
     private var watchedUIDs: Set<String> = []
     private var wakeObserver: NSObjectProtocol?
     private var timers: [Timer] = []
+    private var midiInput: MIDIInput?
 
     init() {
         let defaults = UserDefaults.standard
@@ -68,10 +69,22 @@ final class HelperHost {
         service.onOutdated = {  // after the reply has gone out
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { exit(0) }
         }
+        // MIDI while Junction is closed: the helper keeps the setup saved and the devices published itself.
+        service.onMIDIChange = { old, new in
+            try? Store().save(new)
+            let enabled = { (graph: Graph) in graph.virtualDevices.map { "\($0.id):\($0.isEnabled)" } }
+            if enabled(old) != enabled(new) {
+                let devices = new.virtualDevices
+                DispatchQueue.global().async { try? DriverClient.publish(devices) }
+            }
+        }
         Self.current = self
         service.start()
         listener.delegate = service
         listener.resume()
+        midiInput = MIDIInput(name: RoutingXPC.helperDisplayName, queue: .main,
+                              onMessages: { [service] messages, source in service.receiveMIDI(messages, from: source) },
+                              onSources: { [service] sources in service.midiSourcesChanged(sources) })
 
         watcher = HAL.SystemWatcher(queue: .main) { [service] in service.systemChanged() }
         restartWatcher = HAL.SystemWatcher(selectors: [kAudioHardwarePropertyServiceRestarted], queue: .main) { [service] in

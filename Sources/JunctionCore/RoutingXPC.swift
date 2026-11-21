@@ -21,7 +21,7 @@ import Security
 
 public enum RoutingXPC {
     /// Bumped when a message changes shape; an app and a helper that disagree don't talk (the app routes itself).
-    public static let protocolVersion = 2
+    public static let protocolVersion = 3
     public static let appBundleIdentifier = "local.junction.app"
     public static let helperBundleIdentifier = "local.junction.helper"
     /// The launchd label and the Mach service the helper listens on.
@@ -91,6 +91,8 @@ public enum RoutingRequest: Codable, Equatable, Sendable {
     case goodbye
     /// Open a plugin's own window in the helper, where its unit runs (`title` names it in the window's title bar).
     case openPluginWindow(effect: UUID, title: String)
+    /// MIDI learn: the next suitable message from any controller drives `target` (nil: stop learning).
+    case learnMIDI(MIDITarget?)
 }
 
 /// What the helper knows when an app says hello.
@@ -101,15 +103,18 @@ public struct HelperState: Codable, Equatable, Sendable {
     public var keepRouting: Bool
     public var permission: PermissionState
     public var statuses: [UUID: SinkStatus]
+    /// The MIDI controllers the helper listens to.
+    public var midiSources: [String]
 
     public init(protocolVersion: Int = RoutingXPC.protocolVersion, processName: String, processID: Int32,
-                keepRouting: Bool, permission: PermissionState, statuses: [UUID: SinkStatus]) {
+                keepRouting: Bool, permission: PermissionState, statuses: [UUID: SinkStatus], midiSources: [String] = []) {
         self.protocolVersion = protocolVersion
         self.processName = processName
         self.processID = processID
         self.keepRouting = keepRouting
         self.permission = permission
         self.statuses = statuses
+        self.midiSources = midiSources
     }
 }
 
@@ -145,6 +150,10 @@ public enum RoutingNotice: Codable, Equatable, Sendable {
     case permission(PermissionState)
     /// A plugin's window changed its unit's state: the app saves it with the graph.
     case effectState(effect: UUID, state: Data)
+    /// MIDI changed the setup (the helper has made these changes already): the app makes them too, and saves them.
+    case midi([MIDIAction])
+    /// The MIDI controllers the helper listens to changed.
+    case midiSources([String])
 }
 
 /// Whether the helper can be registered, as `SMAppService` reports it.

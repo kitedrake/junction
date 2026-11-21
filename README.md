@@ -135,6 +135,20 @@ are; a deleted device leaves every scene.
   <img src="docs/screenshots/scene-menu-dark.png" alt="The Routing menu listing the Streaming and Recording Only scenes" width="60%">
 </picture>
 
+### MIDI control
+
+Any MIDI controller can drive a cable's level, a node's mute, an effect's bypass, a virtual device's on/off switch and
+scene switching. Click the keyboard button beside a control (or **Learn MIDI Control** in a scene's context menu) and
+move a fader, knob, encoder, pad or key, or send a program change. Faders and knobs **pick up** a level before moving
+it, so it never jumps; endless encoders (three common kinds) nudge it. **Settings › MIDI** lists the controllers and
+mappings, sets how each control's values are read and removes mappings. MIDI is read wherever routing runs, so with
+routing in the background it keeps working after Junction quits.
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/midi-learn-light.png">
+  <img src="docs/screenshots/midi-learn-dark.png" alt="MIDI Learn waiting for a control for the microphone's mute" width="60%">
+</picture>
+
 *Screenshots made with Junction's snapshot mode on a made-up set of devices (see Development); GitHub shows the
 light or dark set to match your theme.*
 
@@ -262,6 +276,14 @@ Three parts (five with the helpers):
    "keep routing", the helper stops routing and quits when no app is connected. The app routes in its own process
    when the build doesn't use the helper, in tests, in snapshot mode, when the helper is turned off in Login Items,
    and when it can't reach the helper (it then logs why).
+   **MIDI control** (`MIDI.swift`, `MIDIInput.swift`) runs in the same process as routing: a CoreMIDI client listens to
+   every source (reconnecting as controllers come and go) and reads MIDI 1.0 channel messages out of CoreMIDI's
+   Universal MIDI Packets. `MIDIControl` turns each message into `MIDIAction`s using the graph's mappings, with
+   pick-up and button state kept per mapping, and makes MIDI learn's new mapping. The helper makes the changes,
+   replans (levels and mutes only change route and master gains through the kernel's atomic setters, as a fader in
+   the inspector does) and sends them to the app, which makes them too and saves; with no app connected, the helper
+   saves `graph.json` itself and publishes the devices when a switch turned one on or off. MIDI learn is asked of
+   the helper over XPC (protocol 3).
 5. **Junction Driver Installer** (`Sources/JunctionDriverDaemon`, `DriverDaemon.swift`): in builds made for it, a
    launch daemon at `Junction.app/Contents/Library/HelperTools/JunctionDriverDaemon` (plist
    `Contents/Library/LaunchDaemons/local.junction.driverd.plist`), registered with `SMAppService.daemon` when the app
@@ -285,7 +307,11 @@ missing; codes with bytes that aren't printable are written as `0x` and eight he
 shared-canvas versions is converted on load: each node moves to the canvas of the device it was wired to (unwired
 ones to the first device), and cables between devices are dropped. Schema 2 files load with automatic buffer sizes;
 schema 2 and 3 files get sample-rate conversion set to Automatic and start with no scenes and no effects (a schema 4
-file without `scenes` or `effects` has none either); parts of a scene naming a deleted device are dropped on load.
+file without `scenes`, `effects` or `midi` has none either); parts of a scene naming a deleted device are dropped on load.
+MIDI mappings are kept in `midi`: each one's `target` (a cable's level, a node's mute, an effect's bypass, a virtual
+device's switch or a scene, by ID), its `trigger` (a controller, note or program number and its channel), its `mode`
+(`absolute`, `toggle`, `relative`, `relativeOffset` or `relativeSigned`) and the `controller` it was learned from.
+Mappings whose target is gone (and no scene holds it) are dropped on load and with every edit.
 
 ## Development
 
@@ -418,6 +444,11 @@ system-audio permissions and **Install Driver…** with the first one.
   apart from it. Plugin windows open only while the plugin runs, and settings changed in a window
   just before Junction quits may be lost (they are read every 2 s). Music effects (`aumf`) and instruments aren't
   listed. Overload counts are Junction's own measurement of its rendering, not Core Audio's overload notifications.
+- MIDI control hasn't been tried with real controllers yet: CoreMIDI input (plugging in, Bluetooth and network
+  sessions, sources coming and going) is unverified; message handling, learn, pick-up, saving and the helper's
+  side are tested with recorded MIDI bytes. Only MIDI 1.0 messages are read (a MIDI 2.0 controller works in its
+  MIDI 1.0 mode), any connected controller sending a mapped message drives it, and a mapping can't be limited to one
+  controller.
 - Routing keeps running from the menu bar when the window is closed. It stops when Junction quits, unless it runs in
   Junction Helper with **Keep routing after quitting Junction** on.
 - Junction Helper hasn't been tried on a real Mac yet: registering it with `SMAppService`, launchd starting it at

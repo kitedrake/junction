@@ -149,14 +149,15 @@ public enum Editing {
         return Set(clipboard.nodes.compactMap { ids[$0.id] })
     }
 
-    /// Removes the selected nodes and their cables; a canvas's virtual device stays (deleting it is a separate,
-    /// confirmed step). Returns whether anything went.
+    /// Removes the selected nodes and their cables, with their MIDI mappings; a canvas's virtual device stays (deleting
+    /// it is a separate, confirmed step). Returns whether anything went.
     @discardableResult
     public static func remove(_ ids: Set<UUID>, from graph: inout Graph) -> Bool {
         let gone = Set(graph.nodes.filter { ids.contains($0.id) && !isDeviceNode($0) }.map(\.id))
         guard !gone.isEmpty else { return false }
         graph.nodes.removeAll { gone.contains($0.id) }
         graph.cables.removeAll { gone.contains($0.from.node) || gone.contains($0.to.node) }
+        graph.pruneMIDI()
         return true
     }
 

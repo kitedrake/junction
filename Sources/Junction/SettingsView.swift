@@ -16,8 +16,8 @@ enum DockIcon {
     }
 }
 
-/// Junction › Settings…: where routing runs, start at login, the Dock icon, driver installs, crash reports and
-/// uninstalling.
+/// Junction › Settings…: where routing runs, MIDI controls, start at login, the Dock icon, driver installs, crash
+/// reports and uninstalling.
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @AppStorage(DockIcon.key) private var showsDockIcon = true
@@ -28,6 +28,7 @@ struct SettingsView: View {
         @Bindable var model = model
         Form {
             RoutingSection(keepRouting: $model.keepRoutingAfterQuit)
+            MIDISection()
             Section {
                 Toggle("Open at login", isOn: Binding(
                     get: { loginStatus == .enabled || loginStatus == .requiresApproval },

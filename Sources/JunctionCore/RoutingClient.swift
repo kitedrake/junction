@@ -150,6 +150,9 @@ public final class RoutingClient: NSObject, RoutingAppXPC, @unchecked Sendable {
 
     public func requestMicrophone() { send(.requestMicrophone) { _ in } }
 
+    /// Starts MIDI learn for a target in the helper (nil stops it); what it learns comes back as a `.midi` notice.
+    public func learnMIDI(_ target: MIDITarget?) { send(.learnMIDI(target)) { _ in } }
+
     public func setKeepRouting(_ keep: Bool) {
         lock.withLock { keepRouting = keep }
         send(.keepRouting(keep)) { _ in }

@@ -251,7 +251,9 @@ struct RootView: View {
         } detail: {
             CanvasView()
                 .overlay(alignment: .top) {
-                    if !model.inventory.driver.isInstalled && !model.graph.virtualDevices.isEmpty {
+                    if let target = model.midiLearning {
+                        MIDILearnBanner(target: target)
+                    } else if !model.inventory.driver.isInstalled && !model.graph.virtualDevices.isEmpty {
                         DriverBanner()
                     } else if model.graph.isRoutingOn, model.needsMicrophone, model.microphoneAccess != .authorized {
                         MicrophoneBanner()

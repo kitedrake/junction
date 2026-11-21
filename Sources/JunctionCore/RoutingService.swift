@@ -73,6 +73,10 @@ public final class RoutingService: NSObject, NSXPCListenerDelegate, @unchecked S
     private var metersWereShown = false
     private var restartGeneration = 0
     private var refreshPending = false
+    /// MIDI control: mappings live in `graph`; this keeps learn and pick-up between messages.
+    private var midi = MIDIControl()
+    /// The MIDI controllers listened to (the helper's `MIDIInput` reports them).
+    public private(set) var midiSources: [String] = []
 
     /// Called on `queue` with each new plan (the helper watches the devices it uses).
     public var onPlan: ((RoutingPlan) -> Void)?
@@ -82,6 +86,9 @@ public final class RoutingService: NSObject, NSXPCListenerDelegate, @unchecked S
     public var onIdle: (() -> Void)?
     /// Called on `queue` when an app of another version connected: the helper quits (launchd starts the new one).
     public var onOutdated: (() -> Void)?
+    /// Called on `queue` when MIDI changed the setup while no app is connected (old setup, new one): the helper saves
+    /// it, and publishes the virtual devices when one was turned on or off. With an app connected, the app does both.
+    public var onMIDIChange: ((Graph, Graph) -> Void)?
 
     public init(graph: Graph, keepRouting: Bool, events: EventLog = .shared, queue: DispatchQueue = .main,
                 environment: Environment, makeRouter: (@escaping Router.StatusHandler) -> SinkRouting) {
@@ -215,6 +222,42 @@ public final class RoutingService: NSObject, NSXPCListenerDelegate, @unchecked S
         broadcast(.meters(meters))
     }
 
+    // MARK: MIDI
+
+    /// Messages from a MIDI controller (`source`: its name): each makes the changes its mappings call for, or, while
+    /// learning, the new mapping. Levels and mutes only change gains in the running sinks. Call on `queue`.
+    public func receiveMIDI(_ messages: [MIDIMessage], from source: String?) {
+        var actions: [MIDIAction] = []
+        let before = graph
+        for message in messages {
+            for action in midi.handle(message, from: source, graph: graph) where action.apply(to: &graph, inventory: inventory) {
+                actions.append(action)
+                if case .learned(let mapping) = action {
+                    events.add(.info, "MIDI learn: \(mapping.trigger.title) now drives \(graph.describe(mapping.target, inventory: inventory))")
+                } else if case .scene(let id) = action, let scene = graph.scenes.first(where: { $0.id == id }) {
+                    events.add(.info, "Switched to scene \(scene.name) from MIDI")
+                }
+            }
+        }
+        guard !actions.isEmpty else { return }
+        replan()
+        if clients.isEmpty {
+            onMIDIChange?(before, graph)
+        } else {
+            broadcast(.midi(actions))
+        }
+    }
+
+    /// The MIDI controllers listened to changed. Call on `queue`.
+    public func midiSourcesChanged(_ sources: [String]) {
+        guard sources != midiSources else { return }
+        midiSources = sources
+        broadcast(.midiSources(sources))
+    }
+
+    /// The target MIDI learn waits for, if any.
+    public var midiLearning: MIDITarget? { midi.learning }
+
     // MARK: Requests
 
     /// Answers one request from `connection` (nil: a request made in this process). Call on `queue`.
@@ -254,17 +297,22 @@ public final class RoutingService: NSObject, NSXPCListenerDelegate, @unchecked S
             return .done
         case .goodbye:
             if let connection { clients[ObjectIdentifier(connection)] = nil }
+            if clients.isEmpty { midi.learn(nil) }  // nobody is left to see what it learns
             stopIfIdle()
             return .done
         case .openPluginWindow(let effect, let title):
             guard isClient(connection) else { return .refused("Say hello first.") }
             return router.openPluginWindow(effect, title: title).map { .refused($0) } ?? .done
+        case .learnMIDI(let target):
+            guard isClient(connection) else { return .refused("Say hello first.") }
+            midi.learn(target)
+            return .done
         }
     }
 
     public var state: HelperState {
         HelperState(processName: environment.processName, processID: ProcessInfo.processInfo.processIdentifier,
-                    keepRouting: keepRouting, permission: permission, statuses: statuses)
+                    keepRouting: keepRouting, permission: permission, statuses: statuses, midiSources: midiSources)
     }
 
     /// Apps connected right now.

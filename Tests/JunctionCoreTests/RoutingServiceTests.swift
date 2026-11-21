@@ -145,8 +145,11 @@ final class RoutingServiceTests: XCTestCase {
                                 statuses: statuses)
         let requests: [RoutingRequest] = [.hello(protocolVersion: RoutingXPC.protocolVersion, appVersion: "1.2", keepRouting: true),
                                           .graph(graph), .rebuildAll, .requestMicrophone, .keepRouting(false), .goodbye,
-                                          .openPluginWindow(effect: node, title: "Space Reverb · Microphone")]
-        let replies: [RoutingReply] = [.welcome(state), .done, .refused("no"), .outdated("old")]
+                                          .openPluginWindow(effect: node, title: "Space Reverb · Microphone"),
+                                          .learnMIDI(.cableLevel(node)), .learnMIDI(.scene(sink)), .learnMIDI(nil)]
+        var withControllers = state
+        withControllers.midiSources = ["Desk Controller", "Pads"]
+        let replies: [RoutingReply] = [.welcome(state), .welcome(withControllers), .done, .refused("no"), .outdated("old")]
         let notices: [RoutingNotice] = [
             .statuses(statuses),
             .meters([PortKey(node: node, isOutput: true, channel: 1): 0.5, PortKey(node: node, isOutput: false, channel: 0): 0.25]),
@@ -156,6 +159,11 @@ final class RoutingServiceTests: XCTestCase {
             .statuses([sink: SinkStatus(state: .running, overloads: 3, load: 0.12,
                                         effectCosts: [node: EffectCost(load: 0.05, peak: 0.6, stalls: 4, latency: 0.003, outOfProcess: true)],
                                         stallingEffects: [node])]),
+            .midi([.cableLevel(node, dB: -6.5), .nodeMute(node, true), .effectBypass(node, false), .deviceEnabled(sink, true),
+                   .scene(sink),
+                   .learned(MIDIMapping(target: .effectBypass(node), trigger: .note(channel: 9, number: 36), controller: "Pads")),
+                   .learned(MIDIMapping(target: .cableLevel(node), trigger: .controller(channel: 0, number: 7), mode: .relativeSigned))]),
+            .midiSources(["Desk Controller"]), .midiSources([]),
         ]
         for request in requests {
             XCTAssertEqual(try RoutingXPC.decode(RoutingRequest.self, from: RoutingXPC.encode(request)), request)
@@ -248,6 +256,59 @@ final class RoutingServiceTests: XCTestCase {
         // Before hello, nothing opens.
         let reply = service.queue.sync { service.handle(.openPluginWindow(effect: running, title: "x"), from: NSXPCConnection()) }
         guard case .refused = reply else { return XCTFail("a stranger can't open windows") }
+        client.goodbye()
+    }
+
+    func testMIDIControlsLevelsAndMutesInTheHelperWithoutRebuilding() throws {
+        // A level on an encoder and the destination's mute on a pad, saved with the setup the helper routes at login.
+        let sink = try XCTUnwrap(Planner.plan(graph, inventory: inventory).sinks.first)
+        let cable = try XCTUnwrap(sink.routes.first).cable
+        let source = try XCTUnwrap(sink.routes.first).source.node
+        graph.midi = [MIDIMapping(target: .cableLevel(cable), trigger: .controller(channel: 0, number: 7), mode: .relative),
+                      MIDIMapping(target: .nodeMute(sink.sinkNode), trigger: .note(channel: 9, number: 36))]
+        makeService(saved: graph, keepRouting: true)
+        let saved = Box<[Graph]>([])
+        service.onMIDIChange = { _, new in saved.value.append(new) }
+        waitUntil("routing at launch") { router.applied.count == 1 }
+        let before = try XCTUnwrap(router.applied.last?.sinks.first)
+
+        // Two encoder steps up while Junction is closed: the gain changes, the structure doesn't (no rebuild), and the
+        // helper saves the setup itself.
+        service.queue.sync { service.receiveMIDI(MIDIMessage.parse([0xB0, 0x07, 0x02]), from: "Desk Controller") }
+        waitUntil("the new level") { router.applied.count == 2 }
+        let louder = try XCTUnwrap(router.applied.last?.sinks.first)
+        XCTAssertEqual(louder.structureKey, before.structureKey, "a level never rebuilds a sink")
+        let route = try XCTUnwrap(louder.routes.first { $0.cable == cable })
+        XCTAssertEqual(route.gain, Gain.linear(graph.node(source)!.gainDB) * Gain.linear(2 * MIDIFader.stepDB), accuracy: 0.0001)
+        XCTAssertEqual(saved.value.last?.cables.first { $0.id == cable }?.gainDB, 2 * MIDIFader.stepDB)
+
+        // The pad mutes the destination: its master gain goes to 0, again without a rebuild.
+        service.queue.sync { service.receiveMIDI(MIDIMessage.parse([0x99, 0x24, 0x7F, 0x89, 0x24, 0x00]), from: "Pads") }
+        waitUntil("the mute") { router.applied.count == 3 }
+        let muted = try XCTUnwrap(router.applied.last?.sinks.first)
+        XCTAssertEqual(muted.masterGain, 0)
+        XCTAssertEqual(muted.structureKey, before.structureKey)
+        XCTAssertEqual(saved.value.count, 2)
+
+        // With Junction open: it learns through the helper, and hears every change to make it too (the app saves).
+        let (client, heard) = makeClient(keepRouting: true)
+        waitUntil("hello") { heard.welcome != nil }
+        client.learnMIDI(.nodeMute(source))
+        waitUntil("learning") { service.queue.sync { service.midiLearning } == .nodeMute(source) }
+        service.queue.sync { service.receiveMIDI(MIDIMessage.parse([0x90, 0x28, 0x64]), from: "Pads") }
+        waitUntil("the learned mapping") {
+            heard.notices.contains { notice in
+                guard case .midi(let actions) = notice, actions.count == 1, case .learned(let mapping) = actions[0] else { return false }
+                return mapping.target == .nodeMute(source) && mapping.trigger == .note(channel: 0, number: 40)
+            }
+        }
+        XCTAssertNil(service.queue.sync { service.midiLearning })
+        XCTAssertEqual(service.queue.sync { service.graph.midi.count }, 3)
+        service.queue.sync { service.receiveMIDI(MIDIMessage.parse([0xB0, 0x07, 0x7F]), from: "Desk Controller") }
+        waitUntil("the level notice") { heard.notices.contains(.midi([.cableLevel(cable, dB: MIDIFader.stepDB)])) }
+        XCTAssertEqual(saved.value.count, 2, "with an app connected, the app saves")
+        service.queue.sync { service.midiSourcesChanged(["Desk Controller", "Pads"]) }
+        waitUntil("the controllers") { heard.notices.contains(.midiSources(["Desk Controller", "Pads"])) }
         client.goodbye()
     }
 

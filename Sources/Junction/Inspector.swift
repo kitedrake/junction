@@ -111,7 +111,11 @@ private struct NodeInspector: View {
                 GainSlider(title: ports.outputs > 0 && ports.inputs == 0 ? "Level sent" : "Level", dB: node.gainDB) { value in
                     model.updateNode(node.id, "Change Level") { $0.gainDB = value }
                 }
-                Toggle("Mute", isOn: Binding(get: { node.isMuted }, set: { value in model.updateNode(node.id, value ? "Mute" : "Unmute") { $0.isMuted = value } }))
+                HStack {
+                    Toggle("Mute", isOn: Binding(get: { node.isMuted }, set: { value in model.updateNode(node.id, value ? "Mute" : "Unmute") { $0.isMuted = value } }))
+                    Spacer()
+                    MIDILearnButton(target: .nodeMute(node.id))
+                }
                 if node.kind.isTap {
                     Toggle(isOn: Binding(get: { node.mutesOriginal }, set: { value in model.updateNode(node.id, "Only Through Junction") { $0.mutesOriginal = value } })) {
                         VStack(alignment: .leading, spacing: 2) {
@@ -197,9 +201,13 @@ private struct VirtualDeviceSettings: View {
     var body: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 10) {
-                Toggle("Available to apps", isOn: Binding(
-                    get: { device.isEnabled },
-                    set: { value in model.updateVirtualDevice(device.id, "Available to Apps") { $0.isEnabled = value } }))
+                HStack {
+                    Toggle("Available to apps", isOn: Binding(
+                        get: { device.isEnabled },
+                        set: { value in model.updateVirtualDevice(device.id, "Available to Apps") { $0.isEnabled = value } }))
+                    Spacer()
+                    MIDILearnButton(target: .deviceEnabled(device.id))
+                }
                 LabeledContent("Name") {
                     TextField("Name", text: $name)
                         .onSubmit { commitName() }
@@ -506,6 +514,7 @@ private struct EffectRow: View {
                     }
                 }
                 Spacer()
+                MIDILearnButton(target: .effectBypass(effect.id))
                 Toggle("On", isOn: Binding(get: { !effect.bypass },
                                            set: { model.setEffectBypass(effect.id, in: node.id, !$0) }))
                     .toggleStyle(.switch)
@@ -736,7 +745,10 @@ private struct CableRow: View {
                 .buttonStyle(.borderless)
                 .help("Disconnect")
             }
-            GainSlider(title: nil, dB: cable.gainDB) { value in model.updateCable(cable.id) { $0.gainDB = value } }
+            HStack(alignment: .bottom, spacing: 6) {
+                GainSlider(title: nil, dB: cable.gainDB) { value in model.updateCable(cable.id) { $0.gainDB = value } }
+                MIDILearnButton(target: .cableLevel(cable.id))
+            }
         }
         .opacity(model.plan.idleCables.contains(cable.id) ? 0.6 : 1)
     }
@@ -760,8 +772,11 @@ private struct CableInspector: View {
                 .help("From the start of the cable to the end, including the buffers on both sides")
         }
         GroupBox {
-            GainSlider(title: "Level", dB: cable.gainDB) { value in model.updateCable(cable.id) { $0.gainDB = value } }
-                .padding(6)
+            HStack(alignment: .bottom, spacing: 6) {
+                GainSlider(title: "Level", dB: cable.gainDB) { value in model.updateCable(cable.id) { $0.gainDB = value } }
+                MIDILearnButton(target: .cableLevel(cable.id))
+            }
+            .padding(6)
         }
         Button("Disconnect", role: .destructive) { model.removeCable(cable.id) }
     }

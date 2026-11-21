@@ -223,11 +223,15 @@ final class PlannerTests: XCTestCase {
         XCTAssertEqual(loadedDevice.name, device.name)
         XCTAssertEqual(loaded.scenes, [], "schema 3 files have no scenes")
         XCTAssertTrue(loaded.nodes.allSatisfy(\.effects.isEmpty), "schema 3 files have no effects")
-        // A schema 3 file half written by a development build that had effects loses them, like its scenes.
+        XCTAssertEqual(loaded.midi, [], "schema 3 files have no MIDI mappings")
+        // A schema 3 file half written by a development build that had effects or MIDI mappings loses them, like its
+        // scenes.
         var halfWritten = graph
         halfWritten.nodes[sinkIndex].effects = [Effect(.limiter)]
+        halfWritten.midi = [MIDIMapping(target: .nodeMute(graph.nodes[sinkIndex].id), trigger: .note(channel: 0, number: 36))]
         halfWritten.upgrade()
         XCTAssertEqual(halfWritten.nodes[sinkIndex].effects, [])
+        XCTAssertEqual(halfWritten.midi, [])
 
         // Schema 4 keeps the choice.
         var changed = loaded
