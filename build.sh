@@ -31,6 +31,10 @@ if { [ -n "$feed" ] && [ -z "$key" ]; } || { [ -z "$feed" ] && [ -n "$key" ]; };
   echo "Set both UPDATE_FEED_URL and UPDATE_PUBLIC_KEY, or neither." >&2
   exit 1
 fi
+# SwiftPM sandboxes its manifest builds; inside another sandbox (Nightshift's checks, for example) that fails with
+# "sandbox_apply: Operation not permitted", so turn SwiftPM's own sandbox off there.
+spm_flags=""
+if ! /usr/bin/sandbox-exec -p '(version 1)(allow default)' /usr/bin/true 2>/dev/null; then spm_flags="--disable-sandbox"; fi
 grep -q "#define kDriverVersion \"$driver_version\"" Driver/JunctionDriver.c \
   || { echo "kDriverVersion in Driver/JunctionDriver.c doesn't match Driver/VERSION ($driver_version)" >&2; exit 1; }
 
@@ -58,8 +62,8 @@ sed -e "s/__VERSION__/$driver_version/" -e "s/__BUILD__/$build_number/" Driver/I
 sign_code "$driver"
 
 # 2. The app.
-xcrun swift build -c release --product Junction
-bindir="$(xcrun swift build -c release --show-bin-path)"
+xcrun swift build $spm_flags -c release --product Junction
+bindir="$(xcrun swift build $spm_flags -c release --show-bin-path)"
 app="build/Junction.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/Frameworks"

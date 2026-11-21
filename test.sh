@@ -6,7 +6,10 @@ cd "$(dirname "$0")"
 if [ -d /Applications/Xcode.app/Contents/Developer ]; then
   export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 fi
-xcrun swift test "$@"
+# Inside another sandbox SwiftPM's own one can't start: turn it off there (see build.sh).
+spm_flags=""
+if ! /usr/bin/sandbox-exec -p '(version 1)(allow default)' /usr/bin/true 2>/dev/null; then spm_flags="--disable-sandbox"; fi
+xcrun swift test $spm_flags "$@"
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/junction-harness.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
 sanitize="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
