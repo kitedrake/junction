@@ -18,8 +18,9 @@ enum CommandLineTool {
               --list            Driver status, audio devices, default devices and apps using audio.
               --diagnose [file] A report for bug reports: versions, devices, apps, the routing plan, recent routing
                                 events and the saved setup (it names your devices and apps). No audio is opened.
-              --self-test [dir] Checks the bundled driver and routing helper, the planner, the mixing kernel, the
-                                helper's XPC messages and saving (no audio; nothing is registered or launched).
+              --self-test [dir] Checks the bundled driver, routing helper and driver installer, the planner, the mixing
+                                kernel, both helpers' XPC messages, crash reports and saving (no audio; nothing is
+                                installed, registered or launched).
               --loopback-test   With the driver installed: plays a tone into a temporary virtual device and checks
                                 it comes back out. Needs microphone permission for the calling app (e.g. Terminal).
               --device-test     With the driver installed: adds a temporary virtual device, renames it, changes its
@@ -149,6 +150,47 @@ enum CommandLineTool {
         }
         let usesHelper = Bundle.main.object(forInfoDictionaryKey: RoutingXPC.usesHelperKey) as? Bool
         check(usesHelper != nil, "this build routes \(usesHelper == true ? "in the helper" : "inside the app")")
+
+        // Junction Driver Installer: a signed executable with the launch daemon SMAppService registers, and the
+        // signature check it makes before installing, applied to the driver in this app.
+        let daemonURL = DriverInstaller.executableURL
+        if FileManager.default.isExecutableFile(atPath: daemonURL.path) {
+            let daemon = CodeSignature.read(daemonURL)
+            check(daemon.isValid, "driver installer is code-signed")
+            check(daemon.identifier == DriverDaemon.label, "driver installer is signed as \(DriverDaemon.label) (\(daemon.identifier ?? "none"))")
+            check(DriverDaemon.appBundle(containingExecutable: daemonURL)?.path == Bundle.main.bundleURL.resolvingSymlinksInPath().path,
+                  "driver installer finds the Junction.app it is in")
+            if let driver = DriverClient.bundledDriverURL {
+                let verdict = DriverInstallPolicy.verdict(driver: CodeSignature.read(driver), own: daemon)
+                let expected: SignatureVerdict = (daemon.teamID ?? "").isEmpty ? .adHoc : .matches
+                check(verdict == expected, "driver installer would \(verdict == .matches ? "install" : "refuse") the bundled driver"
+                      + (verdict.problem.map { " (\($0))" } ?? ""))
+            }
+        } else {
+            check(false, "driver installer bundled (\(DriverDaemon.executablePath))")
+        }
+        if let plist = NSDictionary(contentsOf: DriverInstaller.plistURL) as? [String: Any] {
+            check(plist["Label"] as? String == DriverDaemon.label
+                  && plist["BundleProgram"] as? String == DriverDaemon.executablePath
+                  && (plist["MachServices"] as? [String: Any])?[DriverDaemon.machServiceName] != nil
+                  && (plist["AssociatedBundleIdentifiers"] as? [String])?.contains(RoutingXPC.appBundleIdentifier) == true,
+                  "launch daemon names the driver installer and its XPC service")
+        } else {
+            check(false, "launch daemon bundled (Contents/Library/LaunchDaemons/\(DriverDaemon.plistName))")
+        }
+        let usesDaemon = Bundle.main.object(forInfoDictionaryKey: DriverDaemon.usesDaemonKey) as? Bool
+        check(usesDaemon != nil, "this build installs the driver "
+              + (usesDaemon == true ? "with the driver installer once approved" : "with an administrator password"))
+        check(daemonRoundTrip(), "driver installer answers over XPC and installs only the bundled copy (stand-in, nothing installed)")
+
+        // Crash reports: a release build's address is https; others copy the report.
+        let crashURL = Bundle.main.object(forInfoDictionaryKey: CrashReports.urlKey)
+        check(crashURL == nil || CrashReporting.destination != nil,
+              "crash reports " + (CrashReporting.destination.map { "are sent to \($0.absoluteString)" } ?? "are copied (no CRASH_REPORT_URL)"))
+        let crash = CrashReports.parse(#"{"app_name":"Junction","bug_type":"309","app_version":"1.0","name":"Junction"}"# + "\n{}",
+                                       file: URL(fileURLWithPath: "Junction-2026-01-01-000000.ips"), modified: Date())
+        check(crash.map { CrashReports.compose(diagnostic: "diagnostic\n", crashes: [$0]).contains("==== Crash log: Junction-") } ?? false,
+              "a crash log is recognised and goes into the report")
 
         // Planning: "stream without chat" lays out as expected.
         var graph = Graph()
@@ -285,6 +327,45 @@ enum CommandLineTool {
         let routed = standIn.planned.wait(timeout: .now() + 5) == .success
         client.goodbye()
         return routed
+    }
+
+    /// Asks a DriverDaemonService on an anonymous listener to install, with stand-in actions that touch nothing.
+    private static func daemonRoundTrip() -> Bool {
+        final class StandIn: PrivilegedActions, @unchecked Sendable {
+            let staging = URL(fileURLWithPath: "/nonexistent/.JunctionDriver.installing")
+            var staged: URL?
+            var committed = false
+            func driverVersion(at url: URL) -> String? {
+                url == staging || url.path.hasSuffix(DriverDaemon.bundledDriverPath) ? "1.0.0" : nil
+            }
+            func stage(_ source: URL) throws -> URL {
+                staged = source
+                return staging
+            }
+            func signature(of url: URL) -> CodeSignature { CodeSignature(isValid: true, identifier: DriverClient.bundleID, teamID: "SELFTEST01") }
+            func ownSignature() -> CodeSignature { CodeSignature(isValid: true, identifier: DriverDaemon.label, teamID: "SELFTEST01") }
+            func commit(_ staged: URL) throws { committed = true }
+            func discard(_ staged: URL) {}
+            func removeInstalled() throws -> Bool { false }
+            func restartCoreAudio() {}
+        }
+        let standIn = StandIn()
+        let app = Bundle.main.bundleURL
+        let service = DriverDaemonService(app: app, actions: standIn, clientRequirement: nil, checksClients: false)
+        let listener = NSXPCListener.anonymous()
+        listener.delegate = service
+        listener.resume()
+        defer { listener.invalidate() }
+        let answered = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) var outcome: DriverDaemonClient.Outcome?
+        DriverDaemonClient(endpoint: listener.endpoint).send(.installDriver(allowOlder: false), timeout: 5,
+                                                             queue: DispatchQueue(label: "local.junction.self-test.daemon")) {
+            outcome = $0
+            answered.signal()
+        }
+        guard answered.wait(timeout: .now() + 10) == .success else { return false }
+        return outcome == .reply(.installed(version: "1.0.0")) && standIn.staged == DriverDaemon.bundledDriver(inApp: app)
+            && standIn.committed
     }
 
     private static func signatureIsValid(_ url: URL) -> Bool {

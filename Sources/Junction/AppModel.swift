@@ -4,6 +4,7 @@ import CoreAudio
 import JunctionCore
 import Observation
 import os
+import ServiceManagement
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -59,6 +60,22 @@ final class AppModel {
     /// The routing log (newest last), for the Routing Log window.
     private(set) var events: [RoutingEvent] = []
     private(set) var isInstallingDriver = false
+    /// What macOS says about Junction Driver Installer, which installs the driver without a password (nil: this build
+    /// doesn't use it).
+    private(set) var driverInstaller: DaemonApproval?
+    /// Settings › Uninstall Junction… is under way.
+    private(set) var isUninstalling = false
+    /// A crash report waiting for the user to read, then send, copy or leave.
+    var crashOffer: CrashOffer?
+    /// Opt-in: after a crash, the next launch offers a report.
+    var offersCrashReports = UserDefaults.standard.bool(forKey: CrashReports.optInKey) {
+        didSet {
+            guard !isDemo, offersCrashReports != oldValue else { return }
+            UserDefaults.standard.set(offersCrashReports, forKey: CrashReports.optInKey)
+            // Only crashes from now on are offered.
+            if offersCrashReports { UserDefaults.standard.set(Date(), forKey: CrashReports.checkedKey) }
+        }
+    }
     /// The known chat apps (`Templates.chatApps`) installed on this Mac.
     private(set) var installedChatApps: [AppRef] = []
     /// The known music apps (`Templates.dawApps`) installed on this Mac.
@@ -111,6 +128,12 @@ final class AppModel {
     @ObservationIgnored private var textObservers: [NSObjectProtocol] = []
     /// The pasteboard's change count when Junction last put nodes on it.
     @ObservationIgnored private var clipboardChangeCount = 0
+    /// What to do when Junction Driver Installer can't be reached: the same change with the administrator prompt.
+    @ObservationIgnored private var driverChangeWithPassword: (() -> Void)?
+    /// Called once a driver install or removal is over, with whether it worked.
+    @ObservationIgnored private var driverChangeDone: ((Bool) -> Void)?
+    /// Junction uninstalled itself: nothing is saved any more.
+    @ObservationIgnored private var isUninstalled = false
     private static let log = Logger(subsystem: "local.junction", category: "routing")
 
     init(demo: Bool) {
@@ -164,6 +187,10 @@ final class AppModel {
             }
             startRoutingInProcess()
         }
+        // Builds made for the driver installer register it now, so Settings can show whether it's approved.
+        if DriverInstaller.buildUsesDaemon, DriverInstaller.isBundled, !RoutingHelper.isTesting {
+            driverInstaller = DriverInstaller.register()
+        }
         // Rates, volumes and mutes changed from outside while Junction wasn't running (Audio MIDI Setup, a DAW, Sound
         // settings) are kept.
         if let published = DriverClient.publishedDevices() {
@@ -205,6 +232,11 @@ final class AppModel {
         if helper == nil { microphoneAccess = AVCaptureDevice.authorizationStatus(for: .audio) }
         replan(force: true)
         refreshPermissions()
+        // Once devices and the plan are known, so the report shows them.
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2))
+            AppModel.shared.checkForCrashes()
+        }
     }
 
     func stop() {
@@ -320,7 +352,7 @@ final class AppModel {
     }
 
     private func saveNow() {
-        guard !isDemo else { return }
+        guard !isDemo, !isUninstalled else { return }
         do {
             try store.save(graph)
         } catch {
@@ -669,12 +701,71 @@ final class AppModel {
             alert = "This copy of Junction doesn't contain the driver. Build it with build.sh."
             return
         }
-        runPrivileged(script: script, arguments: [driver.path], prompt: "Junction wants to install its audio driver.")
+        var allowOlder = false
+        if case .appIsOlder = driverUpdate { allowOlder = true }  // the user picked Install Older Driver…
+        changeDriver(.installDriver(allowOlder: allowOlder)) {
+            AppModel.shared.runPrivileged(script: script, arguments: [driver.path], prompt: "Junction wants to install its audio driver.")
+        }
     }
 
-    func uninstallDriver() {
-        guard let script = Bundle.main.url(forResource: "uninstall-driver", withExtension: "sh") else { return }
-        runPrivileged(script: script, arguments: [], prompt: "Junction wants to remove its audio driver.")
+    func uninstallDriver() { removeDriver(done: nil) }
+
+    private func removeDriver(done: ((Bool) -> Void)?) {
+        guard let script = Bundle.main.url(forResource: "uninstall-driver", withExtension: "sh") else {
+            done?(false)
+            return
+        }
+        changeDriver(.removeDriver, done: done) {
+            AppModel.shared.runPrivileged(script: script, arguments: [], prompt: "Junction wants to remove its audio driver.")
+        }
+    }
+
+    /// Installs or removes the driver through Junction Driver Installer when this build has it and the user approved
+    /// it; otherwise, or when it can't be reached, through macOS's administrator prompt (`withPassword`).
+    private func changeDriver(_ request: DaemonRequest, done: ((Bool) -> Void)? = nil, withPassword: @escaping () -> Void) {
+        guard !isDemo, !isInstallingDriver else {
+            done?(false)
+            return
+        }
+        driverChangeDone = done
+        if DriverInstaller.buildUsesDaemon, DriverInstaller.isBundled, !RoutingHelper.isTesting {
+            driverInstaller = DriverInstaller.register()
+        }
+        let route = DriverInstallRoute.choose(buildUsesDaemon: DriverInstaller.buildUsesDaemon,
+                                              daemonBundled: DriverInstaller.isBundled,
+                                              approval: driverInstaller ?? .notRegistered)
+        guard route == .daemon else {
+            if case .administratorPrompt(let reason) = route, DriverInstaller.buildUsesDaemon {
+                note("\(reason) Asking for an administrator password instead.", .warning)
+            }
+            withPassword()
+            return
+        }
+        isInstallingDriver = true
+        driverChangeWithPassword = withPassword
+        DriverInstaller.client().send(request) { outcome in
+            Task { @MainActor in AppModel.shared.driverInstallerAnswered(outcome) }
+        }
+    }
+
+    private func driverInstallerAnswered(_ outcome: DriverDaemonClient.Outcome) {
+        let withPassword = driverChangeWithPassword
+        driverChangeWithPassword = nil
+        switch DriverInstallRoute.next(after: outcome) {
+        case .done(let message):
+            note(message)
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(2))  // coreaudiod restarts
+                AppModel.shared.driverChanged(succeeded: true, problem: nil)
+            }
+        case .problem(let reason):
+            note("\(DriverDaemon.displayName): \(reason)", .error)
+            driverChanged(succeeded: false, problem: reason)
+        case .fallBack(let reason):
+            isInstallingDriver = false
+            note("\(reason) Asking for an administrator password instead.", .warning)
+            withPassword?()
+        }
     }
 
     /// Runs a bundled script as root after macOS asks for an administrator password. Core Audio restarts, so all
@@ -691,22 +782,144 @@ final class AppModel {
             NSAppleScript(source: source)?.executeAndReturnError(&error)
             let message = error?[NSAppleScript.errorMessage] as? String
             let cancelled = (error?[NSAppleScript.errorNumber] as? Int) == -128
+            let succeeded = error == nil
             try? await Task.sleep(for: .seconds(2))  // coreaudiod restarts
             await MainActor.run {
-                let model = AppModel.shared
-                model.isInstallingDriver = false
-                if let message, !cancelled { model.alert = message }
-                model.refreshInventory()
-                model.publishVirtualDevices()
-                // The script restarts Core Audio; rebuild routing even if the restart notice didn't arrive.
-                let noticed = model.lastCoreAudioRestart.map { Date().timeIntervalSince($0) < 15 } ?? false
-                if message == nil, !noticed {
-                    AppModel.shared.note("No restart notice after the driver script; rebuilding routing anyway", .warning)
-                    model.coreAudioRestarted()
-                    model.helper?.rebuildAll()
-                }
+                AppModel.shared.driverChanged(succeeded: succeeded, problem: cancelled ? nil : message)
             }
         }
+    }
+
+    /// After a driver install or removal: follow the new state and rebuild routing (the change restarts Core Audio).
+    private func driverChanged(succeeded: Bool, problem: String?) {
+        isInstallingDriver = false
+        if let problem { alert = problem }
+        let done = driverChangeDone
+        driverChangeDone = nil
+        refreshInventory()
+        publishVirtualDevices()
+        // Rebuild routing even if the restart notice didn't arrive.
+        let noticed = lastCoreAudioRestart.map { Date().timeIntervalSince($0) < 15 } ?? false
+        if succeeded, !noticed, !isUninstalling {
+            note("No restart notice after the driver change; rebuilding routing anyway", .warning)
+            coreAudioRestarted()
+            helper?.rebuildAll()
+        }
+        done?(succeeded)
+    }
+
+    // MARK: Uninstalling
+
+    /// Settings › Uninstall Junction…: removes the driver, Junction Helper, the driver installer and the login item,
+    /// and with `removeSettings` the saved setup and preferences too, then quits. The user moves the app to the Bin.
+    func uninstallJunction(removeSettings: Bool) {
+        guard !isDemo, !isUninstalling else { return }
+        let driverInstalled = inventory.driver.isInstalled || FileManager.default.fileExists(atPath: DriverClient.installPath)
+        isUninstalling = true
+        note("Uninstalling Junction\(removeSettings ? " and its settings" : "")")
+        uninstall(CleanUninstall.steps(driverInstalled: driverInstalled, removeSettings: removeSettings)[...])
+    }
+
+    private func uninstall(_ steps: ArraySlice<CleanUninstall.Step>) {
+        guard let step = steps.first else { return }
+        let rest = steps.dropFirst()
+        switch step {
+        case .removeDriver:
+            removeDriver { removed in
+                let model = AppModel.shared
+                guard removed else {
+                    // Cancelled or failed: nothing else has been removed yet.
+                    model.isUninstalling = false
+                    model.note("Uninstalling stopped: the driver wasn't removed.", .warning)
+                    return
+                }
+                model.uninstall(rest)
+            }
+            return
+        case .stopRouting:
+            timers.forEach { $0.invalidate() }
+            timers.removeAll()
+            restartTask?.cancel()
+            router?.stopAll()
+            router = nil
+            helper?.goodbye()
+            helper = nil
+        case .unregisterRoutingHelper:
+            RoutingHelper.unregister()
+        case .unregisterDriverInstaller:
+            DriverInstaller.unregister()
+        case .unregisterLoginItem:
+            if SMAppService.mainApp.status == .enabled || SMAppService.mainApp.status == .requiresApproval {
+                try? SMAppService.mainApp.unregister()
+            }
+        case .removeSavedSetup:
+            isUninstalled = true
+            saveTask?.cancel()
+            EventLog.shared.keepInMemoryOnly()  // so the routing log doesn't write its file again
+            try? FileManager.default.removeItem(at: store.folder)
+        case .removePreferences:
+            isUninstalled = true
+            for domain in CleanUninstall.preferenceDomains { UserDefaults.standard.removePersistentDomain(forName: domain) }
+        case .quit:
+            let done = NSAlert()
+            done.messageText = "Junction is uninstalled"
+            done.informativeText = isUninstalled
+                ? "Its driver, helpers, saved setup and settings are gone. Move Junction to the Bin to finish."
+                : "Its driver and helpers are gone; your setup stays in case you install Junction again. Move Junction to the Bin to finish."
+            done.runModal()
+            NSApp.terminate(nil)
+            return
+        }
+        uninstall(rest)
+    }
+
+    // MARK: Crash reports
+
+    /// With crash reports on: crash logs macOS wrote for Junction or Junction Helper since the last look become an offer.
+    func checkForCrashes() {
+        guard !isDemo, offersCrashReports, !RoutingHelper.isTesting, crashOffer == nil else { return }
+        guard let since = UserDefaults.standard.object(forKey: CrashReports.checkedKey) as? Date else {
+            UserDefaults.standard.set(Date(), forKey: CrashReports.checkedKey)
+            return
+        }
+        let crashes = CrashReports.find(since: since)
+        guard !crashes.isEmpty else { return }
+        note("Found \(crashes.count) crash log\(crashes.count == 1 ? "" : "s") from \(Set(crashes.map(\.process)).sorted().joined(separator: " and "))")
+        crashOffer = CrashOffer(report: CrashReports.compose(diagnostic: diagnosticReport(), crashes: crashes),
+                                crashes: crashes, destination: CrashReporting.destination)
+    }
+
+    /// The offer was answered (sent, copied or left): its crashes aren't offered again.
+    func finishCrashOffer() {
+        guard let crashOffer else { return }
+        if !isDemo { UserDefaults.standard.set(crashOffer.offeredUntil, forKey: CrashReports.checkedKey) }
+        self.crashOffer = nil
+    }
+
+    /// Sends the report exactly as shown. Returns why it couldn't, or nil once it's sent.
+    func sendCrashReport(_ offer: CrashOffer) async -> String? {
+        guard !isDemo, let destination = offer.destination else { return "This copy of Junction has no address to send reports to." }
+        do {
+            let (_, response) = try await URLSession.shared.data(for: CrashReports.request(sending: offer.report, to: destination))
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            guard (200..<300).contains(status) else { return "The report wasn't accepted (HTTP \(status)). Copy it instead?" }
+            note("Sent a crash report")
+            return nil
+        } catch {
+            return "Couldn't send the report: \(error.localizedDescription)"
+        }
+    }
+
+    /// Snapshot mode: the Settings and crash-offer states to show.
+    func setDemoCrashOffer(_ offer: CrashOffer?) {
+        guard isDemo else { return }
+        crashOffer = offer
+    }
+
+    func setDemoDriverInstaller(_ approval: DaemonApproval?, offersCrashReports offers: Bool) {
+        guard isDemo else { return }
+        driverInstaller = approval
+        offersCrashReports = offers
     }
 
     // MARK: Editing

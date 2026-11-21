@@ -39,10 +39,19 @@ let package = Package(
             path: "Sources/JunctionHelper",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
+        // Password-free driver installs: a launch daemon inside Junction.app (Contents/Library/HelperTools), registered
+        // with SMAppService.daemon and served over XPC (see build.sh).
+        .executableTarget(
+            name: "JunctionDriverDaemon",
+            dependencies: ["JunctionCore"],
+            path: "Sources/JunctionDriverDaemon",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
         .testTarget(
             name: "JunctionCoreTests",
             dependencies: ["JunctionCore", "JunctionKernel"],
             path: "Tests/JunctionCoreTests",
+            exclude: ["Fixtures"],  // sample files the tests read by path
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
     ]

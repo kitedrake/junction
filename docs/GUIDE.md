@@ -48,6 +48,12 @@ the sidebar and the canvas offer **Install Driver…**.
 
 - macOS asks for your administrator password.
 - All sound on the Mac stops for a moment while macOS's audio system restarts. That is normal.
+- In the released Junction you can skip the password from then on: macOS lists **Junction** under System Settings ›
+  General › **Login Items & Extensions** (Allow in the Background). Allow it there, and Junction's driver installer
+  installs, updates and removes the driver without asking for your password. **Junction › Settings…** shows
+  **Driver installs: Without a password** once it's allowed, or **Waiting for your approval** with an **Open Login
+  Items** button. It only ever installs the driver inside your copy of Junction, and only when that driver is signed
+  like Junction itself.
 - After that, your virtual devices exist for every app, even when Junction isn't running (they're silent until
   Junction routes something into them or an app plays into them).
 
@@ -357,7 +363,8 @@ it is when you switch to that scene; deleting a device removes it from every sce
 - The menu bar icon also switches scenes and each virtual device on or off, and offers driver updates.
 - **Junction › Settings…** (also in the menu bar icon's menu) has **Open at login**, so routing is ready after a
   restart (Junction then starts in the menu bar, without its window), and **Show in Dock**: turn it off to keep
-  Junction in the menu bar only.
+  Junction in the menu bar only. It also shows whether the driver installs without a password (section 2), turns
+  crash reports on (section 16) and uninstalls Junction (section 15).
 
 ### Routing in the background
 
@@ -416,6 +423,21 @@ dashed) and explains why on the node.
 - An older copy of Junction tells you a newer driver is installed and doesn't offer to replace it.
 - To remove the driver: **Routing › Uninstall Driver…**. Your virtual devices disappear from all apps.
 
+Once Junction's driver installer is allowed in Login Items (section 2), installing, updating and removing the driver
+don't ask for your password. If the installer refuses (for example because the driver inside Junction isn't signed
+like Junction), Junction says why and installs nothing; download Junction again.
+
+### Uninstall Junction
+
+**Junction › Settings… › Uninstall Junction…** removes everything Junction added to your Mac: the audio driver (your
+virtual devices disappear from all apps, and sound stops for a moment), Junction Helper, the driver installer and the
+login item. Choose:
+
+- **Uninstall and Keep My Setup**: your devices, canvases and scenes stay, ready if you install Junction again.
+- **Uninstall and Remove My Setup**: they go too, with Junction's settings.
+
+Junction then quits. Move Junction to the Bin to finish.
+
 Junction itself updates through **Junction › Check for Updates…** (also in the menu bar menu). The second time you
 open it, Junction asks whether to check automatically. Updating the app doesn't touch the driver; a new driver, when
 there is one, is offered as above.
@@ -438,6 +460,16 @@ there is one, is offered as above.
 To report a problem, open the Routing Log and click **Copy Report**, then paste it into your report. It lists your
 Junction and macOS versions, your audio devices and apps, your setup and recent routing events. It names your
 devices and apps, so read it before sharing it.
+
+### Crash reports
+
+Crash reports are off until you turn on **Offer to send crash reports** in **Junction › Settings…**. Then, if
+Junction or Junction Helper quits unexpectedly, the next time Junction opens it shows the whole report: the same
+report as Copy Report, followed by the crash log macOS wrote. Nothing is sent until you have seen it:
+
+- **Send Report** (in the released Junction) sends exactly what you see, and nothing else.
+- **Copy Report** copies it, to paste into a bug report yourself. Copies of Junction built from source can only copy.
+- **Don't Send** leaves it. Each crash is offered once; crashes from before you turned the setting on never are.
 
 ## 17. Shortcuts
 

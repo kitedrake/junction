@@ -2,9 +2,9 @@
   "schema": 1,
   "name": "Junction",
   "notes": [
-    "Release build of Junction.app (ad-hoc signed) with its audio driver and routing helper inside, the engine tests and the driver harness, and a self-test that checks the bundled driver loads, the helper is bundled and signed, and the planner, kernel, helper XPC messages and saving work; then copies Junction.app into /Applications/omso.",
+    "Release build of Junction.app (ad-hoc signed) with its audio driver, routing helper and driver installer inside, the engine tests and the driver harness, and a self-test that checks the bundled driver loads, both helpers are bundled and signed, and the planner, kernel, both helpers' XPC messages, crash reports and saving work; then copies Junction.app into /Applications/omso.",
     "Installing the driver itself is a separate step in the app (administrator password, restarts Core Audio).",
-    "These builds route inside the app (ROUTING_HELPER defaults to 0 without an update feed); nothing is registered with launchd.",
+    "These builds route inside the app and install the driver with the password (ROUTING_HELPER and DRIVER_DAEMON default to 0 without an update feed); nothing is registered with launchd. They have no CRASH_REPORT_URL: crash reports, when turned on, are copied, not sent.",
     "Needs Xcode 26 or newer (macOS 26 SDK)."
   ],
   "products": [

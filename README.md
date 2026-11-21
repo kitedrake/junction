@@ -52,6 +52,13 @@ without your voice chat, step by step.
 - **Routing Log** (Routing › Show Routing Log, ⌥⌘L): what the router did and why (started, rebuilt, failed, trying
   again, tap membership). Events are also appended to `events.log` next to `graph.json`. **Copy Report** (or
   `Junction --diagnose`) makes a plain-text report for bug reports; it names your devices and apps.
+- **Driver installs without a password** (release builds): once Junction is allowed in Login Items, its driver
+  installer installs, updates and removes the driver with no password prompt, and only the copy inside Junction,
+  signed like it. **Settings** shows whether it's allowed.
+- **Crash reports** (opt-in in Settings): after a crash, the next launch shows the whole report (the diagnostic
+  report and macOS's crash log) and offers **Send Report** in release builds, or **Copy Report**.
+- **Uninstall Junction…** (Settings): removes the driver, both helpers and the login item, and on request the saved
+  setup and settings.
 
 | Node | Left side (receives) | Right side (provides) |
 | --- | --- | --- |
@@ -126,7 +133,13 @@ open build/Junction.app
 The first time, the sidebar and canvas offer **Install Driver…**: macOS asks for an administrator password, the driver
 is copied to `/Library/Audio/Plug-Ins/HAL/JunctionDriver.driver` and Core Audio restarts (all sound stops for a
 moment). By hand: `sudo sh scripts/install-driver.sh build/JunctionDriver.driver`; remove it with **Routing ›
-Uninstall Driver…** or `sudo sh scripts/uninstall-driver.sh`.
+Uninstall Driver…** or `sudo sh scripts/uninstall-driver.sh`. Release builds install, update and remove it without a
+password through **Junction Driver Installer** once the user allows Junction in System Settings › General › Login
+Items & Extensions (see "How it works"); until then, and in plain builds, they ask for the password as above.
+
+**Junction › Settings… › Uninstall Junction…** removes the driver, Junction Helper, the driver installer and the login
+item, and on request the saved setup (`~/Library/Application Support/Junction`) and both apps' preferences, then
+quits; the user moves the app to the Bin.
 
 Each copy of Junction carries its own driver, versioned separately from the app (`Driver/VERSION`, bumped only when
 the driver changes, so an app update doesn't ask for the driver again). When it is newer than the installed one,
@@ -151,7 +164,7 @@ Requires macOS 26 (Liquid Glass and app capture by bundle ID) and Xcode 26 or ne
 
 ## How it works
 
-Three parts (four with the helper):
+Three parts (five with the helpers):
 
 1. **Driver** (`Driver/JunctionDriver.c`): a Core Audio HAL plug-in (AudioServerPlugIn) loaded by `coreaudiod`. It
    publishes up to 32 loopback devices. The app sends it the list of enabled devices through a custom property on the
@@ -190,6 +203,18 @@ Three parts (four with the helper):
    "keep routing", the helper stops routing and quits when no app is connected. The app routes in its own process
    when the build doesn't use the helper, in tests, in snapshot mode, when the helper is turned off in Login Items,
    and when it can't reach the helper (it then logs why).
+5. **Junction Driver Installer** (`Sources/JunctionDriverDaemon`, `DriverDaemon.swift`): in builds made for it, a
+   launch daemon at `Junction.app/Contents/Library/HelperTools/JunctionDriverDaemon` (plist
+   `Contents/Library/LaunchDaemons/local.junction.driverd.plist`), registered with `SMAppService.daemon` when the app
+   starts. Once the user approves it, **Install Driver…**, **Update Driver…** and **Uninstall Driver…** go to it over
+   XPC (`local.junction.driverd`) instead of the administrator prompt. It runs as root, started on demand, and quits
+   after a minute without requests. Requests name no paths: it installs only the driver inside its own Junction.app,
+   copies it into a root-owned staging folder first, and installs that copy only when its signature is intact, has
+   the driver's identifier and the daemon's own team (so the app's); then it restarts Core Audio. It keeps a newer
+   installed driver unless the user picked **Install Older Driver…**. It accepts connections only from
+   `local.junction.app` signed by the same team; an ad-hoc signed daemon accepts none. The app falls back to the
+   administrator prompt when the daemon isn't approved or can't be reached, but not when it refuses (a driver whose
+   signature doesn't check out is reported, not installed another way).
 
 The graph is saved to `~/Library/Application Support/Junction/graph.json` (schema 4: nodes belong to a device's
 canvas, receiving nodes can set a buffer size and sample-rate conversion, and named scenes are kept in `scenes`). A schema 1 file from the
@@ -202,7 +227,7 @@ schema 2 and 3 files get sample-rate conversion set to Automatic and start with 
 
 ```sh
 ./test.sh                                        # engine tests, kernel stress test + driver harness (sanitizers), installs nothing
-build/Junction.app/Contents/MacOS/Junction --self-test   # bundled driver and helper, planning, kernel, XPC, saving
+build/Junction.app/Contents/MacOS/Junction --self-test   # bundled driver, helper and installer, planning, kernel, XPC, saving
 build/Junction.app/Contents/MacOS/Junction --list        # driver status, devices, apps using audio
 build/Junction.app/Contents/MacOS/Junction --diagnose [file]   # bug report: versions, devices, plan, events, setup
 build/Junction.app/Contents/MacOS/Junction --loopback-test   # with the driver installed: tone in, tone out
@@ -230,6 +255,25 @@ inside the app as before. `ROUTING_HELPER=1 SIGN_IDENTITY="Apple Development: �
 build with the helper. The tests drive the helper's XPC protocol through an in-process listener with a stand-in
 router; `--self-test` checks the helper bundle, its signature and launch agent, and the same XPC round trip.
 
+`build.sh` likewise always puts Junction Driver Installer and its launch daemon plist into Junction.app (signed with
+the identifier `local.junction.driverd`); `DRIVER_DAEMON` (`1` or `0`, written to `JunctionDriverDaemon` in
+Info.plist) decides whether the app registers and uses it, and defaults like `ROUTING_HELPER`: on for release builds,
+off for plain and omso Builder builds, which keep the administrator prompt and register nothing. The tests put the
+daemon's root actions (stage, check a signature, install, remove, restart Core Audio) behind the
+`PrivilegedActions` protocol and check which copy it installs, the version decisions, every signature verdict, that
+a copy failing the check is discarded, and the XPC exchange, including refused callers. `--self-test` checks the
+daemon's bundle, plist and signature, the verdict it would reach on the bundled driver (refusal in ad-hoc builds),
+and an install over XPC with stand-in actions. Nothing is installed or registered by either.
+
+Crash reports are opt-in (**Settings › Offer to send crash reports**). After Junction or Junction Helper crashes,
+macOS writes `Junction-<date>.ips` or `JunctionHelper-<date>.ips` to `~/Library/Logs/DiagnosticReports`; the next
+launch finds the ones written since it last looked and shows a report made of the diagnostic report (as
+`--diagnose` writes it) followed by each crash log in full. Release builds can send it: `CRASH_REPORT_URL` (https,
+release builds only, set together with `UPDATE_FEED_URL`) becomes `JunctionCrashReportURL` in Info.plist, and
+**Send Report** POSTs the report as `text/plain` to it. Builds without it offer **Copy Report** instead. Crashes
+before the user opted in, and ones already offered, aren't offered again. The tests read a sample crash file
+(`Tests/JunctionCoreTests/Fixtures`), check the report's contents and the offer with and without an address.
+
 `omso-build.json` describes the build for omso Builder: `build.sh`, `test.sh`, then `Junction --self-test`;
 **Build & Install** copies `Junction.app` to `/Applications/omso`. Installing the driver stays a separate,
 password-protected step in the app.
@@ -250,6 +294,7 @@ sets them:
 | `UPDATE_FEED_URL` | the update feed, `<site>/updates/junction/appcast.xml` |
 | `UPDATE_PUBLIC_KEY` | the EdDSA public key; an update signed with any other key is refused |
 | `SIGN_IDENTITY` | codesign identity: a Developer ID for releases (default: ad-hoc) |
+| `CRASH_REPORT_URL` | optional: where **Send Report** posts crash reports (https; without it the app offers Copy Report) |
 
 Such a build has **Check for Updates…** and **Check for Updates Automatically** in the app menu, and **Check for Updates…** in the menu bar menu. Sparkle
 asks on the second launch whether to check automatically, and sends nothing before that. A check downloads the
@@ -285,6 +330,15 @@ system-audio permissions and **Install Driver…** with the first one.
   fallback to routing inside the app, and the bundle's layout and signature are tested. Release builds use it by
   default; build with `ROUTING_HELPER=0` to leave it out of use. Starting without the window at login relies on
   macOS marking the launch as a login item, also unverified.
+- Junction Driver Installer hasn't been tried on a real Mac yet: registering it with `SMAppService.daemon`, the user
+  approving it, launchd starting it as root, the code-signature checks on both sides of its XPC connection with a
+  Developer ID, and installing, updating and removing the driver through it are all unverified. Its decisions, its
+  XPC exchange (in one process, with stand-in actions) and its file steps (in a temporary folder) are tested, and
+  the bundle's layout and signature are checked. Release builds use it by default; build with `DRIVER_DAEMON=0` to
+  keep the administrator prompt only. **Uninstall Junction…** hasn't been run end to end either.
+- Crash reports cover Junction and Junction Helper; the driver installer runs as root, so its crash logs land where
+  the app can't read them. Sending to a real `CRASH_REPORT_URL` hasn't been tried, and a report is offered only once
+  the main window is open (a launch at login shows it when the window is opened).
 - A one-sided or hidden device keeps working inside Junction through a hidden companion device (`<uid>.routing`)
   that the driver publishes only for Junction. Whether every app honours the hidden flag and the channel names
   hasn't been checked on a real Mac yet.

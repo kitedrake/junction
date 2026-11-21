@@ -83,10 +83,32 @@ enum Demo {
         model.setDemoState(inventory: inventory, statuses: [streamNode.id: running, recordingNode.id: running, phones.id: running],
                            meters: meters)
         model.selection = .node(system.id)
+        // Settings as a released build shows them before the driver installer is allowed: crash reports on.
+        model.setDemoDriverInstaller(.requiresApproval, offersCrashReports: true)
         EventLog.shared.add(.info, "Stream Mix: started. 4 cables, System Audio leaves out 3 processes, buffer 512 frames, about 12 ms")
         EventLog.shared.add(.error, "AirPods Pro: Couldn't combine the devices (the device went away). Attempt 1; trying again in 2 s.")
         EventLog.shared.add(.info, "AirPods Pro: started. 2 cables, buffer 512 frames, about 9 ms")
         EventLog.shared.add(.info, "Recording: started. 4 cables, Discord captures 4 processes, buffer 512 frames, about 12 ms")
+    }
+}
+
+extension Demo {
+    /// A made-up crash of Junction Helper, offered as a released build would (with a report address).
+    @MainActor static func crashOffer(_ model: AppModel) -> CrashOffer {
+        let header = #"{"app_name":"JunctionHelper","timestamp":"2026-11-20 10:15:02.00 +0100","app_version":"0.9.0","bundleID":"local.junction.helper","bug_type":"309","os_version":"macOS 26.1 (25B78)","name":"JunctionHelper"}"#
+        let body = """
+        {
+          "procName" : "JunctionHelper",
+          "procPath" : "/Applications/Junction.app/Contents/Library/LoginItems/JunctionHelper.app/Contents/MacOS/JunctionHelper",
+          "exception" : {"type":"EXC_BREAKPOINT","signal":"SIGTRAP"},
+          "faultingThread" : 0,
+          "threads" : [{"triggered":true,"queue":"com.apple.main-thread","frames":[{"symbol":"RoutingService.replan(force:)"}]}]
+        }
+        """
+        let file = URL(fileURLWithPath: "/Library/Logs/DiagnosticReports/JunctionHelper-2026-11-20-101502.ips")
+        let crashes = CrashReports.parse(header + "\n" + body, file: file, modified: Date()).map { [$0] } ?? []
+        return CrashOffer(report: CrashReports.compose(diagnostic: model.diagnosticReport(), crashes: crashes), crashes: crashes,
+                          destination: URL(string: "https://example.com/junction/crash-report"))
     }
 }
 
@@ -151,6 +173,12 @@ enum Snapshot {
             model.setDemoMicrophoneAccess(.denied)
             await both("no-microphone")  // the banner asking to allow audio inputs
             model.setDemoMicrophoneAccess(.authorized)
+            // After a crash, with crash reports on: the whole report, before anything is sent.
+            model.setDemoCrashOffer(Demo.crashOffer(model))
+            try? await Task.sleep(for: .milliseconds(600))
+            await both("crash-report", sheet: true)
+            model.setDemoCrashOffer(nil)
+            try? await Task.sleep(for: .milliseconds(500))
 
             model.graph = Graph()
             model.selection = nil

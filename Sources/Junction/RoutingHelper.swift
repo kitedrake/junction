@@ -43,6 +43,13 @@ enum RoutingHelper {
         }
     }
 
+    /// Settings › Uninstall Junction…: launchd stops the helper and forgets it.
+    static func unregister() {
+        let agent = agent
+        guard agent.status != .notRegistered, agent.status != .notFound else { return }
+        try? agent.unregister()
+    }
+
     /// A client for the helper, which must be signed like this app (same team, when there is one).
     static func client(keepRouting: Bool, handler: @escaping (RoutingClient.Event) -> Void) -> RoutingClient {
         let requirement = RoutingXPC.peerRequirement(identifier: RoutingXPC.helperBundleIdentifier, teamID: RoutingXPC.ownTeamID())

@@ -287,6 +287,9 @@ struct RootView: View {
         .sheet(item: $model.sceneNaming) { naming in
             SceneNameSheet(naming: naming)
         }
+        .sheet(isPresented: Binding(get: { model.crashOffer != nil }, set: { if !$0 { model.finishCrashOffer() } })) {
+            if let offer = model.crashOffer { CrashReportSheet(offer: offer) }
+        }
         .confirmationDialog(deleteTitle, isPresented: Binding(get: { model.deviceToDelete != nil },
                                                               set: { if !$0 { model.deviceToDelete = nil } })) {
             Button("Delete", role: .destructive) {
