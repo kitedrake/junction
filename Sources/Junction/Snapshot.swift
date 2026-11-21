@@ -51,7 +51,7 @@ enum Demo {
             ],
             defaultOutputUID: "demo.speakers", defaultInputUID: "demo.mic",
             driver: .installed(version: DriverClient.bundledVersion ?? "0.1.1"))
-        let running = SinkStatus(state: .running)
+        let running = SinkStatus(state: .running, latency: 0.0117, bufferFrames: 512)
         var meters: [PortKey: Float] = [:]
         func meter(_ node: Node, _ output: Bool, _ values: [Float]) {
             for (channel, value) in values.enumerated() { meters[PortKey(node: node.id, isOutput: output, channel: channel)] = value }

@@ -98,9 +98,13 @@ public struct Node: Codable, Identifiable, Hashable, Sendable {
     public var mutesOriginal: Bool
     /// The virtual device whose canvas this node is on (nil only in graphs saved before canvases, see `upgrade()`).
     public var canvas: UUID?
+    /// For nodes that receive cables: the IO buffer size of their routing, in frames (nil: macOS's default).
+    public var bufferFrames: Int?
+
+    public static let bufferChoices = [64, 128, 256, 512, 1024]
 
     public init(id: UUID = UUID(), kind: NodeKind, x: Double = 0, y: Double = 0, gainDB: Double = 0, isMuted: Bool = false,
-                mutesOriginal: Bool = false, canvas: UUID? = nil) {
+                mutesOriginal: Bool = false, canvas: UUID? = nil, bufferFrames: Int? = nil) {
         self.id = id
         self.kind = kind
         self.x = x
@@ -109,6 +113,7 @@ public struct Node: Codable, Identifiable, Hashable, Sendable {
         self.isMuted = isMuted
         self.mutesOriginal = mutesOriginal
         self.canvas = canvas
+        self.bufferFrames = bufferFrames
     }
 }
 
@@ -147,8 +152,9 @@ public struct Cable: Codable, Identifiable, Hashable, Sendable {
 }
 
 public struct Graph: Codable, Equatable, Sendable {
-    /// 1: one shared canvas. 2: a canvas per virtual device.
-    public static let currentSchema = 2
+    /// 1: one shared canvas. 2: a canvas per virtual device. 3: nodes can set a buffer size (`Node.bufferFrames`;
+    /// absent in older files, which means macOS's default).
+    public static let currentSchema = 3
     public var schema = Graph.currentSchema
     public var virtualDevices: [VirtualDevice] = []
     public var nodes: [Node] = []

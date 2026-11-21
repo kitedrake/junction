@@ -120,6 +120,10 @@ private struct NodeInspector: View {
             ExcludedApps(node: node, excluded: excluded)
         }
 
+        if ports.inputs > 0 {
+            SinkTiming(node: node)
+        }
+
         Connections(node: node)
 
         HStack {
@@ -176,6 +180,46 @@ private struct VirtualDeviceSettings: View {
         guard name != device.name else { return }
         model.updateVirtualDevice(device.id) { $0.name = name }
     }
+}
+
+/// The buffer size of a receiving node's routing, and the delay it ends up with.
+private struct SinkTiming: View {
+    @Environment(AppModel.self) private var model
+    let node: Node
+
+    var body: some View {
+        GroupBox("Delay") {
+            VStack(alignment: .leading, spacing: 8) {
+                Picker("Buffer size", selection: Binding(
+                    get: { node.bufferFrames ?? 0 },
+                    set: { value in model.updateNode(node.id) { $0.bufferFrames = value == 0 ? nil : value } })) {
+                    Text("Automatic").tag(0)
+                    ForEach(Node.bufferChoices, id: \.self) { Text("\($0) frames").tag($0) }
+                }
+                Text(summary).font(.callout)
+                Text("Smaller buffers mean less delay but more work for the Mac. Choose a bigger one if you hear crackles.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var summary: String {
+        guard let status = model.statuses[node.id], status.state == .running, let latency = status.latency else {
+            return "Shown while audio flows into it."
+        }
+        var text = "About \(formatDelay(latency)) from its sources to here"
+        if let frames = status.bufferFrames { text += " (buffer: \(frames) frames)" }
+        return text + "."
+    }
+}
+
+/// Milliseconds, rounded, at least 1.
+func formatDelay(_ seconds: TimeInterval) -> String {
+    "\(max(1, Int((seconds * 1000).rounded()))) ms"
 }
 
 private struct ExcludedApps: View {
@@ -289,6 +333,11 @@ private struct CableInspector: View {
             Label("Not carrying audio: one of its ends isn't available, or routing is off.", systemImage: "pause.circle")
                 .font(.callout)
                 .foregroundStyle(.orange)
+        } else if let status = model.statuses[cable.to.node], status.state == .running, let latency = status.latency {
+            Label("About \(formatDelay(latency)) delay", systemImage: "clock")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .help("From the start of the cable to the end, including the buffers on both sides")
         }
         GroupBox {
             GainSlider(title: "Level", dB: cable.gainDB) { value in model.updateCable(cable.id) { $0.gainDB = value } }

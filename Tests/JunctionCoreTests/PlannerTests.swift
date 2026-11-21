@@ -125,6 +125,37 @@ final class PlannerTests: XCTestCase {
         XCTAssertEqual(key(before, device.name), key(after, device.name), "a sink without the mic keeps running")
     }
 
+    func testBufferSizeIsSavedAndRebuildsTheSink() throws {
+        var graph = Graph()
+        let device = Templates.streamWithoutChat(&graph, excluding: [])
+        var inventory = Demo.inventory
+        inventory.devices.append(DeviceInfo(uid: device.uid, name: device.name, inputChannels: 2, outputChannels: 2,
+                                            isJunction: true))
+        let sinkNode = try XCTUnwrap(graph.deviceNode(device.id))
+        let before = try XCTUnwrap(Planner.plan(graph, inventory: inventory).sinks.first)
+        XCTAssertNil(before.bufferFrames)
+        let index = try XCTUnwrap(graph.nodes.firstIndex { $0.id == sinkNode.id })
+        graph.nodes[index].bufferFrames = 128
+        let after = try XCTUnwrap(Planner.plan(graph, inventory: inventory).sinks.first)
+        XCTAssertEqual(after.bufferFrames, 128)
+        XCTAssertNotEqual(before.structureKey, after.structureKey)
+
+        // Schema 2 files have no buffer sizes: they load as macOS's default and are saved as schema 3.
+        graph.nodes[index].bufferFrames = nil
+        graph.schema = 2
+        let json = try XCTUnwrap(String(data: JSONEncoder().encode(graph), encoding: .utf8))
+        XCTAssertFalse(json.contains("bufferFrames"))
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("junction-schema3-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let store = Store(folder: folder)
+        try Data(json.utf8).write(to: store.graphURL)
+        let loaded = try XCTUnwrap(store.load())
+        XCTAssertEqual(loaded.schema, 3)
+        XCTAssertTrue(loaded.nodes.allSatisfy { $0.bufferFrames == nil })
+        XCTAssertEqual(loaded.cables, graph.cables)
+    }
+
     func testRetriesWaitLongerEachTime() {
         XCTAssertEqual((1...8).map(Router.retryDelay(attempt:)), [2, 4, 8, 16, 32, 60, 60, 60])
         XCTAssertEqual(Router.retryDelay(attempt: 0), 2)

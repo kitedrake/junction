@@ -8,10 +8,16 @@ public struct SinkStatus: Equatable, Sendable {
     public enum State: Equatable, Sendable { case running, failed }
     public var state: State
     public var message: String?
+    /// While running: roughly how long audio takes from the sink's sources to the sink (seconds), and the buffer size
+    /// macOS gave its routing (frames).
+    public var latency: TimeInterval?
+    public var bufferFrames: Int?
 
-    public init(state: State, message: String? = nil) {
+    public init(state: State, message: String? = nil, latency: TimeInterval? = nil, bufferFrames: Int? = nil) {
         self.state = state
         self.message = message
+        self.latency = latency
+        self.bufferFrames = bufferFrames
     }
 }
 
@@ -175,7 +181,8 @@ public final class Router: @unchecked Sendable {
                 runners[sink.sinkNode] = runner
                 lock.unlock()
                 progress[sink.sinkNode] = nil
-                statuses[sink.sinkNode] = SinkStatus(state: .running, message: runner.layoutWarning)
+                statuses[sink.sinkNode] = SinkStatus(state: .running, message: runner.layoutWarning,
+                                                     latency: runner.latency, bufferFrames: runner.bufferFrames)
             } catch {
                 runner.stop()
                 retire(sink.sinkNode)
@@ -289,6 +296,9 @@ final class SinkRunner: @unchecked Sendable {
     /// Frames in one cross-fade at the aggregate's sample rate.
     private var fadeFrames = UInt32(Router.crossFadeSeconds * 48_000)
     let startedAt = Date()
+    /// Measured once the aggregate exists: see `measureTiming`.
+    private(set) var latency: TimeInterval?
+    private(set) var bufferFrames: Int?
 
     init?(plan: SinkPlan) {
         self.plan = plan
@@ -351,8 +361,10 @@ final class SinkRunner: @unchecked Sendable {
             layoutWarning = "Expected \(plan.inputChannels) input and \(plan.outputChannels) output channels, macOS made \(inputs) and \(outputs); some cables may carry the wrong channel."
         }
 
+        if let frames = plan.bufferFrames { Self.setBufferSize(aggregate, frames) }
         let rate = HAL.value(aggregate, kAudioDevicePropertyNominalSampleRate, default: Float64(48_000))
         if rate > 0 { fadeFrames = UInt32(max(1, (Router.crossFadeSeconds * rate).rounded())) }
+        measureTiming(rate: rate)
         if fadingIn { jk_renderer_set_fade_now(renderer, 0) }
 
         var proc: AudioDeviceIOProcID?
@@ -362,6 +374,32 @@ final class SinkRunner: @unchecked Sendable {
         status = AudioDeviceStart(aggregate, proc)
         guard status == noErr else { throw RouterError.start(status) }
         if fadingIn { jk_renderer_fade(renderer, 1, fadeFrames) }
+    }
+
+    /// Asks for an IO buffer size, kept within what the aggregate allows.
+    private static func setBufferSize(_ aggregate: AudioObjectID, _ frames: Int) {
+        let range = HAL.value(aggregate, kAudioDevicePropertyBufferFrameSizeRange,
+                              default: AudioValueRange(mMinimum: 0, mMaximum: 0))
+        var wanted = Float64(frames)
+        if range.mMaximum > 0 { wanted = min(max(wanted, range.mMinimum), range.mMaximum) }
+        var value = UInt32(wanted)
+        var address = HAL.address(kAudioDevicePropertyBufferFrameSize)
+        AudioObjectSetPropertyData(aggregate, &address, 0, nil, UInt32(MemoryLayout<UInt32>.size), &value)
+    }
+
+    /// Roughly how long audio takes from a source to the sink: the input side's latency and safety offset, the
+    /// output side's, and one buffer each way (taps and drift compensation can add a little).
+    private func measureTiming(rate: Float64) {
+        let buffer = HAL.value(aggregate, kAudioDevicePropertyBufferFrameSize, default: UInt32(0))
+        func side(_ scope: AudioObjectPropertyScope) -> UInt32 {
+            let streams = HAL.array(aggregate, kAudioDevicePropertyStreams, scope, of: AudioStreamID.self)
+            let streamLatency = streams.map { HAL.value($0, kAudioStreamPropertyLatency, default: UInt32(0)) }.max() ?? 0
+            return HAL.value(aggregate, kAudioDevicePropertyLatency, scope, default: UInt32(0))
+                + HAL.value(aggregate, kAudioDevicePropertySafetyOffset, scope, default: UInt32(0)) + streamLatency
+        }
+        guard buffer > 0, rate > 0 else { return }
+        bufferFrames = Int(buffer)
+        latency = Double(side(kAudioObjectPropertyScopeInput) + side(kAudioObjectPropertyScopeOutput) + 2 * buffer) / rate
     }
 
     /// Starts fading the sink out; `isSilent` turns true once the fade has been rendered.

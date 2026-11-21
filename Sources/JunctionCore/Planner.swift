@@ -28,6 +28,8 @@ public struct SinkPlan: Equatable, Sendable, Identifiable {
     public var taps: [TapPlan]
     public var routes: [Route]
     public var masterGain: Float
+    /// IO buffer size to ask for, in frames (nil: macOS's default).
+    public var bufferFrames: Int? = nil
     /// Input channels the aggregate should have: all sub-devices' inputs, then two per tap.
     public var inputChannels: Int
     /// Output channels the aggregate should have: the sink's first, then other sub-devices' outputs.
@@ -41,7 +43,7 @@ public struct SinkPlan: Equatable, Sendable, Identifiable {
             .joined(separator: ",")
         let tapKeys = taps.map { "\($0.node.uuidString):\($0.mode):\($0.mutesOriginal)" }.joined(separator: ",")
         let routeKeys = routes.map { "\($0.input)>\($0.output)" }.joined(separator: ",")
-        return "\(sinkUID)|\(devices)|\(tapKeys)|\(routeKeys)"
+        return "\(sinkUID)|\(devices)|\(tapKeys)|\(routeKeys)|\(bufferFrames ?? 0)"
     }
 }
 
@@ -180,7 +182,7 @@ public enum Planner {
             plan.sinks.append(SinkPlan(
                 sinkNode: sink.id, name: info.title(sink), sinkUID: sinkUID, sinkOutputChannels: sinkDevice.outputChannels,
                 subDevices: subDevices, taps: taps, routes: routes,
-                masterGain: sink.isMuted ? 0 : Gain.linear(sink.gainDB),
+                masterGain: sink.isMuted ? 0 : Gain.linear(sink.gainDB), bufferFrames: sink.bufferFrames,
                 inputChannels: tapBase + taps.count * 2,
                 outputChannels: subDevices.reduce(0) { $0 + $1.outputChannels }))
         }

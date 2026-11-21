@@ -21,7 +21,8 @@ without your voice chat, step by step.
   Junction also refuses (or, if Sound settings change later, mutes) a device sent to Default Output while Sound
   settings play through that same device, and Default Input into the device it stands for.
 - **Inspector**: level and mute per node and per cable (Option- or Command-click a fader to put it back to 0 dB), the
-  virtual device's settings, the apps a System Audio node leaves out, and any problem a node has.
+  virtual device's settings, the apps a System Audio node leaves out, and any problem a node has. A cable shows its
+  approximate delay; a receiving node (virtual device or output) has a buffer size (64–1024 frames, or automatic).
 - **Routing** (toolbar power button, menu bar, ⇧⌘R) starts and stops everything. Junction keeps routing from the menu
   bar when the window is closed.
 
@@ -109,9 +110,10 @@ Three parts:
    they touch. A rebuilt sink is built next to the running one, then the two cross-fade over 25 ms, so edits don't
    leave a gap or click. When apps start or quit, taps are updated in place.
 
-The graph is saved to `~/Library/Application Support/Junction/graph.json` (schema 2: nodes belong to a device's
-canvas). A schema 1 file from the shared-canvas versions is converted on load: each node moves to the canvas of the
-device it was wired to (unwired ones to the first device), and cables between devices are dropped.
+The graph is saved to `~/Library/Application Support/Junction/graph.json` (schema 3: nodes belong to a device's
+canvas, and receiving nodes can set a buffer size). A schema 1 file from the shared-canvas versions is converted on
+load: each node moves to the canvas of the device it was wired to (unwired ones to the first device), and cables
+between devices are dropped. Schema 2 files load unchanged, with automatic buffer sizes.
 
 ## Development
 

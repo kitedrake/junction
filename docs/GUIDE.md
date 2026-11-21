@@ -164,7 +164,14 @@ What the canvas shows:
 - **Dashed** cables carry nothing right now: routing is off, the device is turned off, a device is unplugged, or
   the cable would cause a loop.
 - A **green dot** on a node means it's running. A **yellow triangle** means there's a problem: hover over it, or select
-  the node to read it in the inspector.
+  the node to read it in the inspector. If something fails to start, Junction tries again by itself, and the node
+  says why and when.
+
+### Delay and buffer size
+
+A selected cable shows roughly how long sound takes to travel through it. Select the virtual device or an output to
+change its **Buffer size** under **Delay**. Smaller buffers mean less delay but more work for the Mac. If you hear
+crackles, choose a bigger buffer. **Automatic** leaves the choice to macOS.
 
 ## 8. Leave apps out
 
@@ -247,7 +254,7 @@ there is one, is offered as above.
 | OBS hears nothing from the device | Is routing on (power button)? Is the device switched on in the sidebar? Are its cables solid, not dashed? Check both permissions (section 11). |
 | My voice chat is still on stream | Select System Audio and check that the chat app is in its **Leave out** list. Safari and other apps built on Safari share one process, so they can only be left out together. |
 | I hear things twice | An output on the device's canvas plays the device on top of what apps already play there. Remove the output, or use headphones that apps don't play on. |
-| Crackles or odd pitch | Select the nodes with a yellow triangle: devices running at different sample rates. Set them to the same rate in Audio MIDI Setup. |
+| Crackles or odd pitch | Select the nodes with a yellow triangle: devices running at different sample rates. Set them to the same rate in Audio MIDI Setup. Crackles can also mean the buffer is too small: select the device or output and choose a bigger **Buffer size**. |
 | The volume keys don't change a virtual device | Virtual devices have no volume control yet; use the level faders in Junction. |
 | A device or interface shows "Not connected" | It's unplugged or off. Its cables come back to life when it returns. |
 | A virtual device switched sample rate on its own | Other apps (Audio MIDI Setup, a DAW) can set it, and macOS restores the last rate it remembers. Junction follows such changes; set the rate you want in the inspector. |
