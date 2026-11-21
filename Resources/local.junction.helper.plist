@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Junction Helper's launch agent, registered by Junction with SMAppService.agent (build.sh copies it into
+     Junction.app/Contents/Library/LaunchAgents). launchd starts the helper at login and whenever Junction connects
+     to its XPC service; it restarts it after a crash, not after it quits by itself. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>local.junction.helper</string>
+  <key>BundleProgram</key><string>Contents/Library/LoginItems/JunctionHelper.app/Contents/MacOS/JunctionHelper</string>
+  <key>AssociatedBundleIdentifiers</key><array><string>local.junction.app</string></array>
+  <key>MachServices</key><dict><key>local.junction.helper</key><true/></dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>LimitLoadToSessionType</key><string>Aqua</string>
+  <key>ProcessType</key><string>Interactive</string>
+</dict>
+</plist>

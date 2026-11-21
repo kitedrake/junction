@@ -4,25 +4,46 @@ import JunctionKernel
 import os
 
 /// How one sink is doing.
-public struct SinkStatus: Equatable, Sendable {
-    public enum State: Equatable, Sendable { case running, failed }
+public struct SinkStatus: Codable, Equatable, Sendable {
+    public enum State: String, Codable, Equatable, Sendable { case running, failed }
     public var state: State
     public var message: String?
     /// While running: roughly how long audio takes from the sink's sources to the sink (seconds), and the buffer size
     /// macOS gave its routing (frames).
     public var latency: TimeInterval?
     public var bufferFrames: Int?
+    /// While running: the delay each node's effect chain adds in this sink (included in `latency`), by node.
+    public var effectLatencies: [UUID: TimeInterval]?
+    /// Effects that couldn't be made (left out of their chain), by effect, with the reason.
+    public var effectProblems: [UUID: String]?
+    /// While running: IO cycles whose rendering took longer than Core Audio allows (JK_OVERLOAD_LOAD of the buffer's
+    /// duration) since the sink was first built, and the share of real time its rendering took lately.
+    public var overloads: Int?
+    public var load: Double?
+    /// What each effect costs in this sink, by effect.
+    public var effectCosts: [UUID: EffectCost]?
+    /// Effects holding up the audio thread (see `StallWatch`): offered for bypass.
+    public var stallingEffects: Set<UUID>?
 
-    public init(state: State, message: String? = nil, latency: TimeInterval? = nil, bufferFrames: Int? = nil) {
+    public init(state: State, message: String? = nil, latency: TimeInterval? = nil, bufferFrames: Int? = nil,
+                effectLatencies: [UUID: TimeInterval]? = nil, effectProblems: [UUID: String]? = nil,
+                overloads: Int? = nil, load: Double? = nil, effectCosts: [UUID: EffectCost]? = nil,
+                stallingEffects: Set<UUID>? = nil) {
         self.state = state
         self.message = message
         self.latency = latency
         self.bufferFrames = bufferFrames
+        self.effectLatencies = effectLatencies
+        self.effectProblems = effectProblems
+        self.overloads = overloads
+        self.load = load
+        self.effectCosts = effectCosts
+        self.stallingEffects = stallingEffects
     }
 }
 
 /// A node channel for meters: `isOutput` is the node's right side.
-public struct PortKey: Hashable, Sendable {
+public struct PortKey: Codable, Hashable, Sendable {
     public var node: UUID
     public var isOutput: Bool
     public var channel: Int
@@ -49,11 +70,18 @@ public final class Router: @unchecked Sendable {
     /// Sinks that failed to build or stopped running, and when to try again.
     private var failures: [UUID: Failure] = [:]
     private var retry: DispatchWorkItem?
-    /// IO cycles per running sink at the last health check, and how many checks in a row they didn't move.
-    private var progress: [UUID: (cycles: UInt64, still: Int)] = [:]
+    /// IO cycles per running sink (and per converted device feeding it) at the last health check, and how many checks
+    /// in a row one of them didn't move.
+    private var progress: [UUID: (cycles: [UInt64], still: Int)] = [:]
     private var healthTimer: DispatchSourceTimer?
     static let log = Logger(subsystem: "local.junction", category: "routing")
     private let events: EventLog
+    /// Audio Units by effect, kept across sink rebuilds (`queue` only).
+    private let effects = EffectPool()
+    /// Which effects hold up the audio thread (`queue` only).
+    private var stallWatch = StallWatch()
+    /// Told (on `queue`) a plugin's state after its window changed it.
+    private var effectStateHandler: (@Sendable (UUID, Data) -> Void)?
 
     struct Failure {
         var key: String
@@ -179,14 +207,17 @@ public final class Router: @unchecked Sendable {
         var processes: [HAL.AudioProcess]?
         for sink in plan.sinks {
             if let runner = runners[sink.sinkNode], runner.plan.structureKey == sink.structureKey, !rebuildingAll {
-                runner.update(gains: sink)
+                runner.update(sink, pool: effects)
+                if statuses[sink.sinkNode]?.state == .running {
+                    statuses[sink.sinkNode] = runner.status(message: statuses[sink.sinkNode]?.message)
+                }
                 continue
             }
             // A sink that keeps failing waits for its next attempt; its status keeps the reason.
             if let failure = failures[sink.sinkNode], failure.next > now, runners[sink.sinkNode] == nil { continue }
             // Build the replacement while the old sink keeps playing, then swap them over with a cross-fade.
             if processes == nil, !sink.taps.isEmpty { processes = HAL.audioProcesses() }
-            guard let runner = SinkRunner(plan: sink) else {
+            guard let runner = SinkRunner(plan: sink, pool: effects) else {
                 retire(sink.sinkNode)
                 statuses[sink.sinkNode] = SinkStatus(state: .failed, message: "Out of memory.")
                 continue
@@ -194,14 +225,14 @@ public final class Router: @unchecked Sendable {
             do {
                 try runner.start(processes: processes ?? [], fadingIn: true)
                 let replacing = runners[sink.sinkNode] != nil
+                if let old = runners[sink.sinkNode] { runner.overloadCarry = old.overloadCount }  // counted since first built
                 if replacing { runner.waitForFirstCycle() }  // so the old one doesn't fade out before this one plays
                 retire(sink.sinkNode)
                 lock.lock()
                 runners[sink.sinkNode] = runner
                 lock.unlock()
                 progress[sink.sinkNode] = nil
-                statuses[sink.sinkNode] = SinkStatus(state: .running, message: runner.layoutWarning,
-                                                     latency: runner.latency, bufferFrames: runner.bufferFrames)
+                statuses[sink.sinkNode] = runner.status(message: runner.layoutWarning)
                 events.add(.info, "\(sink.name): \(replacing ? "rebuilt" : "started"). \(runner.summary)")
                 if let warning = runner.layoutWarning { events.add(.warning, "\(sink.name): \(warning)") }
             } catch {
@@ -210,6 +241,9 @@ public final class Router: @unchecked Sendable {
                 recordFailure(sink, error.localizedDescription)
             }
         }
+        effects.keep(Set(plan.sinks.flatMap(\.effectKeys)))
+        let live = effects.unitsByEffect
+        DispatchQueue.main.async { MainActor.assumeIsolated { PluginWindows.shared.keep(live) } }
         onStatus(statuses)
         Self.stopAfterFading(retiring)
         scheduleRetry()
@@ -246,9 +280,11 @@ public final class Router: @unchecked Sendable {
         lock.unlock()
         progress = progress.filter { current[$0.key] != nil }
         var stalled: [UUID] = []
+        for runner in current.values { runner.freeRetiredChains() }
+        measureLoad(current)
         for (id, runner) in current {
-            let cycles = runner.cycles
-            if let last = progress[id], last.cycles == cycles {
+            let cycles = runner.activity
+            if let last = progress[id], zip(last.cycles, cycles).contains(where: { $0 == $1 }) {
                 progress[id] = (cycles, last.still + 1)
                 if last.still + 1 >= Self.stalledChecks { stalled.append(id) }
             } else {
@@ -278,6 +314,65 @@ public final class Router: @unchecked Sendable {
         applyNow(lastPlan)
     }
 
+    /// Every 2 s: what each sink and effect costs, the sinks' overloads, and which effects hold up the audio thread.
+    /// Statuses go out only when something changed.
+    private func measureLoad(_ current: [UUID: SinkRunner]) {
+        let now = Date()
+        var running = Set<UUID>()
+        for runner in current.values {
+            let (overloads, timings) = runner.measure()
+            for (effect, timing) in timings {
+                running.insert(effect)
+                stallWatch.record(effect: effect, stalls: timing.late, peak: Double(timing.peakLoad), sinkOverloads: overloads,
+                                  at: now)
+            }
+        }
+        stallWatch.keep(running)
+        let all = lastPlan.sinks.flatMap { $0.slots.flatMap(\.effects) + $0.effects }
+        let offers = stallWatch.offers(at: now, bypassed: Set(all.filter(\.bypass).map(\.id)))
+        var changed = false
+        for (id, runner) in current {
+            let stalling = offers.intersection(runner.effectIDs)
+            for effect in stalling.subtracting(runner.stalling) {
+                let title = all.first { $0.id == effect }?.title ?? "An effect"
+                Self.log.warning("\(runner.plan.name, privacy: .public): \(title, privacy: .public) is holding up the audio")
+                events.add(.warning, "\(runner.plan.name): \(title) is holding up the audio (renders taking over half a buffer); offering to bypass it")
+            }
+            runner.stalling = stalling
+            guard statuses[id]?.state == .running else { continue }
+            let fresh = runner.status(message: statuses[id]?.message)
+            if fresh != statuses[id] {
+                statuses[id] = fresh
+                changed = true
+            }
+        }
+        if changed { onStatus(statuses) }
+    }
+
+    // MARK: Plugin windows
+
+    /// Has `handler` told (on the router's queue) a plugin's state whenever its window changed it, so it is saved.
+    public func observeEffectStates(_ handler: @escaping @Sendable (UUID, Data) -> Void) {
+        queue.async { self.effectStateHandler = handler }
+    }
+
+    /// Opens the window of an effect's running unit in this process (the one that routes), on the main thread. Any
+    /// thread but the router's own. Returns why it can't, if it can't.
+    public func openPluginWindow(_ effect: UUID, title: String) -> String? {
+        let (unit, handler) = queue.sync { (effects.unit(effect), effectStateHandler) }
+        guard let unit else {
+            return "\(title) isn't running right now. Its window opens while routing is on and its node is connected."
+        }
+        let queue = queue
+        let open = { @MainActor in
+            PluginWindows.shared.open(unit, effect: effect, title: title) { state in
+                queue.async { handler?(effect, state) }
+            }
+        }
+        if Thread.isMainThread { MainActor.assumeIsolated { open() } } else { DispatchQueue.main.async { open() } }
+        return nil
+    }
+
     /// Waits until the retiring sinks have faded out (or a short deadline passes, e.g. when a device stopped
     /// calling its IOProc), then tears them down.
     static func stopAfterFading(_ retiring: [SinkRunner]) {
@@ -291,27 +386,42 @@ public final class Router: @unchecked Sendable {
 }
 
 enum RouterError: Error, LocalizedError {
+    /// The process that opens the taps and devices (Junction, or Junction Helper), as permission settings list it.
+    static var processName: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "Junction"
+    }
+
     case tap(String, OSStatus)
     case aggregate(OSStatus)
     case start(OSStatus)
+    case missingDevice(String)
 
     var errorDescription: String? {
         switch self {
         case .tap(let name, let status):
-            "Couldn't capture \(name) (\(HAL.describe(status))). Check System Settings › Privacy & Security › Screen & System Audio Recording."
+            "Couldn't capture \(name) (\(HAL.describe(status))). Check that \(Self.processName) may record system audio: System Settings › Privacy & Security › Screen & System Audio Recording."
         case .aggregate(let status): "Couldn't combine the devices (\(HAL.describe(status)))."
+        case .missingDevice(let uid): "A device to convert to this rate went away (\(uid))."
         case .start(let status):
             status == kAudioDevicePermissionsError
-                ? "macOS didn't allow audio input. Check System Settings › Privacy & Security › Microphone."
+                ? "macOS didn't allow \(Self.processName) to use audio input. Check System Settings › Privacy & Security › Microphone."
                 : "Couldn't start audio (\(HAL.describe(status)))."
         }
     }
 }
 
-/// One sink: its taps, aggregate device, renderer and IOProc.
+/// One sink: its taps, aggregate device, renderer and IOProc, an IOProc and converter per device it converts, and a
+/// converter per app it captures through a virtual device (fed from the driver's rings by the renderer's IOProc).
 final class SinkRunner: @unchecked Sendable {
     private(set) var plan: SinkPlan
     private let renderer: OpaquePointer
+    /// One per `plan.converted`, then one per `plan.captures`, in order; the renderer reads them all. Each converted
+    /// device's IOProc writes its own; the renderer pumps the captures' from the driver's rings.
+    private let converters: [OpaquePointer]
+    /// The driver's capture region (kept mapped while the captures read it) and the readers made from it.
+    private var region: CaptureRegion?
+    private var captures: [OpaquePointer] = []
+    private var converterProcs: [(device: AudioObjectID, proc: AudioDeviceIOProcID)] = []
     private var aggregate = AudioObjectID(kAudioObjectUnknown)
     private var procID: AudioDeviceIOProcID?
     private var taps: [(plan: TapPlan, id: AudioObjectID, uuid: UUID, processes: [AudioObjectID])] = []
@@ -319,24 +429,160 @@ final class SinkRunner: @unchecked Sendable {
     /// Frames in one cross-fade at the aggregate's sample rate.
     private var fadeFrames = UInt32(Router.crossFadeSeconds * 48_000)
     let startedAt = Date()
-    /// Measured once the aggregate exists: see `measureTiming`.
-    private(set) var latency: TimeInterval?
+    /// Measured once the aggregate exists: see `measureTiming` (without the effects, which `latency` adds).
+    private var baseLatency: TimeInterval?
     private(set) var bufferFrames: Int?
+    /// The chains in the renderer: one per source slot, and the one after the mix. Chains swapped out wait in
+    /// `retired` until the audio thread is done with them (`freeRetiredChains`).
+    private var slotChains: [LiveChain?]
+    private var mixChain: LiveChain?
+    private var retired: [(chain: LiveChain, ticket: UInt64)] = []
+    private var effectProblems: [UUID: String] = [:]
+    /// Overloads of the sinks this one replaced, so the count goes on across rebuilds.
+    var overloadCount: UInt64 { overloadCarry + rendererTiming.late }
+    var overloadCarry: UInt64 = 0
+    /// The last measurement (see `measure`), and the effects the router offers for bypass.
+    private var rendererTiming = JKTiming()
+    private var effectTimings: [UUID: JKTiming] = [:]
+    private var load: Double?
+    private var costs: [UUID: EffectCost] = [:]
+    var stalling: Set<UUID> = []
 
-    init?(plan: SinkPlan) {
+    init?(plan: SinkPlan, pool: EffectPool) {
         self.plan = plan
-        let sources = plan.routes.map { UInt32($0.input) }
         let destinations = plan.routes.map { UInt32($0.output) }
         let gains = plan.routes.map(\.gain)
-        guard let renderer = jk_renderer_create(UInt32(plan.inputChannels), UInt32(plan.sinkOutputChannels),
-                                                UInt32(plan.routes.count), sources, destinations, gains)
-        else { return nil }
+        var converters: [OpaquePointer] = []
+        for device in plan.converted {
+            guard let converter = jk_converter_create(UInt32(device.inputChannels), device.sampleRate, plan.sampleRate) else {
+                converters.forEach { jk_converter_destroy($0) }
+                return nil
+            }
+            jk_converter_set_same_clock(converter, device.sameClock ? 1 : 0)
+            converters.append(converter)
+        }
+        for capture in plan.captures {
+            guard let converter = jk_converter_create(UInt32(capture.channels), capture.sampleRate, plan.sampleRate) else {
+                converters.forEach { jk_converter_destroy($0) }
+                return nil
+            }
+            jk_converter_set_same_clock(converter, capture.sameClock ? 1 : 0)
+            converters.append(converter)
+        }
+        let slotChannels = plan.slots.map { UInt32($0.inputs.count) }
+        let laneSources = plan.slots.flatMap { $0.inputs.map(UInt32.init) }
+        guard let renderer = jk_renderer_create_slots(UInt32(plan.inputChannels), UInt32(plan.sinkOutputChannels),
+                                                      UInt32(plan.routes.count), plan.routes.map { UInt32($0.lane) },
+                                                      destinations, gains, converters, UInt32(converters.count),
+                                                      UInt32(slotChannels.count), slotChannels, laneSources)
+        else {
+            converters.forEach { jk_converter_destroy($0) }
+            return nil
+        }
         self.renderer = renderer
+        self.converters = converters
+        slotChains = Array(repeating: nil, count: plan.slots.count)
         jk_renderer_set_master_gain(renderer, plan.masterGain)
+        jk_renderer_set_sample_rate(renderer, plan.sampleRate)  // `start` sets the aggregate's own once it knows it
+        updateChains(plan, pool: pool)
     }
 
     deinit {
         jk_renderer_destroy(renderer)
+        captures.forEach { jk_capture_destroy($0) }
+        converters.forEach { jk_converter_destroy($0) }
+        // The chains (and the units only they hold) go with them: nothing renders them any more.
+    }
+
+    /// Brings the chains in line with the plan: effects in the same order only get new bypass and parameters; any
+    /// other change builds a new chain and swaps it in.
+    private func updateChains(_ plan: SinkPlan, pool: EffectPool) {
+        var problems: [UUID: String] = [:]
+        func chain(_ current: LiveChain?, _ effects: [Effect], position: ChainPosition, channels: Int,
+                   slot: UInt32) -> LiveChain? {
+            if let current, current.fits(effects) {
+                current.update(effects, pool: pool, position: position)
+                return current
+            }
+            let built = LiveChain(effects, position: position, channels: channels, sampleRate: plan.sampleRate, pool: pool)
+            var ticket: UInt64 = 0
+            _ = jk_renderer_swap_chain(renderer, slot, built?.pointer, &ticket)
+            if let current { retired.append((current, ticket)) }
+            return built
+        }
+        for (index, slot) in plan.slots.enumerated() where index < slotChains.count {
+            slotChains[index] = chain(slotChains[index], slot.effects, position: .source, channels: slot.inputs.count,
+                                      slot: UInt32(index))
+        }
+        mixChain = chain(mixChain, plan.effects, position: .mix, channels: plan.sinkOutputChannels, slot: JK_OUTPUT_CHAIN)
+        for effect in plan.slots.flatMap(\.effects) + plan.effects {
+            if let problem = pool.problems[effect.id] { problems[effect.id] = problem }
+        }
+        effectProblems = problems
+        freeRetiredChains()
+    }
+
+    /// Frees chains swapped out once no IO cycle can still be processing them (or the IOProc is gone).
+    func freeRetiredChains() {
+        retired.removeAll { procID == nil || jk_renderer_is_done_with(renderer, $0.ticket) != 0 }
+    }
+
+    /// What effect chains add to the delay: the slowest source chain plus the chain after the mix.
+    var effectLatency: TimeInterval {
+        (slotChains.compactMap { $0?.latency }.max() ?? 0) + (mixChain?.latency ?? 0)
+    }
+
+    var latency: TimeInterval? { baseLatency.map { $0 + effectLatency } }
+
+    /// The delay each node's chain adds here.
+    var effectLatencies: [UUID: TimeInterval] {
+        var result: [UUID: TimeInterval] = [:]
+        for (slot, chain) in zip(plan.slots, slotChains) where chain != nil { result[slot.node] = chain!.latency }
+        if let mixChain { result[plan.sinkNode] = mixChain.latency }
+        return result
+    }
+
+    /// The kernel chains in place (per source slot, then after the mix) and those waiting to be freed, for tests.
+    var chainPointers: [OpaquePointer?] { slotChains.map { $0?.pointer } + [mixChain?.pointer] }
+    var retiredChainCount: Int { retired.count }
+
+    func status(message: String?) -> SinkStatus {
+        SinkStatus(state: .running, message: message, latency: latency, bufferFrames: bufferFrames,
+                   effectLatencies: effectLatencies.isEmpty ? nil : effectLatencies,
+                   effectProblems: effectProblems.isEmpty ? nil : effectProblems,
+                   overloads: Int(overloadCount), load: load, effectCosts: costs.isEmpty ? nil : costs,
+                   stallingEffects: stalling.isEmpty ? nil : stalling)
+    }
+
+    /// The effects in this sink's chains.
+    var effectIDs: Set<UUID> { Set((plan.slots.flatMap(\.effects) + plan.effects).map(\.id)) }
+
+    /// Reads how long rendering took since the last call: the sink's load and overloads, and each effect's cost.
+    /// Returns the overloads so far and each effect's timing (cumulative, its peak since the last call).
+    func measure() -> (overloads: UInt64, effects: [UUID: JKTiming]) {
+        var timing = JKTiming()
+        jk_renderer_timing(renderer, &timing, 1)
+        let previous = rendererTiming
+        rendererTiming = timing
+        let sampleRate = plan.sampleRate > 0 ? plan.sampleRate : 48_000
+        if timing.frames > previous.frames {
+            let audio = Double(timing.frames - previous.frames) / sampleRate
+            load = ((timing.seconds - previous.seconds) / audio * 1000).rounded() / 1000
+        }
+        var timings: [UUID: JKTiming] = [:]
+        var fresh: [UUID: EffectCost] = [:]
+        for chain in slotChains.compactMap({ $0 }) + [mixChain].compactMap({ $0 }) {
+            let units = chain.unitsByEffect
+            for (effect, stageTiming) in chain.takeTimings() {
+                timings[effect] = stageTiming
+                fresh[effect] = EffectCost.measure(stageTiming, since: effectTimings[effect], sampleRate: sampleRate,
+                                                   latency: units[effect]?.latency ?? 0,
+                                                   outOfProcess: units[effect]?.isOutOfProcess ?? false)
+            }
+        }
+        effectTimings = timings
+        costs = fresh
+        return (overloadCount, timings)
     }
 
     /// Builds and starts the sink. With `fadingIn` it starts silent and fades in over one cross-fade.
@@ -349,12 +595,7 @@ final class SinkRunner: @unchecked Sendable {
             taps.append((tap, id, description.uuid, members))
         }
 
-        var subDevices: [[String: Any]] = []
-        for (index, device) in plan.subDevices.enumerated() {
-            var entry: [String: Any] = [kAudioSubDeviceUIDKey: device.uid]
-            if index > 0 { entry[kAudioSubDeviceDriftCompensationKey] = 1 }
-            subDevices.append(entry)
-        }
+        let subDevices = Self.subDeviceList(plan)
         let tapList: [[String: Any]] = taps.map {
             [kAudioSubTapUIDKey: $0.uuid.uuidString, kAudioSubTapDriftCompensationKey: 1]
         }
@@ -386,8 +627,23 @@ final class SinkRunner: @unchecked Sendable {
 
         if let frames = plan.bufferFrames { Self.setBufferSize(aggregate, frames) }
         let rate = HAL.value(aggregate, kAudioDevicePropertyNominalSampleRate, default: Float64(48_000))
+        if rate > 0 { jk_renderer_set_sample_rate(renderer, rate) }
         if rate > 0 { fadeFrames = UInt32(max(1, (Router.crossFadeSeconds * rate).rounded())) }
-        measureTiming(rate: rate)
+
+        // Devices at another rate run on their own IOProc, outside the aggregate, and feed their converters.
+        var convertedIDs: [AudioObjectID] = []
+        for (device, converter) in zip(plan.converted, converters) {
+            guard let id = HAL.deviceID(forUID: device.uid) else { throw RouterError.missingDevice(device.uid) }
+            var proc: AudioDeviceIOProcID?
+            status = AudioDeviceCreateIOProcID(id, jk_converter_ioproc, UnsafeMutableRawPointer(converter), &proc)
+            guard status == noErr, let proc else { throw RouterError.start(status) }
+            converterProcs.append((id, proc))
+            status = AudioDeviceStart(id, proc)
+            guard status == noErr else { throw RouterError.start(status) }
+            convertedIDs.append(id)
+        }
+        connectCaptures()
+        measureTiming(rate: rate, converted: convertedIDs)
         if fadingIn { jk_renderer_set_fade_now(renderer, 0) }
 
         var proc: AudioDeviceIOProcID?
@@ -397,6 +653,46 @@ final class SinkRunner: @unchecked Sendable {
         status = AudioDeviceStart(aggregate, proc)
         guard status == noErr else { throw RouterError.start(status) }
         if fadingIn { jk_renderer_fade(renderer, 1, fadeFrames) }
+    }
+
+    /// Finds each captured app's slots in the driver's region and has the renderer read them. Without the region (no
+    /// Junction Driver Installer, or it hasn't got one yet) the sink runs with those channels silent and says why.
+    private func connectCaptures() {
+        guard !plan.captures.isEmpty else { return }
+        guard let region = CaptureRegion.source() else {
+            layoutWarning = "Can't capture \(plan.captures.map(\.name).joined(separator: ", ")): Junction Driver Installer doesn't share the driver's per-app audio. It needs the driver and Junction Driver Installer installed and allowed in Login Items."
+            return
+        }
+        self.region = region
+        var missing: [String] = []
+        for (index, capture) in plan.captures.enumerated() {
+            let slots = region.slots(device: capture.deviceUID, clients: capture.clients)
+            let converter = converters[plan.converted.count + index]
+            let indices = slots.map { UInt32($0.index) }, sequences = slots.map(\.sequence)
+            guard !slots.isEmpty,
+                  let reader = jk_capture_create(region.base, region.size, indices, sequences, UInt32(slots.count),
+                                                 UInt32(capture.channels), capture.sampleRate, converter)
+            else {
+                missing.append(capture.name)
+                continue
+            }
+            captures.append(reader)
+        }
+        if !captures.isEmpty { _ = jk_renderer_set_captures(renderer, captures, UInt32(captures.count)) }
+        if !missing.isEmpty {
+            layoutWarning = "The driver isn't capturing \(missing.joined(separator: ", ")) right now."
+        }
+    }
+
+    /// The aggregate's sub-devices: the sink first (the clock), then the sources. Core Audio's drift compensation keeps
+    /// a source in step with the sink unless both share a clock domain (Junction's own devices do), where it would
+    /// only add work and a little filtering.
+    static func subDeviceList(_ plan: SinkPlan) -> [[String: Any]] {
+        plan.subDevices.enumerated().map { index, device in
+            var entry: [String: Any] = [kAudioSubDeviceUIDKey: device.uid]
+            if index > 0 { entry[kAudioSubDeviceDriftCompensationKey] = device.sameClock ? 0 : 1 }
+            return entry
+        }
     }
 
     /// Asks for an IO buffer size, kept within what the aggregate allows.
@@ -411,18 +707,31 @@ final class SinkRunner: @unchecked Sendable {
     }
 
     /// Roughly how long audio takes from a source to the sink: the input side's latency and safety offset, the
-    /// output side's, and one buffer each way (taps and drift compensation can add a little).
-    private func measureTiming(rate: Float64) {
+    /// output side's, and one buffer each way (taps and drift compensation can add a little). A converted device
+    /// counts its own input side and buffer, and the converter's ring and filter delay, instead of the aggregate's
+    /// input side; the slowest path is reported.
+    private func measureTiming(rate: Float64, converted: [AudioObjectID]) {
         let buffer = HAL.value(aggregate, kAudioDevicePropertyBufferFrameSize, default: UInt32(0))
-        func side(_ scope: AudioObjectPropertyScope) -> UInt32 {
-            let streams = HAL.array(aggregate, kAudioDevicePropertyStreams, scope, of: AudioStreamID.self)
+        func side(_ device: AudioObjectID, _ scope: AudioObjectPropertyScope) -> UInt32 {
+            let streams = HAL.array(device, kAudioDevicePropertyStreams, scope, of: AudioStreamID.self)
             let streamLatency = streams.map { HAL.value($0, kAudioStreamPropertyLatency, default: UInt32(0)) }.max() ?? 0
-            return HAL.value(aggregate, kAudioDevicePropertyLatency, scope, default: UInt32(0))
-                + HAL.value(aggregate, kAudioDevicePropertySafetyOffset, scope, default: UInt32(0)) + streamLatency
+            return HAL.value(device, kAudioDevicePropertyLatency, scope, default: UInt32(0))
+                + HAL.value(device, kAudioDevicePropertySafetyOffset, scope, default: UInt32(0)) + streamLatency
         }
         guard buffer > 0, rate > 0 else { return }
         bufferFrames = Int(buffer)
-        latency = Double(side(kAudioObjectPropertyScopeInput) + side(kAudioObjectPropertyScopeOutput) + 2 * buffer) / rate
+        let outputSide = Double(side(aggregate, kAudioObjectPropertyScopeOutput) + buffer) / rate
+        var slowest = Double(side(aggregate, kAudioObjectPropertyScopeInput) + buffer) / rate
+        for (index, device) in converted.enumerated() where index < converters.count {
+            let deviceRate = plan.converted[index].sampleRate
+            let deviceBuffer = HAL.value(device, kAudioDevicePropertyBufferFrameSize, default: UInt32(512))
+            let input = Double(side(device, kAudioObjectPropertyScopeInput) + deviceBuffer) / deviceRate
+            slowest = max(slowest, input + jk_converter_expected_delay(converters[index], buffer, deviceBuffer))
+        }
+        for index in plan.captures.indices where plan.converted.count + index < converters.count {
+            slowest = max(slowest, jk_converter_expected_delay(converters[plan.converted.count + index], buffer, 512))
+        }
+        baseLatency = slowest + outputSide
     }
 
     /// Starts fading the sink out; `isSilent` turns true once the fade has been rendered.
@@ -434,6 +743,10 @@ final class SinkRunner: @unchecked Sendable {
 
     var cycles: UInt64 { jk_renderer_cycle_count(renderer) }
 
+    /// IO cycles of the sink, then of each converted device: the health check rebuilds the sink when one stops.
+    /// Captured apps don't count: an app that stops playing isn't a stalled sink.
+    var activity: [UInt64] { [cycles] + converters.prefix(plan.converted.count).map { jk_converter_write_count($0) } }
+
     /// Waits (up to 0.1 s) until the IOProc has run once.
     func waitForFirstCycle() {
         let deadline = Date().addingTimeInterval(0.1)
@@ -441,6 +754,11 @@ final class SinkRunner: @unchecked Sendable {
     }
 
     func stop() {
+        for converted in converterProcs {
+            AudioDeviceStop(converted.device, converted.proc)
+            AudioDeviceDestroyIOProcID(converted.device, converted.proc)
+        }
+        converterProcs.removeAll()
         if let procID {
             AudioDeviceStop(aggregate, procID)
             AudioDeviceDestroyIOProcID(aggregate, procID)
@@ -456,17 +774,20 @@ final class SinkRunner: @unchecked Sendable {
 
     /// Drops what `start` built without calling Core Audio: after a restart those objects no longer exist.
     func forget() {
+        converterProcs.removeAll()
         procID = nil
         aggregate = AudioObjectID(kAudioObjectUnknown)
         taps.removeAll()
     }
 
-    func update(gains plan: SinkPlan) {
+    /// A plan with the same structure: new gains, and the effect chains brought up to date.
+    func update(_ plan: SinkPlan, pool: EffectPool) {
         for (index, route) in plan.routes.enumerated() where index < self.plan.routes.count {
             jk_renderer_set_route_gain(renderer, UInt32(index), route.gain)
         }
         jk_renderer_set_master_gain(renderer, plan.masterGain)
         self.plan = plan
+        updateChains(plan, pool: pool)
     }
 
     /// Updates each tap's process list; returns a line per tap that changed, for the event log.
@@ -498,7 +819,16 @@ final class SinkRunner: @unchecked Sendable {
     /// What was built, for the event log.
     var summary: String {
         var parts = ["\(plan.routes.count) cable\(plan.routes.count == 1 ? "" : "s")"]
+        let shared = plan.subDevices.dropFirst().filter(\.sameClock).count
+        if shared > 0 { parts.append("\(shared) device\(shared == 1 ? "" : "s") on the same clock (no drift compensation)") }
+        for device in plan.converted {
+            parts.append("converts \(device.uid) from \(formatSampleRate(device.sampleRate)) to \(formatSampleRate(plan.sampleRate))")
+        }
         for tap in taps { parts.append("\(tap.plan.name) \(Self.membership(tap.plan, tap.processes.count))") }
+        for capture in plan.captures { parts.append("captures \(capture.name)") }
+        let effectCount = slotChains.compactMap { $0?.stages.compactMap { $0 }.count }.reduce(0, +)
+            + (mixChain?.stages.compactMap { $0 }.count ?? 0)
+        if effectCount > 0 { parts.append("\(effectCount) effect\(effectCount == 1 ? "" : "s")") }
         if let bufferFrames { parts.append("buffer \(bufferFrames) frames") }
         if let latency { parts.append(String(format: "about %.0f ms", latency * 1000)) }
         return parts.joined(separator: ", ")
@@ -508,8 +838,9 @@ final class SinkRunner: @unchecked Sendable {
         var result: [PortKey: Float] = [:]
         var inputPeaks: [Int: Float] = [:]
         for route in plan.routes {
-            let peak = inputPeaks[route.input] ?? jk_renderer_take_input_peak(renderer, UInt32(route.input))
-            inputPeaks[route.input] = peak
+            // The lane: after the source's effects.
+            let peak = inputPeaks[route.lane] ?? jk_renderer_take_input_peak(renderer, UInt32(route.lane))
+            inputPeaks[route.lane] = peak
             let key = PortKey(node: route.source.node, isOutput: true, channel: route.source.channel)
             result[key] = max(result[key] ?? 0, peak)
         }
@@ -535,8 +866,10 @@ final class SinkRunner: @unchecked Sendable {
             bundleIDs = apps + matching.map(\.bundleID)
             description = CATapDescription(stereoMixdownOfProcesses: members)
         case .allExcept(let apps):
+            // Junction's app and its routing helper are both left out, whichever of them opens the tap.
             let matching = processes.filter {
                 apps.contains($0.appBundleID) || apps.contains($0.bundleID) || $0.pid == getpid()
+                    || HAL.ownBundleIDs.contains($0.appBundleID)
             }
             members = matching.map(\.objectID)
             bundleIDs = apps + matching.map(\.bundleID) + (own.map { [$0] } ?? [])

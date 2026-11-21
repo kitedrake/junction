@@ -33,6 +33,8 @@ struct Sidebar: View {
                 Text("Virtual Devices")
             }
 
+            ScenesSection()
+
             Section("Sources") {
                 PaletteRow(kind: .systemAudio(excluding: []), role: .source, title: "System Audio", detail: "Everything apps play")
                 PaletteRow(kind: .defaultInput, role: .source, title: "Default Input",
@@ -51,6 +53,12 @@ struct Sidebar: View {
                 }
                 ForEach(model.inventory.apps) { app in
                     PaletteRow(kind: .application(app.ref), role: .source, title: app.name, detail: app.isPlaying ? "Playing" : nil)
+                }
+                // Apps playing into one of Junction's devices: just that app's sound from it (not on its own canvas).
+                ForEach(model.appsThroughOtherDevices) { source in
+                    let device = model.graph.virtualDevice(source.device)?.name ?? "Deleted Device"
+                    PaletteRow(kind: .appThroughDevice(source.app, device: source.device), role: .source,
+                               title: "\(source.app.name) through \(device)", detail: "Only its sound from \(device)")
                 }
             }
 
@@ -85,24 +93,52 @@ struct VirtualDeviceRow: View {
             NodeIcon(kind: .virtualDevice(device.id), ports: PortCounts(inputs: device.channels, outputs: device.channels), size: 22)
             VStack(alignment: .leading, spacing: 1) {
                 Text(device.name).lineLimit(1)
-                Text("\(device.channels) ch · \(formatRate(device.sampleRate))")
+                Text(details)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
             Spacer(minLength: 4)
             Toggle("", isOn: Binding(
                 get: { device.isEnabled },
-                set: { value in model.updateVirtualDevice(device.id) { $0.isEnabled = value } }))
+                set: { value in model.updateVirtualDevice(device.id, value ? "Turn On" : "Turn Off") { $0.isEnabled = value } }))
                 .toggleStyle(.switch)
                 .controlSize(.mini)
                 .labelsHidden()
                 .help(device.isEnabled ? "Published: apps can use it" : "Off: apps don't see it")
         }
+        // Dropped on its own canvas, the device moves there.
+        .draggable(PaletteItem(kind: .virtualDevice(device.id), role: nil))
         .contextMenu {
-            Button(device.isEnabled ? "Turn Off" : "Turn On") { model.updateVirtualDevice(device.id) { $0.isEnabled.toggle() } }
+            Button(device.isEnabled ? "Turn Off" : "Turn On") {
+                model.updateVirtualDevice(device.id, device.isEnabled ? "Turn Off" : "Turn On") { $0.isEnabled.toggle() }
+            }
+            Button(device.isHidden ? "Show to Apps" : "Hide from Apps") {
+                model.updateVirtualDevice(device.id, device.isHidden ? "Show to Apps" : "Hide from Apps") { $0.isHidden.toggle() }
+            }
+            Menu("Apps See It As") {
+                ForEach(DeviceDirection.allCases, id: \.self) { direction in
+                    Toggle(direction.title, isOn: Binding(
+                        get: { device.direction == direction },
+                        set: { _ in model.updateVirtualDevice(device.id, "Change Direction") { $0.direction = direction } }))
+                }
+            }
             Divider()
             Button("Delete Virtual Device…", role: .destructive) { model.deviceToDelete = device.id }
         }
+    }
+}
+
+extension VirtualDeviceRow {
+    /// "2 ch · 48 kHz", plus the direction when apps see one side only and "hidden" when they see none.
+    var details: String {
+        var parts = ["\(device.channels) ch", formatRate(device.sampleRate)]
+        switch device.direction {
+        case .both: break
+        case .inputOnly: parts.append("input only")
+        case .outputOnly: parts.append("output only")
+        }
+        if device.isHidden { parts.append("hidden") }
+        return parts.joined(separator: " · ")
     }
 }
 
@@ -134,6 +170,8 @@ struct PaletteRow: View {
         }
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { model.addNode(kind, as: role) }
+        .draggable(PaletteItem(kind: kind, role: role))
+        .accessibilityAction(named: "Add to Canvas") { model.addNode(kind, as: role) }
     }
 }
 
@@ -177,6 +215,5 @@ struct DriverNotice: View {
 }
 
 func formatRate(_ rate: Double) -> String {
-    let value = rate / 1000
-    return value == value.rounded() ? "\(Int(value)) kHz" : String(format: "%.1f kHz", value)
+    formatSampleRate(rate)
 }

@@ -36,18 +36,16 @@ struct JunctionApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("New Virtual Device") { model.addVirtualDevice() }
                     .keyboardShortcut("n")
-                Button("Stream Without Chat…") { model.showStreamTemplate = true }
+                TemplateMenuItems()
+                    .environment(model)
             }
-            CommandGroup(after: .pasteboard) {
-                // ⌘⌫ here; plain Delete is handled by the canvas only while it has focus, so typing in the inspector
-                // never deletes a node.
-                Button("Delete") { model.deleteSelection() }
-                    .keyboardShortcut(.delete, modifiers: .command)
-                    .disabled(model.selection == nil)
-            }
+            EditCommands(model: model)
             CommandMenu("Routing") {
                 Toggle("Routing On", isOn: Binding(get: { model.graph.isRoutingOn }, set: { model.graph.isRoutingOn = $0 }))
                     .keyboardShortcut("r", modifiers: [.command, .shift])
+                Divider()
+                SceneMenuItems(shortcuts: true)
+                    .environment(model)
                 Divider()
                 Group {
                     switch model.driverUpdate {
@@ -73,6 +71,24 @@ struct JunctionApp: App {
                 Button(model.showInspector ? "Hide Inspector" : "Show Inspector") { model.showInspector.toggle() }
                     .keyboardShortcut("i", modifiers: [.command, .option])
                 Divider()
+                Button("Show Canvas") { model.showsMixer = false }
+                    .keyboardShortcut("1")
+                Button("Show Mixer") { model.showsMixer = true }
+                    .keyboardShortcut("2")
+                Button(model.showMinimap ? "Hide Minimap" : "Show Minimap") { model.showMinimap.toggle() }
+                Divider()
+                Group {
+                    Button("Zoom In") { model.zoom(in: true) }
+                        .keyboardShortcut("+")
+                    Button("Zoom Out") { model.zoom(in: false) }
+                        .keyboardShortcut("-")
+                    Button("Actual Size") { model.zoomToActualSize() }
+                        .keyboardShortcut("0")
+                    Button("Zoom to Fit") { model.zoomToFit() }
+                        .keyboardShortcut("0", modifiers: [.command, .option])
+                }
+                .disabled(model.canvas == nil)
+                Divider()
             }
         }
 
@@ -97,11 +113,19 @@ struct JunctionApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillFinishLaunching(_ notification: Notification) {
         if !DockIcon.isShown { NSApp.setActivationPolicy(.accessory) }
+        MainActor.assumeIsolated { LoginLaunch.detect() }
     }
 
-    /// Routing starts with the app, not with the window (which a menu-bar-only setup may never show).
+    /// Routing starts with the app, not with the window (which a menu-bar-only setup may never show). Opened at login,
+    /// Junction stays in the menu bar: its window is closed straight away.
     func applicationDidFinishLaunching(_ notification: Notification) {
-        MainActor.assumeIsolated { AppModel.shared.start() }
+        MainActor.assumeIsolated {
+            AppModel.shared.start()
+            guard LoginLaunch.isActive, !AppModel.shared.isDemo else { return }
+            DispatchQueue.main.async {
+                for window in NSApp.windows where window.identifier?.rawValue.hasPrefix("main") ?? false { window.close() }
+            }
+        }
     }
 
     /// Routing keeps running from the menu bar when the window is closed.
@@ -112,6 +136,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+/// Undo, Redo, Cut, Copy, Paste, Duplicate, Delete, Select All and Tidy Up act on the canvas; while a text field is
+/// focused, the ones a text field knows go to it instead.
+struct EditCommands: Commands {
+    let model: AppModel
+
+    var body: some Commands {
+        CommandGroup(replacing: .undoRedo) {
+            Button(model.canUndo || model.isEditingText ? model.undoTitle : "Undo") {
+                if !forwardToText("undo:") { model.undo() }
+            }
+            .keyboardShortcut("z")
+            .disabled(!model.canUndo && !model.isEditingText)
+            Button(model.canRedo || model.isEditingText ? model.redoTitle : "Redo") {
+                if !forwardToText("redo:") { model.redo() }
+            }
+            .keyboardShortcut("z", modifiers: [.command, .shift])
+            .disabled(!model.canRedo && !model.isEditingText)
+        }
+        CommandGroup(replacing: .pasteboard) {
+            // Always enabled: a text field may want them even when the canvas has nothing to act on.
+            Button("Cut") { if !forwardToText("cut:") { model.cutSelection() } }
+                .keyboardShortcut("x")
+            Button("Copy") { if !forwardToText("copy:") { model.copySelection() } }
+                .keyboardShortcut("c")
+            Button("Paste") { if !forwardToText("paste:") { model.paste() } }
+                .keyboardShortcut("v")
+            Button("Duplicate") { model.duplicateSelection() }
+                .keyboardShortcut("d")
+                .disabled(!model.canCopy)
+            // ⌘⌫ here; plain Delete is handled by the canvas only while it has focus, so typing in the inspector
+            // never deletes a node.
+            Button("Delete") { model.deleteSelection() }
+                .keyboardShortcut(.delete, modifiers: .command)
+                .disabled(model.selection == nil)
+            Button("Select All") { if !forwardToText("selectAll:") { model.selectAll() } }
+                .keyboardShortcut("a")
+            Divider()
+            Button("Tidy Up") { model.tidyUp() }
+                .keyboardShortcut("t", modifiers: [.command, .control])
+                .disabled(model.canvas == nil)
+        }
+    }
+
+    /// Sends a standard edit action to the focused text field, if there is one. Returns whether it did.
+    @MainActor private func forwardToText(_ action: String) -> Bool {
+        guard NSApp.keyWindow?.firstResponder is NSText else { return false }
+        return NSApp.sendAction(Selector((action)), to: nil, from: nil)
+    }
+}
+
 struct MenuBarContent: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openWindow) private var openWindow
@@ -119,13 +193,17 @@ struct MenuBarContent: View {
 
     var body: some View {
         Toggle("Routing On", isOn: Binding(get: { model.graph.isRoutingOn }, set: { model.graph.isRoutingOn = $0 }))
+        if !model.graph.scenes.isEmpty {
+            Divider()
+            SceneMenuItems(offersNew: false)
+        }
         if !model.graph.virtualDevices.isEmpty {
             Divider()
             Text("Virtual Devices")
             ForEach(model.graph.virtualDevices) { device in
                 Toggle(device.name, isOn: Binding(
                     get: { device.isEnabled },
-                    set: { value in model.updateVirtualDevice(device.id) { $0.isEnabled = value } }))
+                    set: { value in model.updateVirtualDevice(device.id, value ? "Turn On" : "Turn Off") { $0.isEnabled = value } }))
             }
         }
         if model.failingSinkCount > 0 {
@@ -176,9 +254,13 @@ struct RootView: View {
             Sidebar()
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 340)
         } detail: {
-            CanvasView()
+            Group {
+                if model.showsMixer, model.canvas != nil { MixerView() } else { CanvasView() }
+            }
                 .overlay(alignment: .top) {
-                    if !model.inventory.driver.isInstalled && !model.graph.virtualDevices.isEmpty {
+                    if let target = model.midiLearning {
+                        MIDILearnBanner(target: target)
+                    } else if !model.inventory.driver.isInstalled && !model.graph.virtualDevices.isEmpty {
                         DriverBanner()
                     } else if model.graph.isRoutingOn, model.needsMicrophone, model.microphoneAccess != .authorized {
                         MicrophoneBanner()
@@ -188,9 +270,18 @@ struct RootView: View {
                     if model.canvas == nil { EmptyCanvas() }
                 }
                 .overlay(alignment: .bottom) {
-                    if let device = model.canvasDevice, model.canvasNodes.count == 1 { CanvasHint(device: device) }
+                    if !model.showsMixer, let device = model.canvasDevice, model.canvasNodes.count == 1 { CanvasHint(device: device) }
                 }
                 .toolbar {
+                    ToolbarItemGroup(placement: .principal) {
+                        Picker("View", selection: $model.showsMixer) {
+                            Label("Canvas", systemImage: "point.3.connected.trianglepath.dotted").tag(false)
+                            Label("Mixer", systemImage: "slider.vertical.3").tag(true)
+                        }
+                        .pickerStyle(.segmented)
+                        .help("Show the canvas as nodes and cables, or as a mixer")
+                        .disabled(model.canvas == nil)
+                    }
                     ToolbarItemGroup(placement: .primaryAction) {
                         Toggle(isOn: $model.graph.isRoutingOn) {
                             Label("Routing", systemImage: "power")
@@ -208,8 +299,17 @@ struct RootView: View {
             InspectorView()
                 .inspectorColumnWidth(min: 260, ideal: 300, max: 400)
         }
-        .sheet(isPresented: $model.showStreamTemplate) {
-            StreamTemplateSheet()
+        .sheet(item: $model.template) { kind in
+            TemplateSheet(kind: kind)
+        }
+        .sheet(item: $model.sceneNaming) { naming in
+            SceneNameSheet(naming: naming)
+        }
+        .sheet(item: $model.pluginPicker) { request in
+            PluginPicker(request: request)
+        }
+        .sheet(isPresented: Binding(get: { model.crashOffer != nil }, set: { if !$0 { model.finishCrashOffer() } })) {
+            if let offer = model.crashOffer { CrashReportSheet(offer: offer) }
         }
         .confirmationDialog(deleteTitle, isPresented: Binding(get: { model.deviceToDelete != nil },
                                                               set: { if !$0 { model.deviceToDelete = nil } })) {
@@ -269,10 +369,15 @@ struct AddMenuItems: View {
                     Button(device.name) { add(.device(device.ref), .source) }
                 }
             }
-            if !model.inventory.apps.isEmpty {
+            if !model.inventory.apps.isEmpty || !model.appsThroughOtherDevices.isEmpty {
                 Section("Apps") {
                     ForEach(model.inventory.apps) { app in
                         Button(app.name) { add(.application(app.ref), .source) }
+                    }
+                    ForEach(model.appsThroughOtherDevices) { source in
+                        Button("\(source.app.name) through \(model.graph.virtualDevice(source.device)?.name ?? "Deleted Device")") {
+                            add(.appThroughDevice(source.app, device: source.device), .source)
+                        }
                     }
                 }
             }
@@ -286,7 +391,7 @@ struct AddMenuItems: View {
         .disabled(model.canvas == nil)
         Divider()
         Button("New Virtual Device") { model.addVirtualDevice() }
-        Button("Stream Without Chat…") { model.showStreamTemplate = true }
+        TemplateMenuItems()
     }
 
     private func add(_ kind: NodeKind, _ role: NodeRole) { model.addNode(kind, as: role, at: spot()) }
@@ -313,7 +418,8 @@ struct DriverBanner: View {
     }
 }
 
-/// Routing reads audio inputs (every sink reads its device's own inputs), which needs macOS's Microphone permission.
+/// Routing reads audio inputs (every sink reads its device's own inputs), which needs macOS's Microphone permission for
+/// the process that routes: Junction, or Junction Helper. The banner names it.
 struct MicrophoneBanner: View {
     @Environment(AppModel.self) private var model
 
@@ -321,14 +427,14 @@ struct MicrophoneBanner: View {
         let undecided = model.microphoneAccess == .notDetermined
         GlassEffectContainer(spacing: 8) {
             HStack(spacing: 8) {
-                Label(undecided ? "Routing needs permission to use audio inputs."
-                                : "Junction isn't allowed to use audio inputs, so routing can't run.",
+                Label(undecided ? "\(model.routingProcessName) needs permission to use audio inputs for routing."
+                                : "\(model.routingProcessName) isn't allowed to use audio inputs, so routing can't run.",
                       systemImage: "mic.slash.fill")
                     .symbolRenderingMode(.multicolor)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 10)
                     .glassEffect(.regular, in: .capsule)
-                    .help("macOS calls it the Microphone permission. It covers microphones, audio interfaces and Junction's own virtual devices.")
+                    .help("macOS calls it the Microphone permission. It covers microphones, audio interfaces and Junction's own virtual devices. Turn on \(model.routingProcessName) under Privacy & Security › Microphone.")
                 Button(undecided ? "Allow…" : "Open System Settings") {
                     if undecided { model.requestMicrophone() } else { model.openPrivacySettings(.microphone) }
                 }
@@ -376,9 +482,11 @@ struct EmptyCanvas: View {
                 Button("New Virtual Device") { model.addVirtualDevice() }
                     .buttonStyle(.glassProminent)
                     .controlSize(.large)
-                Button("Stream Without Chat…") { model.showStreamTemplate = true }
+                Menu("Templates") { TemplateMenuItems() }
+                    .menuStyle(.button)
                     .buttonStyle(.glass)
                     .controlSize(.large)
+                    .fixedSize()
             }
             Text("Each virtual device gets its own canvas: sources on the left feed it, outputs on the right play it.")
                 .font(.callout)

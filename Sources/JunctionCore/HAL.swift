@@ -96,20 +96,35 @@ public enum HAL {
     static let junctionModelUID = "local.junction.virtual-device"
     static let aggregateUIDPrefix = "local.junction.aggregate."
 
-    /// Reads devices, defaults and audio apps.
+    static func deviceInfo(_ id: AudioObjectID, uid: String) -> DeviceInfo {
+        DeviceInfo(
+            uid: uid, objectID: id, name: string(id, kAudioObjectPropertyName) ?? uid,
+            inputChannels: channelCount(id, kAudioObjectPropertyScopeInput),
+            outputChannels: channelCount(id, kAudioObjectPropertyScopeOutput),
+            sampleRate: value(id, kAudioDevicePropertyNominalSampleRate, default: Float64(0)),
+            isJunction: string(id, kAudioDevicePropertyModelUID) == junctionModelUID,
+            clockDomain: value(id, kAudioDevicePropertyClockDomain, default: UInt32(0)))
+    }
+
+    /// Reads devices, defaults and audio apps. Hidden devices are left out, except Junction's own (a virtual device
+    /// set to hidden, and the companions of one-sided devices): apps don't list them, Junction still routes them.
     public static func readInventory() -> Inventory {
         let system = AudioObjectID(kAudioObjectSystemObject)
         var devices: [DeviceInfo] = []
         for id in array(system, kAudioHardwarePropertyDevices, of: AudioObjectID.self) {
             guard let uid = string(id, kAudioDevicePropertyDeviceUID), !uid.hasPrefix(aggregateUIDPrefix) else { continue }
-            if value(id, kAudioDevicePropertyIsHidden, default: UInt32(0)) != 0 { continue }
-            let name = string(id, kAudioObjectPropertyName) ?? uid
-            devices.append(DeviceInfo(
-                uid: uid, objectID: id, name: name,
-                inputChannels: channelCount(id, kAudioObjectPropertyScopeInput),
-                outputChannels: channelCount(id, kAudioObjectPropertyScopeOutput),
-                sampleRate: value(id, kAudioDevicePropertyNominalSampleRate, default: Float64(0)),
-                isJunction: string(id, kAudioDevicePropertyModelUID) == junctionModelUID))
+            let info = deviceInfo(id, uid: uid)
+            if value(id, kAudioDevicePropertyIsHidden, default: UInt32(0)) != 0, !info.isJunction { continue }
+            devices.append(info)
+        }
+        // Hidden devices are only found by their UID.
+        for entry in DriverClient.publishedConfiguration() ?? [] {
+            guard let uid = entry["uid"] as? String else { continue }
+            for candidate in [uid, uid + VirtualDevice.companionSuffix] where !devices.contains(where: { $0.uid == candidate }) {
+                guard let id = deviceID(forUID: candidate) else { continue }
+                let info = deviceInfo(id, uid: candidate)
+                if info.isJunction { devices.append(info) }
+            }
         }
         let defaultOutput = value(system, kAudioHardwarePropertyDefaultOutputDevice, default: AudioObjectID(kAudioObjectUnknown))
         let defaultInput = value(system, kAudioHardwarePropertyDefaultInputDevice, default: AudioObjectID(kAudioObjectUnknown))
@@ -118,7 +133,12 @@ public enum HAL {
             apps: audioApps(),
             defaultOutputUID: devices.first { $0.objectID == defaultOutput }?.uid,
             defaultInputUID: devices.first { $0.objectID == defaultInput }?.uid,
-            driver: DriverClient.status())
+            driver: DriverClient.status(),
+            deviceClients: DriverClient.deviceClients(from: DriverClient.capturedClients()) { pid, bundleID in
+                let owner = owningApp(pid: pid)
+                let appID = owner?.bundleID ?? bundleID
+                return AppRef(bundleID: appID, name: owner?.name ?? displayName(forBundleID: appID))
+            })
     }
 
     // MARK: Processes
@@ -152,9 +172,8 @@ public enum HAL {
 
     /// Apps with audio processes, one entry per app, without Junction itself and without system services.
     static func audioApps() -> [AudioApp] {
-        let own = Bundle.main.bundleIdentifier ?? ""
         var apps: [String: AudioApp] = [:]
-        for process in audioProcesses() where process.appBundleID != own && process.pid != getpid() {
+        for process in audioProcesses() where !ownBundleIDs.contains(process.appBundleID) && process.pid != getpid() {
             // Real apps only: background services and system UI (Control Center, Siri…) aren't useful sources.
             let isWebKit = process.bundleID.hasPrefix("com.apple.WebKit")
             guard isWebKit || (process.appPath.map { !$0.hasPrefix("/System/Library/") } ?? false) else { continue }
@@ -163,6 +182,12 @@ public enum HAL {
             apps[process.appBundleID] = app
         }
         return apps.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    /// Junction itself: this process's bundle, the app and its routing helper (which lives inside the app, so its
+    /// processes belong to the app).
+    public static var ownBundleIDs: Set<String> {
+        Set([Bundle.main.bundleIdentifier, RoutingXPC.appBundleIdentifier, RoutingXPC.helperBundleIdentifier].compactMap { $0 })
     }
 
     /// The outermost .app bundle containing the process's executable, if any.

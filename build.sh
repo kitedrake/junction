@@ -16,6 +16,22 @@
 # releases" in the README):
 #   UPDATE_FEED_URL    the Sparkle update feed, e.g. https://example.com/updates/junction/appcast.xml
 #   UPDATE_PUBLIC_KEY  the EdDSA public key (base64) whose private half signs the updates
+#
+# Every build carries Junction Helper (Contents/Library/LoginItems/JunctionHelper.app), which can run routing in the
+# background, and its launch agent (Contents/Library/LaunchAgents/local.junction.helper.plist). Whether the app
+# registers and uses it is ROUTING_HELPER: 1 routes in the helper, 0 inside the app. It defaults to 1 for release
+# builds (UPDATE_FEED_URL set) and 0 otherwise, so plain and omso Builder builds route inside the app as before.
+#
+# Every build also carries Junction Driver Installer (Contents/Library/HelperTools/JunctionDriverDaemon), a launch
+# daemon that installs and removes the driver without a password once the user approves it, and its plist
+# (Contents/Library/LaunchDaemons/local.junction.driverd.plist). DRIVER_DAEMON decides whether the app registers and
+# uses it: 1 or 0, defaulting like ROUTING_HELPER (1 for release builds). It only works when signed by a developer
+# team: an ad-hoc signed daemon accepts no connections.
+#
+# Crash reports are opt-in (Settings). Release builds can also set
+#   CRASH_REPORT_URL   an https:// address the app POSTs a crash report to, as plain text, after the user has read
+#                      it and clicked Send Report. Without it (plain and omso Builder builds) the app offers Copy
+#                      Report instead. Like the update feed, it is for release builds only (needs UPDATE_FEED_URL).
 set -eu
 cd "$(dirname "$0")"
 if [ -d /Applications/Xcode.app/Contents/Developer ]; then
@@ -27,6 +43,33 @@ build_number="$(date +%Y%m%d%H%M)"
 identity="${SIGN_IDENTITY:-${JUNCTION_SIGN_IDENTITY:--}}"
 feed="${UPDATE_FEED_URL:-}"
 key="${UPDATE_PUBLIC_KEY:-}"
+routing_helper="${ROUTING_HELPER:-}"
+driver_daemon="${DRIVER_DAEMON:-}"
+crash_url="${CRASH_REPORT_URL:-}"
+if [ -z "$routing_helper" ]; then
+  if [ -n "$feed" ]; then routing_helper=1; else routing_helper=0; fi
+fi
+case "$routing_helper" in
+  1) uses_helper="<true/>" ;;
+  0) uses_helper="<false/>" ;;
+  *) echo "ROUTING_HELPER must be 1 or 0." >&2; exit 1 ;;
+esac
+if [ -z "$driver_daemon" ]; then
+  if [ -n "$feed" ]; then driver_daemon=1; else driver_daemon=0; fi
+fi
+case "$driver_daemon" in
+  1) uses_daemon="<true/>" ;;
+  0) uses_daemon="<false/>" ;;
+  *) echo "DRIVER_DAEMON must be 1 or 0." >&2; exit 1 ;;
+esac
+if [ -n "$crash_url" ] && [ -z "$feed" ]; then
+  echo "CRASH_REPORT_URL is for release builds: set it together with UPDATE_FEED_URL." >&2
+  exit 1
+fi
+case "$crash_url" in
+  ""|https://*) ;;
+  *) echo "CRASH_REPORT_URL must be an https:// address." >&2; exit 1 ;;
+esac
 if { [ -n "$feed" ] && [ -z "$key" ]; } || { [ -z "$feed" ] && [ -n "$key" ]; }; then
   echo "Set both UPDATE_FEED_URL and UPDATE_PUBLIC_KEY, or neither." >&2
   exit 1
@@ -38,31 +81,39 @@ if ! /usr/bin/sandbox-exec -p '(version 1)(allow default)' /usr/bin/true 2>/dev/
 grep -q "#define kDriverVersion \"$driver_version\"" Driver/JunctionDriver.c \
   || { echo "kDriverVersion in Driver/JunctionDriver.c doesn't match Driver/VERSION ($driver_version)" >&2; exit 1; }
 
-# sign_code PATH [ENTITLEMENTS]: ad-hoc or development signing as before; Developer ID adds the hardened runtime.
+# sign_code PATH [ENTITLEMENTS] [IDENTIFIER]: ad-hoc or development signing as before; Developer ID adds the
+# hardened runtime. IDENTIFIER names a bare executable (the driver installer), which has no Info.plist to take it from.
 sign_code() {
+  set -- "$1" "${2:-}" "${3:-}"
+  extra=""
+  if [ -n "$3" ]; then extra="--identifier $3"; fi
   case "$identity" in
     "Developer ID"*)
-      if [ -n "${2:-}" ]; then
-        codesign --force --sign "$identity" --options runtime --timestamp --entitlements "$2" "$1"
+      if [ -n "$2" ]; then
+        codesign --force --sign "$identity" --options runtime --timestamp $extra --entitlements "$2" "$1"
       else
-        codesign --force --sign "$identity" --options runtime --timestamp "$1"
+        codesign --force --sign "$identity" --options runtime --timestamp $extra "$1"
       fi ;;
-    *) codesign --force --sign "$identity" "$1" ;;
+    *) codesign --force --sign "$identity" $extra "$1" ;;
   esac
 }
 
-# 1. The HAL driver: a plain C bundle for Apple silicon and Intel.
+# 1. The HAL driver: a plain C bundle for Apple silicon and Intel, with the device icons it offers
+#    (Driver/Icons, made by scripts/make-driver-icons.swift).
 driver="build/JunctionDriver.driver"
 rm -rf "$driver"
-mkdir -p "$driver/Contents/MacOS"
+mkdir -p "$driver/Contents/MacOS" "$driver/Contents/Resources"
+cp Driver/Icons/*.icns "$driver/Contents/Resources/"
 xcrun clang -arch arm64 -arch x86_64 -mmacosx-version-min=26.0 -bundle -O2 -Wall -Wextra -Werror -Wno-four-char-constants \
   -fvisibility=hidden -framework CoreAudio -framework CoreFoundation \
   Driver/JunctionDriver.c -o "$driver/Contents/MacOS/JunctionDriver"
 sed -e "s/__VERSION__/$driver_version/" -e "s/__BUILD__/$build_number/" Driver/Info.plist > "$driver/Contents/Info.plist"
 sign_code "$driver"
 
-# 2. The app.
+# 2. The app, its routing helper and its driver installer.
 xcrun swift build $spm_flags -c release --product Junction
+xcrun swift build $spm_flags -c release --product JunctionHelper
+xcrun swift build $spm_flags -c release --product JunctionDriverDaemon
 bindir="$(xcrun swift build $spm_flags -c release --show-bin-path)"
 app="build/Junction.app"
 rm -rf "$app"
@@ -82,6 +133,40 @@ if [ -n "$feed" ]; then
 fi
 if [ -f Resources/AppIcon.icns ]; then cp Resources/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"; fi
 ditto "$driver" "$app/Contents/Resources/JunctionDriver.driver"
+# Junction Helper: a UI-element app (no Dock icon). Its name is the one macOS shows in the permission prompts when
+# routing runs in it.
+helper="$app/Contents/Library/LoginItems/JunctionHelper.app"
+mkdir -p "$helper/Contents/MacOS" "$helper/Contents/Resources" "$app/Contents/Library/LaunchAgents"
+cp "$bindir/JunctionHelper" "$helper/Contents/MacOS/JunctionHelper"
+if [ -f Resources/AppIcon.icns ]; then cp Resources/AppIcon.icns "$helper/Contents/Resources/AppIcon.icns"; fi
+cat > "$helper/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>Junction Helper</string>
+  <key>CFBundleDisplayName</key><string>Junction Helper</string>
+  <key>CFBundleIdentifier</key><string>local.junction.helper</string>
+  <key>CFBundleExecutable</key><string>JunctionHelper</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>${version}</string>
+  <key>CFBundleVersion</key><string>${version}</string>
+  <key>LSMinimumSystemVersion</key><string>26.0</string>
+  <key>LSUIElement</key><true/>
+  <key>NSMicrophoneUsageDescription</key><string>Junction Helper routes audio in the background from your microphones, audio interfaces and Junction's virtual devices.</string>
+  <key>NSAudioCaptureUsageDescription</key><string>Junction Helper captures the sound apps play so Junction can route it in the background, for example to a stream without your call.</string>
+  <key>NSHumanReadableCopyright</key><string>Junction by omso. GNU GPL v3 or later.</string>
+</dict>
+</plist>
+PLIST
+cp Resources/local.junction.helper.plist "$app/Contents/Library/LaunchAgents/local.junction.helper.plist"
+# Junction Driver Installer: a bare executable launchd runs as root (BundleProgram in its plist).
+mkdir -p "$app/Contents/Library/HelperTools" "$app/Contents/Library/LaunchDaemons"
+cp "$bindir/JunctionDriverDaemon" "$app/Contents/Library/HelperTools/JunctionDriverDaemon"
+cp Resources/local.junction.driverd.plist "$app/Contents/Library/LaunchDaemons/local.junction.driverd.plist"
+crash=""
+if [ -n "$crash_url" ]; then crash="<key>JunctionCrashReportURL</key><string>$crash_url</string>"; fi
 cp scripts/install-driver.sh scripts/uninstall-driver.sh "$app/Contents/Resources/"
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -97,6 +182,9 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>CFBundleShortVersionString</key><string>${version}</string>
   <key>CFBundleVersion</key><string>${version}</string>
   $updates
+  <key>JunctionRoutingHelper</key>$uses_helper
+  <key>JunctionDriverDaemon</key>$uses_daemon
+  $crash
   <key>LSMinimumSystemVersion</key><string>26.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.music</string>
   <key>NSHighResolutionCapable</key><true/>
@@ -108,8 +196,10 @@ cat > "$app/Contents/Info.plist" <<PLIST
 PLIST
 # Sign from the inside out.
 sign_code "$app/Contents/Resources/JunctionDriver.driver"
+sign_code "$helper" Resources/Junction.entitlements
+sign_code "$app/Contents/Library/HelperTools/JunctionDriverDaemon" "" local.junction.driverd
 sign_code "$framework/Versions/B/Autoupdate"
 sign_code "$framework/Versions/B/Updater.app"
 sign_code "$framework"
 sign_code "$app" Resources/Junction.entitlements
-echo "Built $(pwd)/$app"
+echo "Built $(pwd)/$app (routing in the helper: $([ "$routing_helper" = 1 ] && echo on || echo off); driver installer: $([ "$driver_daemon" = 1 ] && echo on || echo off); crash reports: $([ -n "$crash_url" ] && echo "sent to $crash_url" || echo copy only))"

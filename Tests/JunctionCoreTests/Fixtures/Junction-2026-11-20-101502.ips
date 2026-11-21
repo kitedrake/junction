@@ -1,0 +1,29 @@
+{"app_name":"Junction","timestamp":"2026-11-20 10:15:02.00 +0100","app_version":"0.9.0","slice_uuid":"5a1e0c2b-0000-4000-8000-000000000001","adam_id":"0","build_version":"0.9.0","platform":1,"bundleID":"local.junction.app","share_with_app_devs":0,"is_first_party":0,"bug_type":"309","os_version":"macOS 26.1 (25B78)","roots_installed":0,"name":"Junction","incident_id":"0F5E6A3C-0000-4000-8000-000000000002"}
+{
+  "uptime" : 5400,
+  "procRole" : "Foreground",
+  "version" : 2,
+  "userID" : 501,
+  "deployVersion" : 210,
+  "modelCode" : "Mac15,6",
+  "coalitionID" : 1234,
+  "osVersion" : {
+    "train" : "macOS 26.1",
+    "build" : "25B78",
+    "releaseType" : "User"
+  },
+  "captureTime" : "2026-11-20 10:15:01.8000 +0100",
+  "incident" : "0F5E6A3C-0000-4000-8000-000000000002",
+  "pid" : 4242,
+  "cpuType" : "ARM-64",
+  "procName" : "Junction",
+  "procPath" : "\/Applications\/Junction.app\/Contents\/MacOS\/Junction",
+  "bundleInfo" : {"CFBundleShortVersionString":"0.9.0","CFBundleVersion":"0.9.0","CFBundleIdentifier":"local.junction.app"},
+  "parentProc" : "launchd",
+  "parentPid" : 1,
+  "exception" : {"codes":"0x0000000000000001, 0x0000000100a3c5d0","rawCodes":[1,4305700304],"type":"EXC_BREAKPOINT","signal":"SIGTRAP"},
+  "termination" : {"flags":0,"code":5,"namespace":"SIGNAL","indicator":"Trace\/BPT trap: 5","byProc":"exc handler","byPid":4242},
+  "faultingThread" : 0,
+  "threads" : [{"triggered":true,"id":90001,"queue":"com.apple.main-thread","frames":[{"imageOffset":50640,"symbol":"AppModel.replan(force:)","symbolLocation":120,"imageIndex":0},{"imageOffset":49120,"symbol":"AppModel.graphChanged(from:)","symbolLocation":404,"imageIndex":0}]}],
+  "usedImages" : [{"source":"P","arch":"arm64","base":4305649664,"size":2490368,"uuid":"5a1e0c2b-0000-4000-8000-000000000001","path":"\/Applications\/Junction.app\/Contents\/MacOS\/Junction","name":"Junction","CFBundleIdentifier":"local.junction.app"}]
+}

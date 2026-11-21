@@ -1,3 +1,4 @@
+import AudioToolbox
 import CoreAudio
 import Foundation
 import JunctionCore
@@ -18,7 +19,9 @@ enum CommandLineTool {
               --list            Driver status, audio devices, default devices and apps using audio.
               --diagnose [file] A report for bug reports: versions, devices, apps, the routing plan, recent routing
                                 events and the saved setup (it names your devices and apps). No audio is opened.
-              --self-test [dir] Checks the bundled driver, the planner, the mixing kernel and saving (no audio).
+              --self-test [dir] Checks the bundled driver, routing helper and driver installer, the planner, the mixing
+                                kernel and its effects, the plugin list, both helpers' XPC messages, crash reports and saving (no audio; nothing is
+                                installed, registered or launched).
               --loopback-test   With the driver installed: plays a tone into a temporary virtual device and checks
                                 it comes back out. Needs microphone permission for the calling app (e.g. Terminal).
               --device-test     With the driver installed: adds a temporary virtual device, renames it, changes its
@@ -107,6 +110,10 @@ enum CommandLineTool {
             check(types["443ABAB8-E7B3-491A-B985-BEB9187030DB"]?.contains(where: { factories[$0] != nil }) ?? false,
                   "driver registers as an AudioServerPlugIn")
             check(signatureIsValid(url), "driver is code-signed")
+            let icons = DeviceIcon.allCases.filter {
+                !FileManager.default.fileExists(atPath: url.appendingPathComponent("Contents/Resources/\($0.rawValue).icns").path)
+            }
+            check(icons.isEmpty, "driver carries its device icons" + (icons.isEmpty ? "" : " (missing: \(icons.map(\.rawValue)))"))
             var loaded = false
             if CFBundleLoadExecutable(bundle), let symbol = CFBundleGetFunctionPointerForName(bundle, "JunctionDriver_Create" as CFString) {
                 typealias Factory = @convention(c) (CFAllocator?, CFUUID) -> UnsafeMutableRawPointer?
@@ -120,6 +127,81 @@ enum CommandLineTool {
             check(false, "driver bundled in the app (Contents/Resources/JunctionDriver.driver)")
         }
         check(Bundle.main.url(forResource: "install-driver", withExtension: "sh") != nil, "install script bundled")
+
+        // Junction Helper: a signed UI-element app inside Junction.app, with the launch agent SMAppService registers.
+        let helperURL = RoutingHelper.helperURL
+        if let info = Bundle(url: helperURL)?.infoDictionary {
+            check(info["CFBundleIdentifier"] as? String == RoutingXPC.helperBundleIdentifier, "helper's bundle identifier")
+            check(info["LSUIElement"] as? Bool == true, "helper has no Dock icon (LSUIElement)")
+            check((info["NSMicrophoneUsageDescription"] as? String)?.contains(RoutingXPC.helperDisplayName) ?? false,
+                  "helper's permission prompts name it")
+            check(FileManager.default.isExecutableFile(atPath: Bundle.main.bundleURL.appendingPathComponent(RoutingXPC.helperExecutablePath).path),
+                  "helper executable present")
+            check(signatureIsValid(helperURL), "helper is code-signed")
+        } else {
+            check(false, "routing helper bundled in the app (\(RoutingXPC.helperBundlePath))")
+        }
+        if let agent = NSDictionary(contentsOf: RoutingHelper.agentPlistURL) as? [String: Any] {
+            check(agent["Label"] as? String == RoutingXPC.machServiceName
+                  && agent["BundleProgram"] as? String == RoutingXPC.helperExecutablePath
+                  && (agent["MachServices"] as? [String: Any])?[RoutingXPC.machServiceName] != nil,
+                  "launch agent names the helper and its XPC service")
+        } else {
+            check(false, "launch agent bundled (Contents/Library/LaunchAgents/\(RoutingXPC.agentPlistName))")
+        }
+        let usesHelper = Bundle.main.object(forInfoDictionaryKey: RoutingXPC.usesHelperKey) as? Bool
+        check(usesHelper != nil, "this build routes \(usesHelper == true ? "in the helper" : "inside the app")")
+
+        // Junction Driver Installer: a signed executable with the launch daemon SMAppService registers, and the
+        // signature check it makes before installing, applied to the driver in this app.
+        let daemonURL = DriverInstaller.executableURL
+        if FileManager.default.isExecutableFile(atPath: daemonURL.path) {
+            let daemon = CodeSignature.read(daemonURL)
+            check(daemon.isValid, "driver installer is code-signed")
+            check(daemon.identifier == DriverDaemon.label, "driver installer is signed as \(DriverDaemon.label) (\(daemon.identifier ?? "none"))")
+            check(DriverDaemon.appBundle(containingExecutable: daemonURL)?.path == Bundle.main.bundleURL.resolvingSymlinksInPath().path,
+                  "driver installer finds the Junction.app it is in")
+            if let driver = DriverClient.bundledDriverURL {
+                let verdict = DriverInstallPolicy.verdict(driver: CodeSignature.read(driver), own: daemon)
+                let expected: SignatureVerdict = (daemon.teamID ?? "").isEmpty ? .adHoc : .matches
+                check(verdict == expected, "driver installer would \(verdict == .matches ? "install" : "refuse") the bundled driver"
+                      + (verdict.problem.map { " (\($0))" } ?? ""))
+            }
+        } else {
+            check(false, "driver installer bundled (\(DriverDaemon.executablePath))")
+        }
+        if let plist = NSDictionary(contentsOf: DriverInstaller.plistURL) as? [String: Any] {
+            check(plist["Label"] as? String == DriverDaemon.label
+                  && plist["BundleProgram"] as? String == DriverDaemon.executablePath
+                  && (plist["MachServices"] as? [String: Any])?[DriverDaemon.machServiceName] != nil
+                  && (plist["MachServices"] as? [String: Any])?[CaptureBroker.machServiceName] != nil
+                  && (plist["AssociatedBundleIdentifiers"] as? [String])?.contains(RoutingXPC.appBundleIdentifier) == true,
+                  "launch daemon names the driver installer and its XPC services (installs, per-app capture)")
+        } else {
+            check(false, "launch daemon bundled (Contents/Library/LaunchDaemons/\(DriverDaemon.plistName))")
+        }
+        let usesDaemon = Bundle.main.object(forInfoDictionaryKey: DriverDaemon.usesDaemonKey) as? Bool
+        check(usesDaemon != nil, "this build installs the driver "
+              + (usesDaemon == true ? "with the driver installer once approved" : "with an administrator password"))
+        check(daemonRoundTrip(), "driver installer answers over XPC and installs only the bundled copy (stand-in, nothing installed)")
+
+        // Per-app capture: the driver may reach the daemon from coreaudiod's sandbox, and a ring written the driver's
+        // way reads back through the kernel's capture reader.
+        if let driver = DriverClient.bundledDriverURL,
+           let info = NSDictionary(contentsOf: driver.appendingPathComponent("Contents/Info.plist")) as? [String: Any] {
+            check((info["AudioServerPlugIn_MachServices"] as? [String])?.contains(CaptureBroker.machServiceName) == true,
+                  "the driver may reach \(CaptureBroker.machServiceName) from coreaudiod's sandbox")
+        }
+        check(captureRoundTrip(), "a per-app ring written the driver's way reaches the renderer's converter")
+
+        // Crash reports: a release build's address is https; others copy the report.
+        let crashURL = Bundle.main.object(forInfoDictionaryKey: CrashReports.urlKey)
+        check(crashURL == nil || CrashReporting.destination != nil,
+              "crash reports " + (CrashReporting.destination.map { "are sent to \($0.absoluteString)" } ?? "are copied (no CRASH_REPORT_URL)"))
+        let crash = CrashReports.parse(#"{"app_name":"Junction","bug_type":"309","app_version":"1.0","name":"Junction"}"# + "\n{}",
+                                       file: URL(fileURLWithPath: "Junction-2026-01-01-000000.ips"), modified: Date())
+        check(crash.map { CrashReports.compose(diagnostic: "diagnostic\n", crashes: [$0]).contains("==== Crash log: Junction-") } ?? false,
+              "a crash log is recognised and goes into the report")
 
         // Planning: "stream without chat" lays out as expected.
         var graph = Graph()
@@ -140,6 +222,17 @@ enum CommandLineTool {
         check(sink?.subDevices.map(\.uid) == [device.uid, "mic"], "sub-devices: virtual device first, then the mic")
         check(sink?.routes.map(\.input) == [3, 4, 2, 2], "routes read the tap after the devices (\(sink?.routes.map(\.input) ?? []))")
         check(sink?.taps.first?.mode == .allExcept(["com.hnc.Discord"]), "tap leaves Discord out")
+        // A headphone monitor is one more sink, and never one of Junction's devices.
+        var monitored = graph, monitoredInventory = inventory
+        monitoredInventory.devices.append(DeviceInfo(uid: "phones", name: "Phones", inputChannels: 0, outputChannels: 2))
+        monitored.updateMonitor(for: device.id) {
+            $0.output = .device(DeviceRef(uid: "phones", name: "Phones", inputChannels: 0, outputChannels: 2))
+        }
+        let monitorPlan = Planner.plan(monitored, inventory: monitoredInventory)
+        check(monitorPlan.sinks.count == 2 && monitorPlan.sinks.first == sink && monitorPlan.sinks.last?.sinkUID == "phones"
+              && Rules.monitorProblem(.device(DeviceRef(uid: device.uid, name: device.name, inputChannels: 2, outputChannels: 2)),
+                                      inventory: inventory) != nil,
+              "a monitor is planned as its own sink and refuses Junction's devices")
 
         // Kernel: a known mix.
         let frames = 128
@@ -165,6 +258,59 @@ enum CommandLineTool {
             check(false, "kernel renderer created")
         }
 
+        // Effects: a built-in gain on a source's lane before the mix, and Apple's peak limiter rendered by the kernel.
+        check(builtInEffectRenders(), "kernel runs a source's effect chain before the mix")
+        check(appleEffectRenders(), "Apple's peak limiter renders through the kernel (no permission needed)")
+        // Plugins: the picker's list, one loaded as a plugin with its state kept, and a missing one left out.
+        let plugins = PluginCatalog.installed()
+        check(plugins.contains { $0.subtype == "dely" && $0.manufacturer == "appl" },
+              "plugin picker lists the installed effect Audio Units (\(plugins.count), Apple's AUDelay among them)")
+        let (pluginLoaded, pluginDetail) = pluginLoadsWithItsState()
+        check(pluginLoaded, "an Audio Unit loads as a plugin and keeps its state (\(pluginDetail))")
+        let missing = Effect(type: "aufx", subtype: "none", manufacturer: "Nope", state: Data([1, 2, 3]), name: "Missing")
+        let missingKept = (try? JSONDecoder().decode(Effect.self, from: JSONEncoder().encode(missing))) == missing
+        check(!PluginCatalog.isInstalled(missing) && (try? EffectUnit(missing, channels: 2, sampleRate: 48_000)) == nil && missingKept,
+              "a missing plugin is left out of its chain and keeps its saved state")
+
+        // Sample-rate conversion: a 44.1 kHz source into a 48 kHz sink stays out of the aggregate and is converted.
+        var converting = inventory
+        converting.devices[0].sampleRate = 44100
+        let convertingPlan = Planner.plan(graph, inventory: converting)
+        check(convertingPlan.sinks.first?.converted.map(\.uid) == ["mic"]
+              && convertingPlan.sinks.first?.subDevices.map(\.uid) == [device.uid],
+              "a 44.1 kHz mic into a 48 kHz device is converted")
+        if let converter = jk_converter_create(1, 44100, 48000) {
+            let block = UnsafeMutablePointer<Float>.allocate(capacity: 441), converted = UnsafeMutablePointer<Float>.allocate(capacity: 480)
+            defer { block.deallocate(); converted.deallocate() }
+            block.initialize(repeating: 0.5, count: 441)
+            let list = AudioBufferList.allocate(maximumBuffers: 1)
+            defer { free(list.unsafeMutablePointer) }
+            list[0] = AudioBuffer(mNumberChannels: 1, mDataByteSize: 441 * 4, mData: block)
+            for _ in 0..<20 {
+                jk_converter_write(converter, list.unsafePointer, nil)
+                jk_converter_read(converter, converted, 480, 480, nil)
+            }
+            check(abs(converted[479] - 0.5) < 1e-3 && jk_converter_underrun_count(converter) == 0, "kernel converts 44.1 to 48 kHz")
+            jk_converter_destroy(converter)
+        } else {
+            check(false, "kernel converter created")
+        }
+
+        // Editing: duplicating the System Audio node brings its cables into the device; undo puts the graph back.
+        final class Held { var graph: Graph; init(_ graph: Graph) { self.graph = graph } }
+        let held = Held(graph)
+        let history = EditHistory(read: { held.graph }, write: { held.graph = $0 })
+        let sources = Set(graph.nodes.filter(\.kind.isTap).map(\.id))
+        if let copied = Editing.copy(sources, from: graph) {
+            history.perform("Duplicate") { Editing.paste(copied, into: &$0, canvas: device.id, inventory: inventory) }
+        }
+        check(held.graph.cables.count == graph.cables.count + 2, "duplicating a node brings its cables")
+        history.undo()
+        check(held.graph == graph, "undo restores the graph")
+
+        // The helper's XPC protocol, through a listener in this process and a stand-in router.
+        check(xpcRoundTrip(graph: graph, inventory: inventory), "routing service answers over XPC and routes what it is sent")
+
         // Saving.
         let base = folder.map { URL(fileURLWithPath: $0) } ?? FileManager.default.temporaryDirectory
         let store = Store(folder: base.appendingPathComponent("junction-self-test-\(UUID().uuidString)"))
@@ -182,6 +328,172 @@ enum CommandLineTool {
 
         print(tally.failures == 0 ? "Self-test passed." : "Self-test: \(tally.failures) failure(s).")
         return tally.failures == 0 ? 0 : 1
+    }
+
+    /// A mono source through one lane with a gain of 0.5 into a mono sink.
+    private static func builtInEffectRenders() -> Bool {
+        guard let renderer = jk_renderer_create_slots(1, 1, 1, [1], [0], [1], nil, 0, 1, [1], [0]),
+              let chain = jk_chain_create(1, 48_000, 1)
+        else { return false }
+        defer { jk_renderer_destroy(renderer); jk_chain_destroy(chain) }
+        jk_chain_add(chain, JK_EFFECT_GAIN)
+        jk_chain_set_parameter(chain, 0, 0, 0.5)
+        var ticket: UInt64 = 0
+        _ = jk_renderer_swap_chain(renderer, 0, chain, &ticket)
+        var input = [Float](repeating: 1, count: 64), output = [Float](repeating: 0, count: 64)
+        let rendered = input.withUnsafeMutableBufferPointer { inBuffer in
+            output.withUnsafeMutableBufferPointer { outBuffer -> Bool in
+                var inList = AudioBufferList(mNumberBuffers: 1, mBuffers: AudioBuffer(mNumberChannels: 1, mDataByteSize: 256,
+                                                                                         mData: inBuffer.baseAddress))
+                var outList = AudioBufferList(mNumberBuffers: 1, mBuffers: AudioBuffer(mNumberChannels: 1, mDataByteSize: 256,
+                                                                                          mData: outBuffer.baseAddress))
+                var time = AudioTimeStamp()
+                _ = jk_renderer_ioproc(0, &time, &inList, &time, &outList, &time, UnsafeMutableRawPointer(renderer))
+                return true
+            }
+        }
+        _ = jk_renderer_swap_chain(renderer, 0, nil, &ticket)
+        return rendered && abs(output[10] - 0.5) < 1e-6 && input[10] == 1
+    }
+
+    /// A tone through AUPeakLimiter as the router's chains render it.
+    private static func appleEffectRenders() -> Bool {
+        guard let unit = try? EffectUnit(Effect(.limiter), channels: 1, sampleRate: 48_000) else { return false }
+        let frames = 512
+        let samples = UnsafeMutablePointer<Float>.allocate(capacity: frames)
+        defer { samples.deallocate() }
+        var peak: Float = 0, finite = true
+        for buffer in 0..<20 {
+            for f in 0..<frames { samples[f] = Float(0.5 * sin(Double(buffer * frames + f) * 2 * .pi * 1000 / 48_000)) }
+            unit.process([samples], frames: frames)
+            for f in 0..<frames {
+                finite = finite && samples[f].isFinite
+                peak = max(peak, abs(samples[f]))
+            }
+        }
+        return finite && peak > 0.05 && unit.errorCount == 0
+    }
+
+    /// AUDelay added as a plugin (out of process where macOS allows it): a setting made on it survives its state.
+    /// Returns where it ran and what a 512-frame render cost, for the output.
+    private static func pluginLoadsWithItsState() -> (Bool, String) {
+        let delay = PluginInfo(subtype: "dely", manufacturer: "appl", name: "AUDelay", vendor: "Apple")
+        let started = Date()
+        guard let unit = try? EffectUnit(Effect(plugin: delay), channels: 2, sampleRate: 48_000) else { return (false, "didn't load") }
+        let loading = Date().timeIntervalSince(started)
+        AudioUnitSetParameter(unit.unit, AudioUnitParameterID(kDelayParam_DelayTime), kAudioUnitScope_Global, 0, 0.25, 0)
+        let frames = 512
+        let left = UnsafeMutablePointer<Float>.allocate(capacity: frames), right = UnsafeMutablePointer<Float>.allocate(capacity: frames)
+        defer { left.deallocate(); right.deallocate() }
+        left.initialize(repeating: 0, count: frames)
+        right.initialize(repeating: 0, count: frames)
+        let renderStart = Date()
+        for _ in 0..<100 { unit.process([left, right], frames: frames) }
+        let perBuffer = Date().timeIntervalSince(renderStart) / 100
+        var restored = Effect(plugin: delay)
+        restored.state = unit.state
+        guard restored.state != nil, let again = try? EffectUnit(restored, channels: 2, sampleRate: 48_000) else { return (false, "no state") }
+        let kept = abs((again.parameter(AudioUnitParameterID(kDelayParam_DelayTime)) ?? 0) - 0.25) < 1e-4
+        let detail = String(format: "%@, loaded in %.0f ms, %.0f µs per 512-frame buffer = %.1f %% of its duration",
+                            unit.isOutOfProcess ? "out of process" : "in process", loading * 1000, perBuffer * 1e6,
+                            perBuffer / (Double(frames) / 48_000) * 100)
+        return (kept && unit.errorCount == 0, detail)
+    }
+
+    /// Says hello to a RoutingService on an anonymous listener, sends it the setup and waits for it to be planned.
+    private static func xpcRoundTrip(graph: Graph, inventory: Inventory) -> Bool {
+        final class StandIn: SinkRouting, @unchecked Sendable {
+            let planned = DispatchSemaphore(value: 0)
+            func apply(_ plan: RoutingPlan) { if !plan.sinks.isEmpty { planned.signal() } }
+            func forgetAfterRestart() {}
+            func stopAll() {}
+            func rebuildAll() {}
+            func resetHealth() {}
+            func processesChanged() {}
+            func takeMeters() -> [PortKey: Float] { [:] }
+        }
+        let standIn = StandIn()
+        let environment = RoutingService.Environment(readInventory: { inventory }, permission: { .allowed },
+                                                     requestMicrophone: { $0() }, processName: "Self-Test")
+        let service = RoutingService(graph: Graph(), keepRouting: false, events: EventLog(file: nil),
+                                     queue: DispatchQueue(label: "local.junction.self-test.service"),
+                                     environment: environment) { _ in standIn }
+        let listener = NSXPCListener.anonymous()
+        listener.delegate = service
+        listener.resume()
+        defer { listener.invalidate() }
+        let welcomed = DispatchSemaphore(value: 0)
+        let client = RoutingClient(endpoint: listener.endpoint, keepRouting: false,
+                                   callbackQueue: DispatchQueue(label: "local.junction.self-test.client")) { event in
+            if case .connected = event { welcomed.signal() }
+        }
+        client.connect()
+        guard welcomed.wait(timeout: .now() + 5) == .success else { return false }
+        client.send(graph: graph)
+        let routed = standIn.planned.wait(timeout: .now() + 5) == .success
+        client.goodbye()
+        return routed
+    }
+
+    /// Asks a DriverDaemonService on an anonymous listener to install, with stand-in actions that touch nothing.
+    /// A made-up client's ring, written as the driver writes it, pumped into a converter and read back at the sink.
+    private static func captureRoundTrip() -> Bool {
+        guard let region = CaptureRegion.makeLocal(), let converter = jk_converter_create(2, 48_000, 48_000) else { return false }
+        defer { jk_converter_destroy(converter) }
+        jk_converter_set_same_clock(converter, 1)
+        var slots: [UInt32] = [0], sequences = [jcap_claim(region.base, 0, 1, "com.example.player", "junction.self-test", 2)]
+        guard region.slots().first?.bundleID == "com.example.player",
+              let capture = jk_capture_create(region.base, region.size, &slots, &sequences, 1, 2, 48_000, converter)
+        else { return false }
+        defer { jk_capture_destroy(capture) }
+        var time: UInt64 = 48_000, peak: Float = 0
+        var samples = [Float](repeating: 0.25, count: 512 * 2), output = [Float](repeating: 0, count: 512 * 2)
+        for cycle in 0..<100 {
+            jcap_write(region.base, 0, &samples, 2, 512, time)
+            time += 512
+            jk_capture_pump(capture)
+            output.withUnsafeMutableBufferPointer { jk_converter_read(converter, $0.baseAddress!, 512, 512, nil) }
+            if cycle > 80 { peak = max(peak, output.map(abs).max() ?? 0) }
+        }
+        return abs(peak - 0.25) < 0.01
+    }
+
+    private static func daemonRoundTrip() -> Bool {
+        final class StandIn: PrivilegedActions, @unchecked Sendable {
+            let staging = URL(fileURLWithPath: "/nonexistent/.JunctionDriver.installing")
+            var staged: URL?
+            var committed = false
+            func driverVersion(at url: URL) -> String? {
+                url == staging || url.path.hasSuffix(DriverDaemon.bundledDriverPath) ? "1.0.0" : nil
+            }
+            func stage(_ source: URL) throws -> URL {
+                staged = source
+                return staging
+            }
+            func signature(of url: URL) -> CodeSignature { CodeSignature(isValid: true, identifier: DriverClient.bundleID, teamID: "SELFTEST01") }
+            func ownSignature() -> CodeSignature { CodeSignature(isValid: true, identifier: DriverDaemon.label, teamID: "SELFTEST01") }
+            func commit(_ staged: URL) throws { committed = true }
+            func discard(_ staged: URL) {}
+            func removeInstalled() throws -> Bool { false }
+            func restartCoreAudio() {}
+        }
+        let standIn = StandIn()
+        let app = Bundle.main.bundleURL
+        let service = DriverDaemonService(app: app, actions: standIn, clientRequirement: nil, checksClients: false)
+        let listener = NSXPCListener.anonymous()
+        listener.delegate = service
+        listener.resume()
+        defer { listener.invalidate() }
+        let answered = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) var outcome: DriverDaemonClient.Outcome?
+        DriverDaemonClient(endpoint: listener.endpoint).send(.installDriver(allowOlder: false), timeout: 5,
+                                                             queue: DispatchQueue(label: "local.junction.self-test.daemon")) {
+            outcome = $0
+            answered.signal()
+        }
+        guard answered.wait(timeout: .now() + 10) == .success else { return false }
+        return outcome == .reply(.installed(version: "1.0.0")) && standIn.staged == DriverDaemon.bundledDriver(inApp: app)
+            && standIn.committed
     }
 
     private static func signatureIsValid(_ url: URL) -> Bool {

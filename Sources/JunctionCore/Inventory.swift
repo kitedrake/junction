@@ -9,14 +9,17 @@ public struct Inventory: Equatable, Sendable {
     public var defaultOutputUID: String?
     public var defaultInputUID: String?
     public var driver: DriverStatus
+    /// Apps playing into Junction's virtual devices that the driver captures (see `DeviceClient`).
+    public var deviceClients: [DeviceClient]
 
     public init(devices: [DeviceInfo] = [], apps: [AudioApp] = [], defaultOutputUID: String? = nil,
-                defaultInputUID: String? = nil, driver: DriverStatus = .notInstalled) {
+                defaultInputUID: String? = nil, driver: DriverStatus = .notInstalled, deviceClients: [DeviceClient] = []) {
         self.devices = devices
         self.apps = apps
         self.defaultOutputUID = defaultOutputUID
         self.defaultInputUID = defaultInputUID
         self.driver = driver
+        self.deviceClients = deviceClients
     }
 
     public func device(_ uid: String?) -> DeviceInfo? {
@@ -39,11 +42,13 @@ public struct DeviceInfo: Hashable, Sendable, Identifiable {
     public var sampleRate: Double
     /// Published by Junction's driver.
     public var isJunction: Bool
+    /// Core Audio's clock domain (0: not known). Devices in the same nonzero domain share one clock and never drift.
+    public var clockDomain: UInt32
 
     public var id: String { uid }
 
     public init(uid: String, objectID: AudioObjectID = 0, name: String, inputChannels: Int, outputChannels: Int,
-                sampleRate: Double = 48000, isJunction: Bool = false) {
+                sampleRate: Double = 48000, isJunction: Bool = false, clockDomain: UInt32 = 0) {
         self.uid = uid
         self.objectID = objectID
         self.name = name
@@ -51,6 +56,12 @@ public struct DeviceInfo: Hashable, Sendable, Identifiable {
         self.outputChannels = outputChannels
         self.sampleRate = sampleRate
         self.isJunction = isJunction
+        self.clockDomain = clockDomain
+    }
+
+    /// Whether this device runs on the same clock as `other`.
+    public func sharesClock(with other: DeviceInfo) -> Bool {
+        clockDomain != 0 && clockDomain == other.clockDomain
     }
 
     public var ref: DeviceRef { DeviceRef(uid: uid, name: name, inputChannels: inputChannels, outputChannels: outputChannels) }
@@ -156,6 +167,8 @@ public struct NodeInfo {
             return PortCounts(inputs: 0, outputs: inventory.device(inventory.defaultInputUID)?.inputChannels ?? 2)
         case .application, .systemAudio:
             return PortCounts(inputs: 0, outputs: 2)
+        case .appThroughDevice(_, let id):
+            return PortCounts(inputs: 0, outputs: min(graph.virtualDevice(id)?.channels ?? 2, CaptureRegion.maxChannels))
         }
     }
 
@@ -167,6 +180,7 @@ public struct NodeInfo {
         case .defaultInput: "Default Input"
         case .application(let app): app.name
         case .systemAudio: "System Audio"
+        case .appThroughDevice(let app, let id): "\(app.name) through \(graph.virtualDevice(id)?.name ?? "Deleted Device")"
         }
     }
 
@@ -174,7 +188,12 @@ public struct NodeInfo {
         switch node.kind {
         case .virtualDevice(let id):
             guard let device = graph.virtualDevice(id) else { return "" }
-            return device.isEnabled ? "Virtual device" : "Virtual device · off"
+            guard device.isEnabled else { return "Virtual device · off" }
+            switch device.direction {
+            case .both: return device.isHidden ? "Virtual device · hidden" : "Virtual device"
+            case .inputOnly: return device.isHidden ? "Virtual input · hidden" : "Virtual input"
+            case .outputOnly: return device.isHidden ? "Virtual output · hidden" : "Virtual output"
+            }
         case .device(let ref):
             return inventory.device(ref.uid) == nil ? "Not connected" : "Audio device"
         case .defaultOutput:
@@ -187,7 +206,49 @@ public struct NodeInfo {
             if excluded.isEmpty { return "All apps" }
             let names = excluded.map(\.name)
             return "All apps except " + (names.count <= 2 ? names.joined(separator: " and ") : "\(names[0]) and \(names.count - 1) more")
+        case .appThroughDevice(let app, let id):
+            guard let device = graph.virtualDevice(id) else { return "App audio" }
+            return inventory.clients(of: app.bundleID, through: device).isEmpty ? "Not playing into \(device.name)"
+                                                                              : "App audio · playing into \(device.name)"
         }
+    }
+
+    /// The nominal sample rate of the device a node stands for right now (nil for app audio or a missing device).
+    public func sampleRate(_ node: Node) -> Double? {
+        guard let rate = inventory.device(deviceUID(node))?.sampleRate, rate > 0 else { return nil }
+        return rate
+    }
+
+    /// A device node's effective rate: "44.1 kHz, converted to 48 kHz" when Junction converts it, else "48 kHz".
+    public func rateText(_ node: Node, plan: RoutingPlan) -> String? {
+        if let note = plan.conversions[node.id] { return note.text }
+        return sampleRate(node).map { formatSampleRate($0) }
+    }
+
+    /// Channel names for one side of a node: a virtual device's own names where it has them, else L/R or numbers.
+    public func channelLabels(_ node: Node, outputs: Bool) -> [String] {
+        let ports = ports(node)
+        var labels = JunctionCore.channelLabels(outputs ? ports.outputs : ports.inputs)
+        if case .virtualDevice(let id) = node.kind, let device = graph.virtualDevice(id) {
+            for index in labels.indices { if let name = device.channelName(index) { labels[index] = name } }
+        }
+        return labels
+    }
+
+    /// The device Junction plays into for a receiving node: a virtual device's feed (its hidden companion when apps
+    /// see it as an input only), else the node's device.
+    public func feedUID(_ node: Node) -> String? {
+        guard case .virtualDevice(let id) = node.kind else { return deviceUID(node) }
+        guard deviceUID(node) != nil, let uid = graph.virtualDevice(id)?.feedUID, inventory.device(uid) != nil else { return nil }
+        return uid
+    }
+
+    /// The device Junction records from for a source node: what comes out of a virtual device (its hidden companion
+    /// when apps see it as an output only), else the node's device.
+    public func returnUID(_ node: Node) -> String? {
+        guard case .virtualDevice(let id) = node.kind else { return deviceUID(node) }
+        guard deviceUID(node) != nil, let uid = graph.virtualDevice(id)?.returnUID, inventory.device(uid) != nil else { return nil }
+        return uid
     }
 
     /// The device UID a node stands for right now, if it is a device and available.
@@ -199,7 +260,7 @@ public struct NodeInfo {
         case .device(let ref): return inventory.device(ref.uid) != nil ? ref.uid : nil
         case .defaultOutput: return inventory.device(inventory.defaultOutputUID) != nil ? inventory.defaultOutputUID : nil
         case .defaultInput: return inventory.device(inventory.defaultInputUID) != nil ? inventory.defaultInputUID : nil
-        case .application, .systemAudio: return nil
+        case .application, .systemAudio, .appThroughDevice: return nil
         }
     }
 }

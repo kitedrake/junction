@@ -2,7 +2,7 @@ import Foundation
 
 /// Something the router or the app did that helps explain what you hear: sinks built, failures, retries, restarts.
 public struct RoutingEvent: Identifiable, Equatable, Sendable {
-    public enum Kind: String, Sendable { case info, warning, error }
+    public enum Kind: String, Codable, Sendable { case info, warning, error }
     public let id: Int
     public let date: Date
     public let kind: Kind
@@ -49,15 +49,17 @@ public final class EventLog: @unchecked Sendable {
         lock.withLock { onChange = handler }
     }
 
-    public func add(_ kind: RoutingEvent.Kind, _ message: String) {
+    /// Adds an event. `persist: false` keeps it in memory only: events the routing helper sent, which it has already
+    /// written to `events.log` itself.
+    public func add(_ kind: RoutingEvent.Kind, _ message: String, date: Date = Date(), persist: Bool = true) {
         let (event, file, handler) = lock.withLock { () -> (RoutingEvent, URL?, (@Sendable () -> Void)?) in
-            let event = RoutingEvent(id: nextID, date: Date(), kind: kind, message: message)
+            let event = RoutingEvent(id: nextID, date: date, kind: kind, message: message)
             nextID += 1
             events.append(event)
             if events.count > Self.limit { events.removeFirst(events.count - Self.limit) }
             return (event, self.file, onChange)
         }
-        if let file { Self.append(event.line, to: file) }
+        if persist, let file { Self.append(event.line, to: file) }
         handler?()
     }
 
@@ -132,6 +134,10 @@ public enum Diagnostics {
             var line = "  \(sink.name): \(sink.routes.count) route(s), \(sink.taps.count) tap(s), devices "
                 + sink.subDevices.map { "\($0.uid)@\(Int($0.sampleRate))" }.joined(separator: ", ")
                 + ", aggregate \(sink.inputChannels) in / \(sink.outputChannels) out"
+            if !sink.converted.isEmpty {
+                line += ", converted to \(Int(sink.sampleRate)): "
+                    + sink.converted.map { "\($0.uid)@\(Int($0.sampleRate))" }.joined(separator: ", ")
+            }
             if let frames = sink.bufferFrames { line += ", buffer \(frames)" }
             if let status = statuses?[sink.sinkNode] {
                 line += status.state == .running ? ", running" : ", failed"
