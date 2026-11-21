@@ -98,6 +98,8 @@ struct VirtualDeviceRow: View {
                 .labelsHidden()
                 .help(device.isEnabled ? "Published: apps can use it" : "Off: apps don't see it")
         }
+        // Dropped on its own canvas, the device moves there.
+        .draggable(PaletteItem(kind: .virtualDevice(device.id), role: nil))
         .contextMenu {
             Button(device.isEnabled ? "Turn Off" : "Turn On") {
                 model.updateVirtualDevice(device.id, device.isEnabled ? "Turn Off" : "Turn On") { $0.isEnabled.toggle() }
@@ -160,6 +162,8 @@ struct PaletteRow: View {
         }
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { model.addNode(kind, as: role) }
+        .draggable(PaletteItem(kind: kind, role: role))
+        .accessibilityAction(named: "Add to Canvas") { model.addNode(kind, as: role) }
     }
 }
 

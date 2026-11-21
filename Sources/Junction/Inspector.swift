@@ -42,10 +42,11 @@ private struct Overview: View {
             }
             VStack(alignment: .leading, spacing: 8) {
                 Help(symbol: "rectangle.stack", text: "Each virtual device has its own canvas: pick it in the sidebar. Sources on the left feed it; outputs on the right play it.")
-                Help(symbol: "contextualmenu.and.cursorarrow", text: "Right-click the canvas (or use the sidebar) to add a source or an output; it connects to the device by itself.")
+                Help(symbol: "contextualmenu.and.cursorarrow", text: "Right-click the canvas, or drag from the sidebar, to add a source or an output; it connects to the device by itself.")
                 Help(symbol: "hand.draw", text: "Drag from a channel on the right of a node to a channel on the left of another to change the wiring.")
                 Help(symbol: "line.3.horizontal", text: "Drag the bar beside a node's title onto another node to connect all channels at once.")
-                Help(symbol: "rectangle.dashed", text: "Drag a box on empty canvas, or ⇧-click nodes, to select several: move, copy, duplicate or remove them together. Paste works on any device's canvas.")
+                Help(symbol: "rectangle.dashed", text: "⌘-drag a box on empty canvas, or ⇧-click nodes, to select several: move, copy, duplicate or remove them together. Paste works on any device's canvas.")
+                Help(symbol: "magnifyingglass", text: "Scroll or drag empty canvas to move around; pinch, ⌘-scroll, ⌘+ or ⌘− to zoom. The minimap shows where you are.")
                 Help(symbol: "cursorarrow.click", text: "To remove a cable, drag it off the channel it plugs into and let go on empty canvas, or click it and press Delete.")
                 Help(symbol: "mic", text: "Apps see each virtual device as a microphone (what you send into it) and as a speaker; its inspector can make it one or the other, or hide it.")
             }

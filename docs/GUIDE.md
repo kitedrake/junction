@@ -111,13 +111,21 @@ To delete a device, right-click it in the sidebar and choose **Delete Virtual De
 
 ## 5. Feed it and listen to it
 
-Add things to the canvas you're looking at in any of three ways:
+Add things to the canvas you're looking at in any of these ways:
 
 - click **⊕** next to an item in the sidebar (or double-click the item);
+- **drag** an item from the sidebar onto the canvas. It lands where you let go;
 - use the **+** menu in the toolbar;
 - **right-click** an empty spot on the canvas. The new item lands where you clicked.
 
 A new item is **connected to the device straight away**: sources into it, outputs out of it.
+
+Drop an item **on a cable** to put it on that cable's channels: a source dropped on the cables into the device feeds
+the same device channels, and an output dropped on the cables out of the device plays the same channels. Dragging an
+item that has no cables yet onto a cable does the same. When the rules don't allow it (an output dropped on a cable
+into the device, or a connection that would feed the device back into itself), the item is connected the usual way
+and the bottom of the canvas says why. Dragging the canvas's own device from the sidebar moves it to where you let
+go; other virtual devices can't be dropped there, because devices never feed each other.
 
 | Source | What it carries |
 | --- | --- |
@@ -161,7 +169,7 @@ bottom of the canvas.
 
 ### Select, copy and tidy up
 
-- **Select several items**: drag a box over empty canvas, or hold ⇧ and click items to add or take them out of the
+- **Select several items**: hold ⌘ and drag a box over empty canvas (⇧-drag adds to the selection), or hold ⇧ and click items to add or take them out of the
   selection. ⌘A selects everything on the canvas. Drag any selected item to move them all; the inspector lists them.
 - **Copy, cut, paste and duplicate** (Edit menu, or right-click an item): copied items take the cables between them
   along, including their cables to and from the device. Paste onto the same canvas, or pick another device in the
@@ -178,6 +186,33 @@ bottom of the canvas.
   <source media="(prefers-color-scheme: light)" srcset="screenshots/multi-select-light.png">
   <img src="screenshots/multi-select-dark.png" alt="Two sources selected together, and the inspector listing them">
 </picture>
+
+### Zoom and move around
+
+- **Zoom** with a pinch on the trackpad, ⌘-scroll, or **View › Zoom In / Zoom Out** (⌘+ and ⌘−). Pinching and
+  ⌘-scrolling zoom about the pointer; the menu zooms about the middle of the canvas. **Actual Size** (⌘0) goes back
+  to 100 %, and **Zoom to Fit** (⌥⌘0) shows every item.
+- **Move around** by scrolling, or by dragging empty canvas. To draw a selection box instead, hold ⌘ (or ⇧ to add to
+  the selection) while you drag.
+- The **minimap** in the bottom right corner shows the whole canvas and frames the part you're looking at. Click or
+  drag in it to move there; its buttons zoom out, back to actual size (the percentage), in, and to fit. **View ›
+  Hide Minimap** puts it away.
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="screenshots/zoomed-light.png">
+  <img src="screenshots/zoomed-dark.png" alt="The Stream Mix canvas zoomed to 150 %, with the minimap framing the part in view">
+</picture>
+
+### Keyboard and VoiceOver
+
+Every item, channel, cable and meter on the canvas has a VoiceOver label: an item says what it is, how many channels
+and cables it has and whether it is muted or running; a channel says what it is connected to; a cable says where it
+runs and its level; a meter reads its level in dB.
+
+To **connect from the keyboard**: select an item and press → (or Return) to reach its first output, or ← for its
+first input. ↑ and ↓ move through the channels, ← and → switch sides. Press **Return** on a channel to list every
+channel it may connect to, pick one with ↑ and ↓, and press **Return** again to connect. Escape closes the list, or
+takes you from the channels back to the canvas. With VoiceOver, the channel's action (VO-Space) opens the same list.
 
 ## 7. Levels and muting
 
@@ -336,8 +371,16 @@ devices and apps, so read it before sharing it.
 | Duplicate the selected items | ⌘D |
 | Select everything on the canvas | ⌘A |
 | Add an item to the selection, or take it out | ⇧-click |
-| Select with a box | Drag on empty canvas |
+| Select with a box | ⌘-drag on empty canvas (⇧-drag adds to the selection) |
+| Move around the canvas | Scroll, or drag empty canvas |
+| Zoom in / out | ⌘+ / ⌘−, pinch, or ⌘-scroll |
+| Actual size / Zoom to fit | ⌘0 / ⌥⌘0 |
+| From a selected item to its channels | → or Return (outputs), ← (inputs) |
+| Move between channels | ↑ ↓ ← → |
+| Connect a channel from the keyboard | Return, pick a channel, Return |
+| Back from the channels to the canvas | Escape |
 | Tidy Up | ⌃⌘T |
 | Reset a fader to 0 dB | Option-click, Command-click or double-click |
 | Add something where you click | Right-click the canvas |
+| Add something where you drop it | Drag it from the sidebar (onto a cable to put it on that cable) |
 | Remove a cable | Drag it off its input onto empty canvas |

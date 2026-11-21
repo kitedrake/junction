@@ -13,14 +13,21 @@ without your voice chat, step by step.
   Every app sees an enabled device as both a microphone and a speaker. Anything sent into it comes back out, so a
   streaming, call or recording app can record what Junction (or another app) plays into it.
 - **A canvas per device**: pick a virtual device in the sidebar to see its canvas. Sources on the left feed it;
-  outputs on the right (headphones, speakers) let you hear it. Add them from the sidebar, **+** in the toolbar, or by
-  right-clicking the canvas (the node lands where you clicked); a new node is wired to the device straight away. Drag
+  outputs on the right (headphones, speakers) let you hear it. Add them from the sidebar (click ⊕, or drag them onto
+  the canvas: they land where you drop them, and dropped on a cable they join its channels), **+** in the toolbar, or
+  by right-clicking the canvas (the node lands where you clicked); a new node is wired to the device straight away. Drag
   from a channel on the right of a node to a channel on the left of another to change the wiring; the bar beside a
   node's title connects all channels at once. To move or remove a cable, drag it off the channel it plugs into: drop
   it on another channel to move it, or on empty canvas (it turns red) to remove it. Clicking a cable and pressing
   Delete works too, and right-clicking the device offers **Disconnect** for each node wired to it. Meters show levels;
   cables glow with the audio they carry; dashed cables carry nothing right now (an end is missing or routing is off).
-- **Editing**: select several nodes with a drag box or ⇧-click, move them together, and cut, copy, paste or duplicate
+- **Navigation**: zoom about the pointer with a pinch or ⌘-scroll, or with ⌘+, ⌘−, ⌘0 (actual size) and ⌥⌘0 (fit);
+  scroll or drag empty canvas to move around. A minimap shows the whole canvas and where you are; click it to go
+  there.
+- **Keyboard and VoiceOver**: nodes, channels, cables and meters have VoiceOver labels and values. To connect from
+  the keyboard, select a node, press → or ← to reach its channels, press Return, pick the other channel from the list
+  and press Return.
+- **Editing**: select several nodes with a ⌘-drag box or ⇧-click, move them together, and cut, copy, paste or duplicate
   (⌘D) them with the cables between them, onto the same canvas or another device's (cables plug into that device;
   ones it doesn't allow are left out). **Tidy Up** (⌃⌘T) lays a canvas out: sources, device, outputs. Every canvas
   and virtual-device edit can be undone and redone (⌘Z, ⇧⌘Z).

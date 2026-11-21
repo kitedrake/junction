@@ -112,6 +112,16 @@ enum Snapshot {
             // Several nodes picked with a drag box: the selection inspector.
             model.selection = Selection.of(Set(model.canvasNodes.filter { $0.x < CanvasColumn.device }.map(\.id)))
             await both("multi-select")
+            // Zoomed in on the device and the headphones, the minimap showing where that is.
+            model.selection = nil
+            model.showMinimap = true
+            if let stream = model.canvas.flatMap(model.graph.deviceNode) {
+                let center = CGPoint(x: stream.x + CanvasMetrics.nodeWidth + 60, y: stream.y + 80)
+                model.viewport = CanvasViewport(scale: 1.5).centered(on: center, viewSize: model.canvasViewSize)
+            }
+            await both("zoomed")
+            model.zoomToActualSize()
+            model.viewport = CanvasViewport()
             if let first = model.canvas, let other = model.graph.virtualDevices.first(where: { $0.id != first }) {
                 model.showCanvas(other.id)
                 await both("second-canvas")

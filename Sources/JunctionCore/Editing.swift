@@ -159,6 +159,73 @@ public enum Editing {
         return true
     }
 
+    /// Puts a node onto a cable it was dropped on. The cable stands for its whole run: every cable between the same two
+    /// nodes (a stereo pair). Where Rules.check allows each half, the node goes into the run's path (A → node → B, the
+    /// run removed). Otherwise it joins the run on the device's side: a node dropped on cables into the device feeds
+    /// the same device channels, one dropped on cables out of it plays the same channels. Cables that are already
+    /// there are skipped; any other refusal (a missing side, a feedback loop) leaves the graph unchanged and is
+    /// returned.
+    @discardableResult
+    public static func insert(_ node: UUID, onto cable: UUID, graph: inout Graph, inventory: Inventory) -> Rules.Problem? {
+        guard let hit = graph.cables.first(where: { $0.id == cable }), let dropped = graph.node(node),
+              let canvas = dropped.canvas, graph.node(hit.from.node)?.canvas == canvas
+        else { return .noSuchPort }
+        let a = hit.from.node, b = hit.to.node
+        if node == a || node == b { return .alreadyConnected }
+        let run = graph.cables.filter { $0.from.node == a && $0.to.node == b }
+        let ports = NodeInfo(graph: graph, inventory: inventory).ports(dropped)
+
+        /// Adds cables one at a time, each checked against the ones before; all or nothing.
+        func adding(_ pairs: [(from: PortRef, to: PortRef, gainDB: Double)], to start: Graph) -> (Graph?, Rules.Problem?) {
+            var working = start
+            var added = false
+            for pair in pairs {
+                switch Rules.check(from: pair.from, to: pair.to, graph: working, inventory: inventory) {
+                case nil:
+                    working.cables.append(Cable(from: pair.from, to: pair.to, gainDB: pair.gainDB))
+                    added = true
+                case .alreadyConnected?: continue
+                case let problem?: return (nil, problem)
+                }
+            }
+            return added ? (working, nil) : (nil, .alreadyConnected)
+        }
+
+        // Into the path: A → node → B, with the run's levels kept on the first half.
+        var spliceProblem: Rules.Problem = .noSuchPort
+        if ports.inputs > 0, ports.outputs > 0 {
+            var without = graph
+            without.cables.removeAll { run.map(\.id).contains($0.id) }
+            var pairs: [(from: PortRef, to: PortRef, gainDB: Double)] = []
+            for cable in run {
+                let input = min(cable.to.channel, ports.inputs - 1), output = min(cable.to.channel, ports.outputs - 1)
+                pairs.append((cable.from, PortRef(node: node, channel: input), cable.gainDB))
+                pairs.append((PortRef(node: node, channel: output), cable.to, 0))
+            }
+            let (spliced, problem) = adding(pairs, to: without)
+            if let spliced {
+                graph = spliced
+                return nil
+            }
+            spliceProblem = problem ?? .noSuchPort
+        }
+
+        // Alongside, on the device's side of the run.
+        guard let device = graph.deviceNode(canvas)?.id, a == device || b == device else { return spliceProblem }
+        var pairs: [(from: PortRef, to: PortRef, gainDB: Double)] = []
+        if b == device {
+            guard ports.outputs > 0 else { return .noSuchPort }
+            pairs = run.map { (PortRef(node: node, channel: min($0.from.channel, ports.outputs - 1)), $0.to, 0) }
+        } else {
+            guard ports.inputs > 0 else { return .noSuchPort }
+            pairs = run.map { ($0.from, PortRef(node: node, channel: min($0.to.channel, ports.inputs - 1)), 0) }
+        }
+        let (joined, problem) = adding(pairs, to: graph)
+        guard let joined else { return problem }
+        graph = joined
+        return nil
+    }
+
     /// The nodes on a canvas whose frames touch a rectangle (a drag box).
     public static func nodes(in rect: CGRect, canvas: UUID, graph: Graph, inventory: Inventory) -> Set<UUID> {
         let info = NodeInfo(graph: graph, inventory: inventory)

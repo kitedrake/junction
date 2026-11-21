@@ -10,7 +10,7 @@ import UniformTypeIdentifiers
 typealias Selection = CanvasSelection
 
 /// Which side of the canvas a new node goes on: sources feed the virtual device, outputs play it.
-enum NodeRole {
+enum NodeRole: String, Codable {
     case source, output
 }
 
@@ -35,6 +35,13 @@ final class AppModel {
     private(set) var isEditingText = false
     /// The virtual device whose canvas is shown, as picked in the sidebar.
     private var pickedCanvas: UUID?
+    /// How far each canvas is zoomed and panned (not saved: a canvas opens at actual size, top left).
+    private var viewports: [UUID: CanvasViewport] = [:]
+    /// The size of the canvas area in the window, for zooming about its centre and for the minimap.
+    var canvasViewSize = CGSize.zero
+    var showMinimap = UserDefaults.standard.object(forKey: "showMinimap") as? Bool ?? true {
+        didSet { if !isDemo { UserDefaults.standard.set(showMinimap, forKey: "showMinimap") } }
+    }
     /// A virtual device waiting for the user to confirm its deletion.
     var deviceToDelete: UUID?
     var showInspector = true
@@ -607,6 +614,35 @@ final class AppModel {
     var canvasNodes: [Node] { canvas.map(graph.nodes(on:)) ?? [] }
     var canvasCables: [Cable] { canvas.map(graph.cables(on:)) ?? [] }
 
+    // MARK: Zoom and pan
+
+    /// The shown canvas's zoom and scroll position. Setting it keeps the canvas within reach.
+    var viewport: CanvasViewport {
+        get { canvas.flatMap { viewports[$0] } ?? CanvasViewport() }
+        set {
+            guard let canvas else { return }
+            let clamped = newValue.clamped(content: canvasContentSize, viewSize: canvasViewSize)
+            if viewports[canvas] != clamped { viewports[canvas] = clamped }
+        }
+    }
+
+    /// The shown canvas's drawing area.
+    var canvasContentSize: CGSize { CanvasGeometry.contentSize(of: canvasNodes, info: info) }
+
+    private var viewCenter: CGPoint { CGPoint(x: canvasViewSize.width / 2, y: canvasViewSize.height / 2) }
+
+    /// ⌘+ and ⌘−: one step about the middle of the canvas area.
+    func zoom(in zoomIn: Bool) { viewport = viewport.stepped(in: zoomIn, about: viewCenter) }
+
+    /// ⌘0.
+    func zoomToActualSize() { viewport = viewport.zoomed(to: 1, about: viewCenter) }
+
+    /// Every node in view, no larger than actual size.
+    func zoomToFit() {
+        guard let bounds = CanvasGeometry.bounds(of: canvasNodes, info: info) else { return }
+        viewport = CanvasViewport.fitting(bounds, in: canvasViewSize)
+    }
+
     func showCanvas(_ device: UUID) {
         guard device != canvas else { return }
         pickedCanvas = device
@@ -638,6 +674,63 @@ final class AppModel {
         }
         selection = .node(node.id)
         return node.id
+    }
+
+    /// Something dragged from the sidebar and dropped on the shown canvas at `point` (canvas coordinates): it lands
+    /// with its title under the pointer. Dropped on a cable it goes onto that cable (see `Editing.insert`); otherwise,
+    /// or when the cable refuses it, it is wired to the device as `addNode` would. The canvas's own device moves to the
+    /// drop point. Returns why it couldn't go where it was dropped, if it couldn't.
+    @discardableResult
+    func drop(_ kind: NodeKind, as role: NodeRole?, at point: CGPoint) -> String? {
+        guard let canvas, let device = graph.deviceNode(canvas) else {
+            alert = "Create a virtual device first: each one has its own canvas."
+            return nil
+        }
+        let origin = CanvasGeometry.dropOrigin(point)
+        if case .virtualDevice(let id) = kind {
+            guard id == canvas else { return "Virtual devices don't feed each other: each one has its own canvas." }
+            moveNodes([device.id: origin])
+            endEditing()
+            selection = .node(device.id)
+            return nil
+        }
+        let node = Node(kind: kind, x: origin.x, y: origin.y, canvas: canvas)
+        let ports = info.ports(node)
+        let role = role ?? (ports.outputs > 0 && ports.inputs == 0 ? .source : .output)
+        let hit = CanvasGeometry.cable(at: point, among: canvasCables, graph: graph,
+                                       tolerance: CanvasGeometry.dropTolerance / viewport.scale)
+        let inventory = inventory
+        var problem: Rules.Problem?
+        edit("Add \(info.title(node))") { graph in
+            graph.nodes.append(node)
+            if let hit {
+                problem = Editing.insert(node.id, onto: hit, graph: &graph, inventory: inventory)
+                if problem == nil { return }
+            }
+            graph.cables += role == .source
+                ? Rules.busCables(from: node.id, to: device.id, graph: graph, inventory: inventory)
+                : Rules.busCables(from: device.id, to: node.id, graph: graph, inventory: inventory)
+        }
+        selection = .node(node.id)
+        return problem.map { "It couldn't go onto that cable: \($0.message)" }
+    }
+
+    /// A node with no cables yet, let go over a cable: it goes onto that cable. Returns why not, if it can't.
+    @discardableResult
+    func insertOnCable(_ id: UUID) -> String? {
+        guard let node = graph.node(id), !isDeviceNode(node),
+              !graph.cables.contains(where: { $0.from.node == id || $0.to.node == id }) else { return nil }
+        let titlePoint = CGPoint(x: node.x + 30, y: node.y + CanvasMetrics.header / 2)
+        let others = canvasCables
+        guard let hit = CanvasGeometry.cable(at: titlePoint, among: others, graph: graph,
+                                             tolerance: CanvasGeometry.dropTolerance / viewport.scale)
+        else { return nil }
+        var updated = graph
+        if let problem = Editing.insert(id, onto: hit, graph: &updated, inventory: inventory) {
+            return "It couldn't go onto that cable: \(problem.message)"
+        }
+        edit("Insert on Cable") { $0 = updated }
+        return nil
     }
 
     /// Sources go on the left, outputs on the right, below what is already there.

@@ -17,12 +17,12 @@ enum NodeLayout {
 
     static func origin(_ node: Node) -> CGPoint { CGPoint(x: node.x, y: node.y) }
 
-    static func inputPoint(_ node: Node, _ channel: Int) -> CGPoint {
-        CGPoint(x: node.x, y: node.y + header + topPadding + row * (CGFloat(channel) + 0.5))
-    }
+    static func inputPoint(_ node: Node, _ channel: Int) -> CGPoint { CanvasGeometry.inputPoint(node, channel) }
 
-    static func outputPoint(_ node: Node, _ channel: Int) -> CGPoint {
-        CGPoint(x: node.x + width, y: node.y + header + topPadding + row * (CGFloat(channel) + 0.5))
+    static func outputPoint(_ node: Node, _ channel: Int) -> CGPoint { CanvasGeometry.outputPoint(node, channel) }
+
+    static func point(_ end: PortEnd, _ node: Node) -> CGPoint {
+        end.isOutput ? outputPoint(node, end.port.channel) : inputPoint(node, end.port.channel)
     }
 
     /// The "all channels" handles beside the header.
@@ -47,141 +47,251 @@ struct PendingWire: Equatable {
     var location: CGPoint
 }
 
+/// A sidebar row being dragged onto the canvas. It travels as text (prefixed, so other text isn't taken for one).
+struct PaletteItem: Codable, Transferable {
+    var kind: NodeKind
+    var role: NodeRole?
+
+    private static let prefix = "junction-node:"
+
+    var text: String { Self.prefix + ((try? JSONEncoder().encode(self)).map { $0.base64EncodedString() } ?? "") }
+
+    init(kind: NodeKind, role: NodeRole?) {
+        self.kind = kind
+        self.role = role
+    }
+
+    init(text: String) throws {
+        guard text.hasPrefix(Self.prefix), let data = Data(base64Encoded: String(text.dropFirst(Self.prefix.count))) else {
+            throw CocoaError(.coderReadCorrupt)
+        }
+        self = try JSONDecoder().decode(PaletteItem.self, from: data)
+    }
+
+    static var transferRepresentation: some TransferRepresentation {
+        ProxyRepresentation(exporting: \.text, importing: { try PaletteItem(text: $0) })
+    }
+}
+
+/// The canvas: nodes and cables, zoomed and panned (scroll, pinch, ⌘+ and ⌘−, dragging empty canvas), with a minimap.
+/// Everything inside the zoomed layer works in canvas coordinates (the "canvas" coordinate space); the background and
+/// the window's events are in view coordinates and go through the viewport.
 struct CanvasView: View {
     @Environment(AppModel.self) private var model
     @State private var wire: PendingWire?
     @State private var dragOrigins: [UUID: CGPoint] = [:]
     @State private var refusal: String?
-    /// The drag box being drawn on empty canvas.
+    @State private var refusalTask: Task<Void, Never>?
+    /// The drag box being drawn on empty canvas, in canvas coordinates.
     @State private var box: (start: CGPoint, end: CGPoint)?
-    /// Where the pointer last was over the canvas, for the right-click menu. Not observed: hovering mustn't redraw.
+    /// A drag on empty canvas: panning from where the view was, or drawing a box (⇧ or ⌘ held when it started).
+    @State private var emptyDrag: EmptyDrag?
+    /// Where the pointer last was over the canvas (canvas coordinates), for the right-click menu. Not observed:
+    /// hovering mustn't redraw.
     @State private var pointer = PointerSpot()
+    /// The port whose "connect to" list is open.
+    @State private var connecting: PortEnd?
     @FocusState private var focused: Bool
+    @FocusState private var focusedPort: PortEnd?
+
+    private enum EmptyDrag {
+        case pan(CanvasViewport)
+        case box
+    }
 
     var body: some View {
         let info = model.info
-        let bounds = contentBounds(info)
-        ScrollView([.horizontal, .vertical]) {
-            ZStack(alignment: .topLeading) {
-                GridBackground()
-                    .frame(width: bounds.width, height: bounds.height)
-                    .contentShape(Rectangle())
-                    .onTapGesture(coordinateSpace: .named("canvas")) { location in
-                        if let cable = hitCable(at: location, info: info) {
-                            model.selection = .cable(cable)
-                        } else if !NSEvent.modifierFlags.contains(.shift) {
-                            model.selection = nil
+        let size = model.canvasContentSize
+        let viewport = model.viewport
+        GridBackground(viewport: viewport)
+            .contentShape(Rectangle())
+            .onTapGesture { location in
+                let point = viewport.contentPoint(location)
+                // The same few points on screen at any zoom.
+                if let cable = CanvasGeometry.cable(at: point, among: model.canvasCables, graph: model.graph,
+                                                    tolerance: CanvasGeometry.clickTolerance / viewport.scale) {
+                    model.selection = .cable(cable)
+                } else if !NSEvent.modifierFlags.contains(.shift) {
+                    model.selection = nil
+                }
+                focused = true
+            }
+            .gesture(emptyDragGesture)
+            .onContinuousHover { phase in
+                if case .active(let location) = phase { pointer.location = model.viewport.contentPoint(location) }
+            }
+            .contextMenu {
+                // New nodes go where the menu was opened, header under the pointer.
+                AddMenuItems(spot: { [pointer] in pointer.location.map(CanvasGeometry.dropOrigin) })
+                Divider()
+                Button("Paste") { model.paste() }
+                    .disabled(!model.canPaste)
+                Button("Select All") { model.selectAll() }
+                Button("Tidy Up") { model.tidyUp() }
+                Divider()
+                Button("Zoom to Fit") { model.zoomToFit() }
+                Button("Actual Size") { model.zoomToActualSize() }
+            }
+            .overlay(alignment: .topLeading) {
+                content(info: info)
+                    .frame(width: size.width, height: size.height, alignment: .topLeading)
+                    .coordinateSpace(.named("canvas"))
+                    .scaleEffect(viewport.scale, anchor: .topLeading)
+                    .offset(x: -viewport.origin.x * viewport.scale, y: -viewport.origin.y * viewport.scale)
+            }
+            .background {
+                CanvasEventCatcher(
+                    onPan: { delta in model.viewport = model.viewport.panned(by: delta) },
+                    onZoom: { factor, location in model.viewport = model.viewport.zoomed(by: factor, about: location) })
+            }
+            .dropDestination(for: PaletteItem.self) { items, location in
+                guard let item = items.first else { return false }
+                if let problem = model.drop(item.kind, as: item.role, at: model.viewport.contentPoint(location)) { refuse(problem) }
+                focused = true
+                return true
+            }
+            .clipped()
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
+                model.canvasViewSize = size
+                model.viewport = model.viewport  // stays within reach of the new size
+            }
+            .overlay(alignment: .bottomTrailing) {
+                if model.showMinimap, model.canvasNodes.count > 1 {
+                    MinimapView()
+                        .padding(14)
+                }
+            }
+            .background(Color(nsColor: .underPageBackgroundColor))
+            .focusable()
+            .focusEffectDisabled()
+            .focused($focused)
+            .onDeleteCommand { model.deleteSelection() }
+            .onKeyPress(keys: [.leftArrow, .rightArrow, .return]) { press in
+                // From a selected node into its ports: → or Return its outputs, ← its inputs.
+                guard focused, case .node(let id) = model.selection, let node = model.node(id),
+                      let port = KeyboardConnect.firstPort(of: node, ports: model.info.ports(node),
+                                                           preferOutputs: press.key != .leftArrow) else { return .ignored }
+                focusedPort = port
+                return .handled
+            }
+            .onKeyPress(characters: ["="]) { press in
+                // ⌘= zooms in too, as ⌘+ does without ⇧.
+                guard press.modifiers == .command else { return .ignored }
+                model.zoom(in: true)
+                return .handled
+            }
+            .onChange(of: model.selection) { _, selection in
+                if selection != nil, focusedPort == nil { focused = true }
+            }
+            .onChange(of: model.canvas) { _, _ in
+                connecting = nil
+                focusedPort = nil
+            }
+            .overlay(alignment: .bottom) {
+                if let refusal {
+                    Text(refusal)
+                        .font(.callout)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .glassEffect(.regular, in: .capsule)
+                        .padding(.bottom, 18)
+                        .transition(.opacity)
+                }
+            }
+            .animation(.easeInOut(duration: 0.2), value: refusal)
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(model.canvasDevice.map { "\($0.name) canvas" } ?? "Canvas")
+            .accessibilityValue("Zoom \(viewport.percentText)")
+    }
+
+    /// The zoomed layer: cables, nodes and the drag box, in canvas coordinates.
+    private func content(info: NodeInfo) -> some View {
+        ZStack(alignment: .topLeading) {
+            CableLayer(wire: wire)
+                .allowsHitTesting(false)
+            CableAccessibilityLayer()
+            ForEach(model.canvasNodes) { node in
+                NodeCard(node: node, wire: $wire, focusedPort: $focusedPort, connecting: $connecting,
+                         onWireEnd: finishWire, onConnected: { problem in
+                             if let problem { refuse(problem.message) }
+                         }, onMove: { translation in
+                    // Dragging a selected node moves the whole selection.
+                    if dragOrigins.isEmpty {
+                        let moving = model.isSelected(node.id) ? model.selectedNodes : [node.id]
+                        for other in model.canvasNodes where moving.contains(other.id) {
+                            dragOrigins[other.id] = CGPoint(x: other.x, y: other.y)
                         }
-                        focused = true
                     }
-                    .gesture(
-                        DragGesture(minimumDistance: 4, coordinateSpace: .named("canvas"))
-                            .onChanged { value in box = (value.startLocation, value.location) }
-                            .onEnded { value in
-                                box = nil
-                                model.selectNodes(in: rect(value.startLocation, value.location),
-                                                  extending: NSEvent.modifierFlags.contains(.shift))
-                                focused = true
-                            }
-                    )
-                    .onContinuousHover(coordinateSpace: .named("canvas")) { phase in
-                        if case .active(let location) = phase { pointer.location = location }
-                    }
-                    .contextMenu {
-                        // New nodes go where the menu was opened, header under the pointer.
-                        AddMenuItems(spot: { [pointer] in
-                            pointer.location.map { CGPoint(x: max(0, $0.x - 30), y: max(0, $0.y - 20)) }
-                        })
-                        Divider()
-                        Button("Paste") { model.paste() }
-                            .disabled(!model.canPaste)
-                        Button("Select All") { model.selectAll() }
-                        Button("Tidy Up") { model.tidyUp() }
-                    }
-                CableLayer(wire: wire)
-                    .frame(width: bounds.width, height: bounds.height)
-                    .allowsHitTesting(false)
-                ForEach(model.canvasNodes) { node in
-                    NodeCard(node: node, wire: $wire, onWireEnd: finishWire, onMove: { translation in
-                        // Dragging a selected node moves the whole selection.
-                        if dragOrigins.isEmpty {
-                            let moving = model.isSelected(node.id) ? model.selectedNodes : [node.id]
-                            for other in model.canvasNodes where moving.contains(other.id) {
-                                dragOrigins[other.id] = CGPoint(x: other.x, y: other.y)
-                            }
-                        }
-                        model.moveNodes(dragOrigins.mapValues {
-                            CGPoint(x: $0.x + translation.width, y: $0.y + translation.height)
-                        })
-                    }, onMoveEnd: {
-                        dragOrigins = [:]
-                        model.endEditing()
+                    model.moveNodes(dragOrigins.mapValues {
+                        CGPoint(x: $0.x + translation.width, y: $0.y + translation.height)
                     })
-                    .offset(x: node.x, y: node.y)
-                }
-                if let box {
-                    let frame = rect(box.start, box.end)
-                    Rectangle()
-                        .fill(Color.accentColor.opacity(0.12))
-                        .strokeBorder(Color.accentColor.opacity(0.8), lineWidth: 1)
-                        .frame(width: frame.width, height: frame.height)
-                        .offset(x: frame.minX, y: frame.minY)
-                        .allowsHitTesting(false)
-                }
+                }, onMoveEnd: {
+                    let moved = dragOrigins.keys
+                    dragOrigins = [:]
+                    model.endEditing()
+                    // One unwired node let go over a cable goes onto it.
+                    if moved.count == 1, let id = moved.first, let problem = model.insertOnCable(id) { refuse(problem) }
+                }, onEscape: {
+                    focusedPort = nil
+                    focused = true
+                })
+                .offset(x: node.x, y: node.y)
             }
-            .frame(width: bounds.width, height: bounds.height, alignment: .topLeading)
-            .coordinateSpace(.named("canvas"))
-        }
-        .defaultScrollAnchor(.topLeading)
-        .background(Color(nsColor: .underPageBackgroundColor))
-        .focusable()
-        .focusEffectDisabled()
-        .focused($focused)
-        .onDeleteCommand { model.deleteSelection() }
-        .onChange(of: model.selection) { _, selection in
-            if selection != nil { focused = true }
-        }
-        .overlay(alignment: .bottom) {
-            if let refusal {
-                Text(refusal)
-                    .font(.callout)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .glassEffect(.regular, in: .capsule)
-                    .padding(.bottom, 18)
-                    .transition(.opacity)
+            if let box {
+                let frame = rect(box.start, box.end)
+                Rectangle()
+                    .fill(Color.accentColor.opacity(0.12))
+                    .strokeBorder(Color.accentColor.opacity(0.8), lineWidth: 1 / model.viewport.scale)
+                    .frame(width: frame.width, height: frame.height)
+                    .offset(x: frame.minX, y: frame.minY)
+                    .allowsHitTesting(false)
             }
         }
-        .animation(.easeInOut(duration: 0.2), value: refusal)
+    }
+
+    /// Dragging empty canvas pans it; with ⇧ (adding to the selection) or ⌘ it draws a selection box.
+    private var emptyDragGesture: some Gesture {
+        DragGesture(minimumDistance: 4)
+            .onChanged { value in
+                if emptyDrag == nil {
+                    let flags = NSEvent.modifierFlags
+                    emptyDrag = flags.contains(.shift) || flags.contains(.command) ? .box : .pan(model.viewport)
+                }
+                switch emptyDrag {
+                case .pan(let start)?:
+                    model.viewport = start.panned(by: value.translation)
+                case .box?:
+                    let viewport = model.viewport
+                    box = (viewport.contentPoint(value.startLocation), viewport.contentPoint(value.location))
+                case nil:
+                    break
+                }
+            }
+            .onEnded { value in
+                if case .box? = emptyDrag {
+                    let viewport = model.viewport
+                    model.selectNodes(in: rect(viewport.contentPoint(value.startLocation), viewport.contentPoint(value.location)),
+                                      extending: NSEvent.modifierFlags.contains(.shift))
+                }
+                box = nil
+                emptyDrag = nil
+                focused = true
+            }
     }
 
     private func rect(_ a: CGPoint, _ b: CGPoint) -> CGRect {
         CGRect(x: min(a.x, b.x), y: min(a.y, b.y), width: abs(a.x - b.x), height: abs(a.y - b.y))
     }
 
-    private func contentBounds(_ info: NodeInfo) -> CGSize {
-        var width: CGFloat = 1800, height: CGFloat = 1200
-        for node in model.canvasNodes {
-            let frame = NodeLayout.frame(node, info.ports(node))
-            width = max(width, frame.maxX + 400)
-            height = max(height, frame.maxY + 300)
+    /// Shows why something wasn't done at the bottom of the canvas for a moment.
+    private func refuse(_ message: String) {
+        refusal = message
+        refusalTask?.cancel()
+        refusalTask = Task {
+            try? await Task.sleep(for: .seconds(2.5))
+            guard !Task.isCancelled else { return }
+            refusal = nil
         }
-        return CGSize(width: width, height: height)
-    }
-
-    /// The cable closest to a point, if one is within a few points.
-    private func hitCable(at point: CGPoint, info: NodeInfo) -> UUID? {
-        var best: (UUID, CGFloat)?
-        for cable in model.canvasCables {
-            guard let from = model.graph.node(cable.from.node), let to = model.graph.node(cable.to.node) else { continue }
-            let a = NodeLayout.outputPoint(from, cable.from.channel), b = NodeLayout.inputPoint(to, cable.to.channel)
-            for step in 0...40 {
-                let p = CableGeometry.point(a, b, t: CGFloat(step) / 40)
-                let distance = hypot(p.x - point.x, p.y - point.y)
-                if distance < 7, distance < (best?.1 ?? .infinity) { best = (cable.id, distance) }
-            }
-        }
-        return best?.0
     }
 
     /// Ends a wire drag: connects to the port (or node) under the pointer.
@@ -246,35 +356,182 @@ struct CanvasView: View {
             }
         }
         if attempted, let problem {
-            refusal = problem == .noSuchPort ? "Connect a channel on the right of one node to a channel on the left of another." : problem.message
-            Task {
-                try? await Task.sleep(for: .seconds(2.5))
-                refusal = nil
-            }
+            refuse(problem == .noSuchPort ? "Connect a channel on the right of one node to a channel on the left of another." : problem.message)
         }
     }
 }
 
-enum CableGeometry {
-    static func controls(_ a: CGPoint, _ b: CGPoint) -> (CGPoint, CGPoint) {
-        let dx = max(50, abs(b.x - a.x) * 0.5)
-        return (CGPoint(x: a.x + dx, y: a.y), CGPoint(x: b.x - dx, y: b.y))
+/// Scrolling and pinching over the canvas, which SwiftUI doesn't report: a plain scroll pans, ⌘-scroll and a pinch
+/// zoom about the pointer. Watches the window's events while the canvas is in it; events elsewhere pass on.
+struct CanvasEventCatcher: NSViewRepresentable {
+    let onPan: (CGSize) -> Void
+    let onZoom: (Double, CGPoint) -> Void
+
+    func makeNSView(context: Context) -> CatcherView {
+        let view = CatcherView()
+        view.onPan = onPan
+        view.onZoom = onZoom
+        return view
     }
 
+    func updateNSView(_ view: CatcherView, context: Context) {
+        view.onPan = onPan
+        view.onZoom = onZoom
+    }
+
+    final class CatcherView: NSView {
+        var onPan: (CGSize) -> Void = { _ in }
+        var onZoom: (Double, CGPoint) -> Void = { _, _ in }
+        private var monitor: Any?
+
+        override var isFlipped: Bool { true }  // top-left origin, as in SwiftUI
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            monitor = nil
+            guard window != nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel, .magnify]) { [weak self] event in
+                guard let self, let window = self.window, event.window === window else { return event }
+                let location = self.convert(event.locationInWindow, from: nil)
+                guard self.bounds.contains(location) else { return event }
+                if event.type == .magnify {
+                    self.onZoom(1 + Double(event.magnification), location)
+                } else if event.modifierFlags.contains(.command) {
+                    let step = event.hasPreciseScrollingDeltas ? 0.01 : 0.1
+                    self.onZoom(exp(Double(event.scrollingDeltaY) * step), location)
+                } else {
+                    let scale: CGFloat = event.hasPreciseScrollingDeltas ? 1 : 10
+                    self.onPan(CGSize(width: event.scrollingDeltaX * scale, height: event.scrollingDeltaY * scale))
+                }
+                return nil
+            }
+        }
+
+        override func removeFromSuperview() {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            monitor = nil
+            super.removeFromSuperview()
+        }
+    }
+}
+
+/// The whole canvas at a glance, with a frame for the part in view: click or drag in it to move there. Below it, the
+/// zoom buttons.
+struct MinimapView: View {
+    @Environment(AppModel.self) private var model
+    /// What the map covered when a drag in it started: kept until it ends, so the map holds still under the pointer.
+    @State private var dragWorld: CGRect?
+    static let size = CGSize(width: 180, height: 112)
+
+    var body: some View {
+        let info = model.info
+        let nodes = model.canvasNodes
+        let frames = nodes.map { NodeLayout.frame($0, info.ports($0)) }
+        let viewport = model.viewport
+        let visible = viewport.visibleRect(model.canvasViewSize)
+        let map = Minimap(world: dragWorld ?? Minimap.world(nodes: frames, visible: visible), size: Self.size)
+        let graph = model.graph
+        let cables = model.canvasCables
+        VStack(spacing: 6) {
+            Canvas { context, _ in
+                for cable in cables {
+                    guard let (a, b) = CanvasGeometry.ends(of: cable, in: graph) else { continue }
+                    var line = Path()
+                    line.move(to: map.mapPoint(a))
+                    line.addLine(to: map.mapPoint(b))
+                    context.stroke(line, with: .color(.secondary.opacity(0.5)), lineWidth: 0.75)
+                }
+                for (node, frame) in zip(nodes, frames) {
+                    let tint = NodeStyle.tint(node.kind)
+                    let rect = map.mapRect(frame)
+                    context.fill(Path(roundedRect: rect, cornerRadius: 2), with: .color(tint.opacity(model.isSelected(node.id) ? 1 : 0.6)))
+                }
+                let shown = map.mapRect(visible)
+                context.fill(Path(roundedRect: shown, cornerRadius: 3), with: .color(.accentColor.opacity(0.1)))
+                context.stroke(Path(roundedRect: shown, cornerRadius: 3), with: .color(.accentColor), lineWidth: 1.5)
+            }
+            .frame(width: Self.size.width, height: Self.size.height)
+            .clipShape(.rect(cornerRadius: 6))
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        let world = dragWorld ?? map.world
+                        dragWorld = world
+                        let target = Minimap(world: world, size: Self.size).contentPoint(value.location)
+                        model.viewport = model.viewport.centered(on: target, viewSize: model.canvasViewSize)
+                    }
+                    .onEnded { _ in dragWorld = nil }
+            )
+            .help("Click or drag to move around the canvas")
+            .accessibilityElement()
+            .accessibilityLabel("Minimap")
+            .accessibilityValue("\(nodes.count) nodes, zoom \(viewport.percentText)")
+            HStack(spacing: 2) {
+                Button { model.zoom(in: false) } label: { Image(systemName: "minus.magnifyingglass") }
+                    .help("Zoom Out (⌘−)")
+                    .accessibilityLabel("Zoom Out")
+                Button(viewport.percentText) { model.zoomToActualSize() }
+                    .monospacedDigit()
+                    .frame(minWidth: 52)
+                    .help("Actual Size (⌘0)")
+                    .accessibilityLabel("Actual Size")
+                    .accessibilityValue(viewport.percentText)
+                Button { model.zoom(in: true) } label: { Image(systemName: "plus.magnifyingglass") }
+                    .help("Zoom In (⌘+)")
+                    .accessibilityLabel("Zoom In")
+                Spacer(minLength: 0)
+                Button { model.zoomToFit() } label: { Image(systemName: "arrow.up.left.and.down.right.magnifyingglass") }
+                    .help("Zoom to Fit (⌥⌘0)")
+                    .accessibilityLabel("Zoom to Fit")
+            }
+            .buttonStyle(.borderless)
+            .font(.callout)
+            .frame(width: Self.size.width)
+        }
+        .padding(8)
+        .glassEffect(.regular, in: .rect(cornerRadius: 14))
+    }
+}
+
+/// VoiceOver's view of the cables, which are drawn in one picture: an element at the middle of each.
+struct CableAccessibilityLayer: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let info = model.info
+        let graph = model.graph
+        let idle = model.plan.idleCables
+        ZStack(alignment: .topLeading) {
+            ForEach(model.canvasCables) { cable in
+                if let (a, b) = CanvasGeometry.ends(of: cable, in: graph) {
+                    let selected = model.selection == .cable(cable.id)
+                    Color.clear
+                        .frame(width: 14, height: 14)
+                        .position(CanvasGeometry.point(a, b, t: 0.5))
+                        .accessibilityElement()
+                        .accessibilityLabel(CanvasAccessibility.cableLabel(cable, info: info))
+                        .accessibilityValue(CanvasAccessibility.cableValue(cable, idle: idle.contains(cable.id)))
+                        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+                        .accessibilityAction { model.selection = .cable(cable.id) }
+                        .accessibilityAction(named: "Disconnect") { model.removeCable(cable.id) }
+                }
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+enum CableGeometry {
     static func path(_ a: CGPoint, _ b: CGPoint) -> Path {
-        let (c1, c2) = controls(a, b)
+        let (c1, c2) = CanvasGeometry.controls(a, b)
         var path = Path()
         path.move(to: a)
         path.addCurve(to: b, control1: c1, control2: c2)
         return path
-    }
-
-    static func point(_ a: CGPoint, _ b: CGPoint, t: CGFloat) -> CGPoint {
-        let (c1, c2) = controls(a, b)
-        let u = 1 - t
-        let x = u * u * u * a.x + 3 * u * u * t * c1.x + 3 * u * t * t * c2.x + t * t * t * b.x
-        let y = u * u * u * a.y + 3 * u * u * t * c1.y + 3 * u * t * t * c2.y + t * t * t * b.y
-        return CGPoint(x: x, y: y)
     }
 }
 
@@ -348,22 +605,31 @@ final class PointerSpot {
     var location: CGPoint?
 }
 
+/// The dot grid, drawn in view coordinates so it covers the whole area at any zoom and follows the viewport.
 struct GridBackground: View {
+    let viewport: CanvasViewport
+
     var body: some View {
         Canvas { context, size in
-            let spacing: CGFloat = 24
+            var spacing: CGFloat = 24
+            while spacing * viewport.scale < 12 { spacing *= 2 }  // zoomed far out: fewer dots
+            let step = spacing * viewport.scale
+            let radius = max(0.6, min(1.2, 0.9 * viewport.scale))
             var dots = Path()
-            var y: CGFloat = spacing
+            let first = viewport.viewPoint(CGPoint(x: (viewport.origin.x / spacing).rounded(.down) * spacing,
+                                                   y: (viewport.origin.y / spacing).rounded(.down) * spacing))
+            var y = first.y
             while y < size.height {
-                var x: CGFloat = spacing
+                var x = first.x
                 while x < size.width {
-                    dots.addEllipse(in: CGRect(x: x - 0.9, y: y - 0.9, width: 1.8, height: 1.8))
-                    x += spacing
+                    dots.addEllipse(in: CGRect(x: x - radius, y: y - radius, width: radius * 2, height: radius * 2))
+                    x += step
                 }
-                y += spacing
+                y += step
             }
             context.fill(dots, with: .color(.secondary.opacity(0.22)))
         }
+        .accessibilityHidden(true)
     }
 }
 
@@ -423,9 +689,15 @@ struct NodeCard: View {
     @Environment(AppModel.self) private var model
     let node: Node
     @Binding var wire: PendingWire?
+    var focusedPort: FocusState<PortEnd?>.Binding
+    @Binding var connecting: PortEnd?
     let onWireEnd: (PendingWire) -> Void
+    /// A cable made from the keyboard, or why not.
+    let onConnected: (Rules.Problem?) -> Void
     let onMove: (CGSize) -> Void
     let onMoveEnd: () -> Void
+    /// Escape on a port: back to the canvas.
+    let onEscape: () -> Void
 
     var body: some View {
         let info = model.info
@@ -493,6 +765,15 @@ struct NodeCard: View {
             .simultaneousGesture(TapGesture().onEnded {
                 model.click(node.id, extending: NSEvent.modifierFlags.contains(.shift))
             })
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(CanvasAccessibility.nodeLabel(node, info: info))
+            .accessibilityValue(CanvasAccessibility.nodeValue(node, info: info, isRunning: model.isRunning(node.id),
+                                                              isFailing: failing, issues: issues.count))
+            .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+            .accessibilityAction { model.click(node.id, extending: false) }
+            .accessibilityAction(named: node.isMuted ? "Unmute" : "Mute") {
+                model.updateNode(node.id, node.isMuted ? "Unmute" : "Mute") { $0.isMuted.toggle() }
+            }
 
             Rectangle().fill(.separator).frame(height: 0.5).padding(.horizontal, 10)
 
@@ -505,16 +786,20 @@ struct NodeCard: View {
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                                 .frame(maxWidth: 56, alignment: .leading)
-                            LevelBar(level: model.level(node.id, output: false, channel: row), tint: tint)
+                                .accessibilityHidden(true)  // the meter says it
+                            LevelBar(level: model.level(node.id, output: false, channel: row), tint: tint,
+                                     label: CanvasAccessibility.meterLabel(PortEnd(node: node.id, channel: row, isOutput: false), info: info))
                         }
                         Spacer(minLength: 0)
                         if row < ports.outputs {
-                            LevelBar(level: model.level(node.id, output: true, channel: row), tint: tint)
+                            LevelBar(level: model.level(node.id, output: true, channel: row), tint: tint,
+                                     label: CanvasAccessibility.meterLabel(PortEnd(node: node.id, channel: row, isOutput: true), info: info))
                             Text(labels.outputs[row])
                                 .font(.system(size: 11, weight: .medium, design: .rounded))
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                                 .frame(maxWidth: 56, alignment: .trailing)
+                                .accessibilityHidden(true)
                         }
                     }
                     .padding(.horizontal, 14)
@@ -532,6 +817,8 @@ struct NodeCard: View {
         }
         .opacity(isDisabledDevice ? 0.6 : 1)
         .overlay(alignment: .topLeading) { portOverlay(ports, tint: tint) }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(info.title(node))
         .contextMenu {
             Button(node.isMuted ? "Unmute" : "Mute") {
                 model.updateNode(node.id, node.isMuted ? "Unmute" : "Mute") { $0.isMuted.toggle() }
@@ -582,36 +869,82 @@ struct NodeCard: View {
         // The newest cable into each input: dragging a connected input picks it up.
         let arriving = Dictionary(model.graph.cables.filter { $0.to.node == node.id }.map { ($0.to.channel, $0) },
                                   uniquingKeysWith: { _, newer in newer })
+        let info = model.info
         ZStack(alignment: .topLeading) {
             ForEach(0..<ports.inputs, id: \.self) { channel in
-                let port = PortRef(node: node.id, channel: channel)
-                PortDot(filled: arriving[channel] != nil, tint: tint)
-                    .position(local(NodeLayout.inputPoint(node, channel)))
-                    .gesture(wireGesture(arriving[channel].map { .moving($0) } ?? .input(port)))
+                let end = PortEnd(node: node.id, channel: channel, isOutput: false)
+                port(end, filled: arriving[channel] != nil, tint: tint, ports: ports, info: info)
+                    .gesture(wireGesture(arriving[channel].map { .moving($0) } ?? .input(end.port)))
                     .help(arriving[channel] == nil
-                          ? "Input \(channel + 1): drag to a channel on the right side of another node"
+                          ? "Input \(channel + 1): drag to a channel on the right side of another node, or press Return to pick one"
                           : "Input \(channel + 1): drag its cable to another input to move it, or onto empty canvas to remove it")
+                    .position(local(NodeLayout.inputPoint(node, channel)))
             }
             ForEach(0..<ports.outputs, id: \.self) { channel in
-                PortDot(filled: connectedOut.contains(channel), tint: tint)
+                let end = PortEnd(node: node.id, channel: channel, isOutput: true)
+                port(end, filled: connectedOut.contains(channel), tint: tint, ports: ports, info: info)
+                    .gesture(wireGesture(.output(end.port)))
+                    .help("Output \(channel + 1): drag to a channel on the left side of another node, or press Return to pick one")
                     .position(local(NodeLayout.outputPoint(node, channel)))
-                    .gesture(wireGesture(.output(PortRef(node: node.id, channel: channel))))
-                    .help("Output \(channel + 1): drag to a channel on the left side of another node")
             }
             if ports.outputs > 1 {
                 BusHandle(tint: tint, pointsRight: true)
-                    .position(local(NodeLayout.busOutputPoint(node)))
                     .gesture(wireGesture(.busOutput(node.id)))
                     .help("Drag onto another node to connect all channels in order")
+                    .accessibilityHidden(true)
+                    .position(local(NodeLayout.busOutputPoint(node)))
             }
             if ports.inputs > 1 {
                 BusHandle(tint: tint, pointsRight: true)
-                    .position(local(NodeLayout.busInputPoint(node)))
                     .gesture(wireGesture(.busInput(node.id)))
                     .help("Drag onto another node to connect all of its channels here")
+                    .accessibilityHidden(true)
+                    .position(local(NodeLayout.busInputPoint(node)))
             }
         }
         .frame(width: NodeLayout.width, height: NodeLayout.height(for: ports), alignment: .topLeading)
+    }
+
+    /// A channel dot that the keyboard and VoiceOver can reach: Return (or VoiceOver's action) opens a list of the
+    /// ports it may connect to; the arrow keys move between ports, Escape goes back to the canvas.
+    private func port(_ end: PortEnd, filled: Bool, tint: Color, ports: PortCounts, info: NodeInfo) -> some View {
+        PortDot(filled: filled, tint: tint, focused: focusedPort.wrappedValue == end)
+            .focusable()
+            .focused(focusedPort, equals: end)
+            .focusEffectDisabled()
+            .onKeyPress(.return) {
+                connecting = end
+                return .handled
+            }
+            .onKeyPress(.escape) {
+                onEscape()
+                return .handled
+            }
+            .onKeyPress(keys: [.upArrow, .downArrow, .leftArrow, .rightArrow]) { press in
+                let next = switch press.key {
+                case .upArrow: KeyboardConnect.neighbour(of: end, ports: ports, up: true)
+                case .downArrow: KeyboardConnect.neighbour(of: end, ports: ports, up: false)
+                case .leftArrow: KeyboardConnect.neighbour(of: end, ports: ports, toOutputs: false)
+                default: KeyboardConnect.neighbour(of: end, ports: ports, toOutputs: true)
+                }
+                if let next { focusedPort.wrappedValue = next }
+                return .handled
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(CanvasAccessibility.portLabel(end, info: info))
+            .accessibilityValue(CanvasAccessibility.portValue(end, info: info))
+            .accessibilityAddTraits(.isButton)
+            .accessibilityHint("Opens a list of the channels it can connect to")
+            .accessibilityAction { connecting = end }
+            .popover(isPresented: Binding(get: { connecting == end }, set: { if !$0, connecting == end { connecting = nil } }),
+                     arrowEdge: end.isOutput ? .trailing : .leading) {
+                ConnectChooser(end: end) { problem in
+                    connecting = nil
+                    focusedPort.wrappedValue = end
+                    onConnected(problem)
+                }
+                .environment(model)
+            }
     }
 
     private func local(_ point: CGPoint) -> CGPoint { CGPoint(x: point.x - node.x, y: point.y - node.y) }
@@ -630,6 +963,7 @@ struct NodeCard: View {
 struct PortDot: View {
     let filled: Bool
     let tint: Color
+    var focused = false
     @State private var hovering = false
 
     var body: some View {
@@ -637,7 +971,10 @@ struct PortDot: View {
             .fill(filled ? tint : Color(nsColor: .windowBackgroundColor))
             .overlay(Circle().strokeBorder(tint, lineWidth: 2))
             .frame(width: NodeLayout.portRadius * 2, height: NodeLayout.portRadius * 2)
-            .scaleEffect(hovering ? 1.35 : 1)
+            .background {
+                if focused { Circle().strokeBorder(Color.accentColor, lineWidth: 2.5).frame(width: 20, height: 20) }
+            }
+            .scaleEffect(hovering || focused ? 1.35 : 1)
             .frame(width: 22, height: 22)
             .contentShape(Circle())
             .onHover { hovering = $0 }
@@ -669,6 +1006,7 @@ struct BusHandle: View {
 struct LevelBar: View {
     let level: Float
     let tint: Color
+    var label = "Level"
 
     var body: some View {
         let dB = level > 0 ? 20 * log10(Double(level)) : -90
@@ -681,5 +1019,61 @@ struct LevelBar: View {
         }
         .frame(width: 44, height: 4)
         .opacity(level > 0 ? 1 : 0.5)
+        .accessibilityElement()
+        .accessibilityLabel(label)
+        .accessibilityValue(CanvasAccessibility.meterValue(level))
+    }
+}
+
+/// The keyboard's way to make a cable: the ports a focused port may connect to. ↑/↓ pick one, Return connects, Escape
+/// closes the list.
+struct ConnectChooser: View {
+    @Environment(AppModel.self) private var model
+    let end: PortEnd
+    /// Called after connecting (with the reason when it couldn't) or with nil when cancelled.
+    let onDone: (Rules.Problem?) -> Void
+    @State private var picked: PortEnd?
+    @FocusState private var listFocused: Bool
+
+    var body: some View {
+        let info = model.info
+        let choices = KeyboardConnect.choices(for: end, graph: model.graph, inventory: model.inventory)
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Connect \(CanvasAccessibility.portLabel(end, info: info)) to")
+                .font(.headline)
+                .fixedSize(horizontal: false, vertical: true)
+            if choices.isEmpty {
+                Text(end.isOutput ? "No input on this canvas can take this channel." : "No output on this canvas can feed this channel.")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                List(choices, id: \.self, selection: $picked) { choice in
+                    Text(CanvasAccessibility.portLabel(choice, info: info))
+                        .lineLimit(1)
+                }
+                .frame(height: min(240, CGFloat(choices.count) * 26 + 12))
+                .focused($listFocused)
+                .accessibilityLabel("Channels to connect to")
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { onDone(nil) }
+                    .keyboardShortcut(.cancelAction)
+                Button("Connect") { connect() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(picked == nil)
+            }
+        }
+        .padding(14)
+        .frame(width: 320)
+        .onAppear {
+            picked = choices.first
+            listFocused = true
+        }
+    }
+
+    private func connect() {
+        guard let picked, let (from, to) = KeyboardConnect.cable(end, picked) else { return }
+        onDone(model.connect(from: from, to: to))
     }
 }

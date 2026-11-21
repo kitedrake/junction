@@ -66,6 +66,19 @@ struct JunctionApp: App {
             CommandGroup(after: .sidebar) {
                 Button(model.showInspector ? "Hide Inspector" : "Show Inspector") { model.showInspector.toggle() }
                     .keyboardShortcut("i", modifiers: [.command, .option])
+                Button(model.showMinimap ? "Hide Minimap" : "Show Minimap") { model.showMinimap.toggle() }
+                Divider()
+                Group {
+                    Button("Zoom In") { model.zoom(in: true) }
+                        .keyboardShortcut("+")
+                    Button("Zoom Out") { model.zoom(in: false) }
+                        .keyboardShortcut("-")
+                    Button("Actual Size") { model.zoomToActualSize() }
+                        .keyboardShortcut("0")
+                    Button("Zoom to Fit") { model.zoomToFit() }
+                        .keyboardShortcut("0", modifiers: [.command, .option])
+                }
+                .disabled(model.canvas == nil)
                 Divider()
             }
         }
