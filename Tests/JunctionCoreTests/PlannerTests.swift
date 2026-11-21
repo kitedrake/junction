@@ -103,6 +103,33 @@ final class PlannerTests: XCTestCase {
         XCTAssertNotEqual(before.structureKey, muted.structureKey, "taking audio away from the speakers needs a new tap")
     }
 
+    func testRateChangesRebuildOnlyTheSinksUsingTheDevice() throws {
+        var graph = Graph()
+        let device = Templates.streamWithoutChat(&graph, excluding: [])
+        let other = Demo.chat
+        graph.virtualDevices.append(other)
+        let otherNode = Node(kind: .virtualDevice(other.id), x: 330, y: 60, canvas: other.id)
+        let mic = Node(kind: .device(Demo.mic.ref), x: 40, y: 60, canvas: other.id)
+        graph.nodes += [otherNode, mic]
+        graph.cables.append(Cable(from: PortRef(node: mic.id, channel: 0), to: PortRef(node: otherNode.id, channel: 0)))
+        var inventory = Demo.inventory
+        inventory.devices.append(DeviceInfo(uid: device.uid, name: device.name, inputChannels: 2, outputChannels: 2,
+                                            isJunction: true))
+        let before = Planner.plan(graph, inventory: inventory).sinks
+        XCTAssertEqual(before.count, 2)
+        let index = try XCTUnwrap(inventory.devices.firstIndex { $0.uid == Demo.mic.uid })
+        inventory.devices[index].sampleRate = 96_000
+        let after = Planner.plan(graph, inventory: inventory).sinks
+        func key(_ sinks: [SinkPlan], _ name: String) -> String? { sinks.first { $0.name == name }?.structureKey }
+        XCTAssertNotEqual(key(before, other.name), key(after, other.name), "the mic's sink is rebuilt")
+        XCTAssertEqual(key(before, device.name), key(after, device.name), "a sink without the mic keeps running")
+    }
+
+    func testRetriesWaitLongerEachTime() {
+        XCTAssertEqual((1...8).map(Router.retryDelay(attempt:)), [2, 4, 8, 16, 32, 60, 60, 60])
+        XCTAssertEqual(Router.retryDelay(attempt: 0), 2)
+    }
+
     func testUnavailableAndDisabledDevices() {
         var graph = Graph(virtualDevices: [Demo.streamMix])
         graph.virtualDevices[0].isEnabled = false

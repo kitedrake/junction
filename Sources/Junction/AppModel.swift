@@ -47,6 +47,10 @@ final class AppModel {
     @ObservationIgnored private var router: Router?
     @ObservationIgnored private var watcher: HAL.SystemWatcher?
     @ObservationIgnored private var restartWatcher: HAL.SystemWatcher?
+    /// Watches the rate and channel layout of every device a sink uses, so a change rebuilds that sink at once.
+    @ObservationIgnored private var deviceWatcher: HAL.DeviceWatcher?
+    @ObservationIgnored private var watchedUIDs: Set<String> = []
+    @ObservationIgnored private var wakeObserver: NSObjectProtocol?
     @ObservationIgnored private var restartTask: Task<Void, Never>?
     @ObservationIgnored private var lastCoreAudioRestart: Date?
     @ObservationIgnored private var saveTask: Task<Void, Never>?
@@ -97,6 +101,15 @@ final class AppModel {
         }
         restartWatcher = HAL.SystemWatcher(selectors: [kAudioHardwarePropertyServiceRestarted], queue: .main) {
             Task { @MainActor in AppModel.shared.coreAudioRestarted() }
+        }
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { _ in
+            MainActor.assumeIsolated {
+                Self.log.notice("Woke from sleep; checking routing")
+                AppModel.shared.router?.resetHealth()  // the router rebuilds any sink whose audio doesn't resume
+                AppModel.shared.scheduleRefresh()
+            }
         }
         timers.append(Timer.scheduledTimer(withTimeInterval: 1.0 / 20, repeats: true) { _ in
             MainActor.assumeIsolated { AppModel.shared.pollMeters() }
@@ -162,6 +175,19 @@ final class AppModel {
         guard force || new != plan else { return }
         plan = new
         router?.apply(new)
+        watchDevices(in: new)
+    }
+
+    /// A device on a running sink changing rate or channels changes the plan; notice it at once instead of at the
+    /// next periodic refresh. Changed sinks are rebuilt (cross-faded); the others keep running.
+    private func watchDevices(in plan: RoutingPlan) {
+        guard !isDemo else { return }
+        let uids = Set(plan.sinks.flatMap { $0.subDevices.map(\.uid) })
+        guard uids != watchedUIDs else { return }
+        watchedUIDs = uids
+        deviceWatcher = uids.isEmpty ? nil : HAL.DeviceWatcher(uids: uids, queue: .main) {
+            Task { @MainActor in AppModel.shared.scheduleRefresh() }
+        }
     }
 
     private func scheduleRefresh() {
@@ -251,6 +277,7 @@ final class AppModel {
         lastCoreAudioRestart = Date()
         Self.log.notice("Core Audio restarted; rebuilding routing")
         router?.forgetAfterRestart()  // at once, so no refresh in between tries to stop the dead sinks
+        watchedUIDs = []  // device IDs change: listen again on the next plan
         restartTask?.cancel()
         restartTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(1.5))

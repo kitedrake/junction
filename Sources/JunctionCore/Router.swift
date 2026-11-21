@@ -1,6 +1,7 @@
 import CoreAudio
 import Foundation
 import JunctionKernel
+import os
 
 /// How one sink is doing.
 public struct SinkStatus: Equatable, Sendable {
@@ -37,9 +38,45 @@ public final class Router: @unchecked Sendable {
     private var runners: [UUID: SinkRunner] = [:]  // mutated on `queue`, under `lock`
     private var statuses: [UUID: SinkStatus] = [:]  // `queue` only
     private let onStatus: StatusHandler
+    // `queue` only from here on.
+    private var lastPlan = RoutingPlan()
+    /// Sinks that failed to build or stopped running, and when to try again.
+    private var failures: [UUID: Failure] = [:]
+    private var retry: DispatchWorkItem?
+    /// IO cycles per running sink at the last health check, and how many checks in a row they didn't move.
+    private var progress: [UUID: (cycles: UInt64, still: Int)] = [:]
+    private var healthTimer: DispatchSourceTimer?
+    static let log = Logger(subsystem: "local.junction", category: "routing")
+
+    struct Failure {
+        var key: String
+        var count: Int
+        var next: Date
+    }
+
+    /// Waits before each new attempt at a sink that keeps failing (the last one repeats).
+    static let retryDelays: [TimeInterval] = [2, 4, 8, 16, 32, 60]
+    /// How long to wait after the `attempt`th failure in a row (counting from 1).
+    public static func retryDelay(attempt: Int) -> TimeInterval {
+        retryDelays[min(max(attempt, 1), retryDelays.count) - 1]
+    }
+
+    /// A sink whose IO hasn't moved for this many health checks (2 s apart) is rebuilt.
+    static let stalledChecks = 2
+    /// A sink that has run this long since its last failure starts again from the shortest retry delay.
+    static let healthyAfter: TimeInterval = 30
 
     public init(onStatus: @escaping StatusHandler) {
         self.onStatus = onStatus
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + 2, repeating: 2, leeway: .milliseconds(200))
+        timer.setEventHandler { [weak self] in self?.checkHealth() }
+        timer.resume()
+        healthTimer = timer
+    }
+
+    deinit {
+        healthTimer?.cancel()
     }
 
     /// How long a rebuilt sink and its replacement overlap, fading out and in.
@@ -61,6 +98,9 @@ public final class Router: @unchecked Sendable {
             self.lock.unlock()
             for runner in old.values { runner.forget() }
             self.statuses = [:]
+            self.failures = [:]
+            self.progress = [:]
+            self.retry?.cancel()
             self.onStatus(self.statuses)
         }
     }
@@ -68,6 +108,11 @@ public final class Router: @unchecked Sendable {
     /// Stops everything and waits until it has stopped.
     public func stopAll() {
         queue.sync { self.applyNow(RoutingPlan()) }
+    }
+
+    /// After the Mac wakes, IO takes a moment to resume: start counting stalls afresh.
+    public func resetHealth() {
+        queue.async { self.progress = [:] }
     }
 
     /// Re-resolves which processes each tap includes or leaves out (an app started or quit).
@@ -93,6 +138,7 @@ public final class Router: @unchecked Sendable {
     }
 
     private func applyNow(_ plan: RoutingPlan) {
+        lastPlan = plan
         let wanted = Dictionary(plan.sinks.map { ($0.sinkNode, $0) }, uniquingKeysWith: { first, _ in first })
         var retiring: [SinkRunner] = []
         func retire(_ id: UUID) {
@@ -105,12 +151,16 @@ public final class Router: @unchecked Sendable {
         }
         for id in runners.keys where wanted[id] == nil { retire(id) }
         statuses = statuses.filter { wanted[$0.key] != nil }
+        failures = failures.filter { wanted[$0.key]?.structureKey == $0.value.key }
+        let now = Date()
         var processes: [HAL.AudioProcess]?
         for sink in plan.sinks {
             if let runner = runners[sink.sinkNode], runner.plan.structureKey == sink.structureKey {
                 runner.update(gains: sink)
                 continue
             }
+            // A sink that keeps failing waits for its next attempt; its status keeps the reason.
+            if let failure = failures[sink.sinkNode], failure.next > now, runners[sink.sinkNode] == nil { continue }
             // Build the replacement while the old sink keeps playing, then swap them over with a cross-fade.
             if processes == nil, !sink.taps.isEmpty { processes = HAL.audioProcesses() }
             guard let runner = SinkRunner(plan: sink) else {
@@ -124,15 +174,78 @@ public final class Router: @unchecked Sendable {
                 lock.lock()
                 runners[sink.sinkNode] = runner
                 lock.unlock()
+                progress[sink.sinkNode] = nil
                 statuses[sink.sinkNode] = SinkStatus(state: .running, message: runner.layoutWarning)
             } catch {
                 runner.stop()
                 retire(sink.sinkNode)
-                statuses[sink.sinkNode] = SinkStatus(state: .failed, message: error.localizedDescription)
+                recordFailure(sink, error.localizedDescription)
             }
         }
         onStatus(statuses)
         Self.stopAfterFading(retiring)
+        scheduleRetry()
+    }
+
+    /// Marks a sink failed and picks when to try it again: sooner at first, then less and less often.
+    private func recordFailure(_ sink: SinkPlan, _ reason: String) {
+        let count = (failures[sink.sinkNode]?.count ?? 0) + 1
+        let delay = Self.retryDelay(attempt: count)
+        failures[sink.sinkNode] = Failure(key: sink.structureKey, count: count, next: Date().addingTimeInterval(delay))
+        let reason = reason.hasSuffix(".") ? reason : reason + "."
+        statuses[sink.sinkNode] = SinkStatus(state: .failed, message: "\(reason) Trying again in \(Int(delay)) s.")
+        Self.log.error("\(sink.name, privacy: .public): \(reason, privacy: .public) Attempt \(count), next in \(Int(delay)) s")
+    }
+
+    private func scheduleRetry() {
+        retry?.cancel()
+        retry = nil
+        guard let soonest = failures.values.filter({ $0.next > Date() }).map(\.next).min() else { return }
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.applyNow(self.lastPlan)
+        }
+        retry = item
+        queue.asyncAfter(deadline: .now() + max(0.05, soonest.timeIntervalSinceNow), execute: item)
+    }
+
+    /// Every 2 s: a sink whose IO has stopped moving (after sleep, a device hiccup, a driver that stopped) is torn
+    /// down and built again, with the same growing delays as a sink that fails to build.
+    private func checkHealth() {
+        lock.lock()
+        let current = runners
+        lock.unlock()
+        progress = progress.filter { current[$0.key] != nil }
+        var stalled: [UUID] = []
+        for (id, runner) in current {
+            let cycles = runner.cycles
+            if let last = progress[id], last.cycles == cycles {
+                progress[id] = (cycles, last.still + 1)
+                if last.still + 1 >= Self.stalledChecks { stalled.append(id) }
+            } else {
+                progress[id] = (cycles, 0)
+                if let failure = failures[id], Date().timeIntervalSince(runner.startedAt) > Self.healthyAfter,
+                   failure.next < Date() {
+                    failures[id] = nil
+                }
+            }
+        }
+        guard !stalled.isEmpty else { return }
+        for id in stalled {
+            lock.lock()
+            let runner = runners.removeValue(forKey: id)
+            lock.unlock()
+            guard let runner else { continue }
+            runner.stop()  // no fade: it isn't rendering
+            progress[id] = nil
+            Self.log.error("\(runner.plan.name, privacy: .public): audio stopped; rebuilding")
+            recordFailure(runner.plan, "Audio stopped")
+            if failures[id]?.count == 1 {  // the first rebuild happens straight away
+                failures[id]?.next = Date()
+                statuses[id] = SinkStatus(state: .failed, message: "Audio stopped. Restarting…")
+            }
+        }
+        applyNow(lastPlan)
     }
 
     /// Waits until the retiring sinks have faded out (or a short deadline passes, e.g. when a device stopped
@@ -175,6 +288,7 @@ final class SinkRunner: @unchecked Sendable {
     private(set) var layoutWarning: String?
     /// Frames in one cross-fade at the aggregate's sample rate.
     private var fadeFrames = UInt32(Router.crossFadeSeconds * 48_000)
+    let startedAt = Date()
 
     init?(plan: SinkPlan) {
         self.plan = plan
@@ -256,6 +370,8 @@ final class SinkRunner: @unchecked Sendable {
     }
 
     var isSilent: Bool { procID == nil || jk_renderer_fade_level(renderer) == 0 }
+
+    var cycles: UInt64 { jk_renderer_cycle_count(renderer) }
 
     func stop() {
         if let procID {

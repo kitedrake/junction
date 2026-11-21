@@ -189,6 +189,41 @@ public enum HAL {
 
     // MARK: Listeners
 
+    /// Calls `handler` on `queue` when the sample rate or channel layout of any of the given devices changes. Keep
+    /// the returned object alive; dropping it removes the listeners. Device IDs are looked up once, so make a new
+    /// watcher after Core Audio restarts.
+    public final class DeviceWatcher: @unchecked Sendable {
+        private let queue: DispatchQueue
+        private let block: AudioObjectPropertyListenerBlock
+        private var registered: [(AudioObjectID, AudioObjectPropertyAddress)] = []
+
+        public init(uids: Set<String>, queue: DispatchQueue, handler: @escaping @Sendable () -> Void) {
+            self.queue = queue
+            block = { _, _ in handler() }
+            let properties: [(AudioObjectPropertySelector, AudioObjectPropertyScope)] = [
+                (kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal),
+                (kAudioDevicePropertyStreamConfiguration, kAudioObjectPropertyScopeInput),
+                (kAudioDevicePropertyStreamConfiguration, kAudioObjectPropertyScopeOutput),
+            ]
+            for uid in uids.sorted() {
+                guard let device = HAL.deviceID(forUID: uid) else { continue }
+                for (selector, scope) in properties {
+                    var address = HAL.address(selector, scope)
+                    if AudioObjectAddPropertyListenerBlock(device, &address, queue, block) == noErr {
+                        registered.append((device, address))
+                    }
+                }
+            }
+        }
+
+        deinit {
+            for (device, address) in registered {
+                var address = address
+                AudioObjectRemovePropertyListenerBlock(device, &address, queue, block)
+            }
+        }
+    }
+
     /// Calls `handler` on `queue` when any of the given system-object properties change (by default: devices,
     /// defaults, audio processes). Keep the returned object alive; dropping it removes the listeners.
     public final class SystemWatcher: @unchecked Sendable {

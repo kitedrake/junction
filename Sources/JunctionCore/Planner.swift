@@ -37,7 +37,8 @@ public struct SinkPlan: Equatable, Sendable, Identifiable {
 
     /// Everything that needs a rebuild when it changes (gains don't).
     public var structureKey: String {
-        let devices = subDevices.map { "\($0.uid):\($0.inputChannels):\($0.outputChannels)" }.joined(separator: ",")
+        let devices = subDevices.map { "\($0.uid):\($0.inputChannels):\($0.outputChannels)@\($0.sampleRate)" }
+            .joined(separator: ",")
         let tapKeys = taps.map { "\($0.node.uuidString):\($0.mode):\($0.mutesOriginal)" }.joined(separator: ",")
         let routeKeys = routes.map { "\($0.input)>\($0.output)" }.joined(separator: ",")
         return "\(sinkUID)|\(devices)|\(tapKeys)|\(routeKeys)"
@@ -48,6 +49,8 @@ public struct SubDevice: Equatable, Sendable {
     public var uid: String
     public var inputChannels: Int
     public var outputChannels: Int
+    /// Part of the structure: an aggregate is rebuilt when one of its devices changes rate.
+    public var sampleRate: Double
 }
 
 public enum TapMode: Equatable, Sendable, CustomStringConvertible {
@@ -111,7 +114,8 @@ public enum Planner {
                 plan.idleCables.formUnion(cables.map(\.id))
                 continue
             }
-            var subDevices = [SubDevice(uid: sinkUID, inputChannels: sinkDevice.inputChannels, outputChannels: sinkDevice.outputChannels)]
+            var subDevices = [SubDevice(uid: sinkUID, inputChannels: sinkDevice.inputChannels,
+                                        outputChannels: sinkDevice.outputChannels, sampleRate: sinkDevice.sampleRate)]
             var taps: [TapPlan] = []
             enum Origin { case device(String), tap(Int) }
             var pending: [(cable: Cable, origin: Origin, gain: Float)] = []
@@ -148,7 +152,8 @@ public enum Planner {
                         feeds[uid, default: []].insert(sinkUID)
                     }
                     if !subDevices.contains(where: { $0.uid == uid }) {
-                        subDevices.append(SubDevice(uid: uid, inputChannels: device.inputChannels, outputChannels: device.outputChannels))
+                        subDevices.append(SubDevice(uid: uid, inputChannels: device.inputChannels,
+                                                    outputChannels: device.outputChannels, sampleRate: device.sampleRate))
                     }
                     if device.sampleRate != sinkDevice.sampleRate {
                         plan.note(source.id, "Runs at \(kHz(device.sampleRate)) while \(info.title(sink)) runs at \(kHz(sinkDevice.sampleRate)). Set both to the same rate in Audio MIDI Setup for the best quality.")

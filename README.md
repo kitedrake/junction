@@ -75,6 +75,9 @@ Each copy of Junction carries its own driver, versioned separately from the app 
 the driver changes, so an app update doesn't ask for the driver again). When it is newer than the installed one,
 the sidebar, the menu bar and the Routing menu offer **Update Driver…** with both versions; an older copy of Junction says so and doesn't offer to go
 back. Whenever Core Audio restarts (a driver install or update, or a crash), Junction rebuilds its routing by itself.
+It also rebuilds a single device's routing when a device it uses changes sample rate or channels, or when its audio
+stops moving (checked every 2 s, e.g. after sleep). Routing that fails to start is tried again after 2, 4, 8… up to
+60 seconds, and the node says why and when.
 
 macOS asks for two permissions the first time routing needs them: **Microphone** (reading any input, including
 Junction's own devices) and **System Audio Recording** (App and System Audio nodes). With ad-hoc signing macOS asks
