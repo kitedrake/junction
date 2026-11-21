@@ -210,6 +210,8 @@ voices from Discord.
   or off. When it's off, your virtual devices still exist but stay silent.
 - **Closing the window** keeps routing going from the menu bar. **Quitting** Junction stops it.
 - The menu bar icon also switches each virtual device on or off, and offers driver updates.
+- **Junction › Settings…** (also in the menu bar icon's menu) has **Open at login**, so routing is ready after a
+  restart, and **Show in Dock**: turn it off to keep Junction in the menu bar only.
 
 ## 11. Permissions
 

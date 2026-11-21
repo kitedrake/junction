@@ -77,10 +77,24 @@ struct JunctionApp: App {
             MenuBarContent()
                 .environment(model)
         }
+
+        Settings {
+            SettingsView()
+                .environment(model)
+        }
     }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        if !DockIcon.isShown { NSApp.setActivationPolicy(.accessory) }
+    }
+
+    /// Routing starts with the app, not with the window (which a menu-bar-only setup may never show).
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        MainActor.assumeIsolated { AppModel.shared.start() }
+    }
+
     /// Routing keeps running from the menu bar when the window is closed.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
@@ -92,6 +106,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct MenuBarContent: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         Toggle("Routing On", isOn: Binding(get: { model.graph.isRoutingOn }, set: { model.graph.isRoutingOn = $0 }))
@@ -126,6 +141,11 @@ struct MenuBarContent: View {
             openWindow(id: "main")
             NSApp.activate()
         }
+        Button("Settings…") {
+            NSApp.activate()
+            openSettings()
+        }
+        .keyboardShortcut(",")
         if let updates = Updates.shared {
             Button("Check for Updates…") {
                 NSApp.activate()

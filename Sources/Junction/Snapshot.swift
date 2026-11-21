@@ -132,6 +132,25 @@ enum Snapshot {
             model.setDemoState(inventory: Inventory(), statuses: [:], meters: [:])
             model.addStreamWithoutChat(excluding: [Demo.discord], deviceName: "Stream Mix")
             await both("no-driver")
+
+            if let appMenu = NSApp.mainMenu?.items.first?.submenu,
+               let index = appMenu.items.firstIndex(where: { $0.title.hasPrefix("Settings") }) {
+                appMenu.performActionForItem(at: index)
+            }
+            try? await Task.sleep(for: .milliseconds(800))
+            if let settings = NSApp.windows.first(where: { $0.isVisible && $0 != mainWindow && $0.contentView != nil
+                && ($0.identifier?.rawValue.localizedCaseInsensitiveContains("settings") ?? false) }) {
+                for (appearance, suffix) in [(NSAppearance.Name.aqua, "light"), (.darkAqua, "dark")] {
+                    NSApp.appearance = NSAppearance(named: appearance)
+                    try? await Task.sleep(for: .milliseconds(600))
+                    screencapture(["-x", "-o", "-l", "\(settings.windowNumber)"], folder, "settings-\(suffix)")
+                }
+                settings.close()
+            } else {
+                let windows = NSApp.windows.map { "\($0.title)|\($0.identifier?.rawValue ?? "-")|\($0.isVisible)" }
+                FileHandle.standardError.write(Data("Couldn't open the Settings window for a screenshot: \(windows)\n".utf8))
+            }
+            NSApp.windows.first { $0.isVisible && $0.contentView != nil }?.makeKeyAndOrderFront(nil)
             resize(980, 560)
             await both("minimum-size")
             NSApp.terminate(nil)
@@ -162,7 +181,7 @@ enum Snapshot {
         screencapture(["-x", "-o", "-l", "\(sheet.windowNumber)"], folder, name)
     }
 
-    @MainActor private static func screencapture(_ arguments: [String], _ folder: URL, _ name: String) {
+    @MainActor static func screencapture(_ arguments: [String], _ folder: URL, _ name: String) {
         let url = folder.appendingPathComponent(name + ".png")
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")

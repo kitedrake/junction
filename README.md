@@ -24,7 +24,8 @@ without your voice chat, step by step.
   virtual device's settings, the apps a System Audio node leaves out, and any problem a node has. A cable shows its
   approximate delay; a receiving node (virtual device or output) has a buffer size (64–1024 frames, or automatic).
 - **Routing** (toolbar power button, menu bar, ⇧⌘R) starts and stops everything. Junction keeps routing from the menu
-  bar when the window is closed.
+  bar when the window is closed. **Settings** (⌘,) can open Junction at login (`SMAppService`) and hide its Dock icon
+  so it lives in the menu bar only.
 
 | Node | Left side (receives) | Right side (provides) |
 | --- | --- | --- |
