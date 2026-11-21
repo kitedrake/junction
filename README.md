@@ -132,9 +132,8 @@ The icon is drawn by `icon/make_icon.swift`; `icon/make-icns.sh` rebuilds `Resou
 
 ## Known limits
 
-- Not yet run end to end: the driver passes its harness and the app its tests and screenshots, but installing the
-  driver into `coreaudiod`, the permission prompts and audio through real taps and aggregate devices have not been
-  tried yet.
+- Not yet run end to end: the driver installs and passes its device and loopback tests, but the permission prompts
+  and audio through real taps and aggregate devices haven't been tried with real hardware yet.
 - Sources and the sink are kept in step by Core Audio's drift compensation. Devices at different nominal sample rates
   are flagged on the node; set them to the same rate for the best quality.
 - Safari and other WebKit apps play through one shared process ("Safari & Web Views"), so they can only be captured
