@@ -433,9 +433,15 @@ public final class EffectUnit: @unchecked Sendable {
     /// Puts a saved state back. Only off the audio thread, before the unit renders.
     static func restore(_ state: Data, into unit: AudioUnit) -> Bool {
         guard let object = try? PropertyListSerialization.propertyList(from: state, format: nil) else { return false }
-        var plist = object as CFPropertyList
-        return AudioUnitSetProperty(unit, kAudioUnitProperty_ClassInfo, kAudioUnitScope_Global, 0, &plist,
-                                    UInt32(MemoryLayout<CFPropertyList>.size)) == noErr
+        let plist = object as CFPropertyList
+        // The property takes a pointer to a CFPropertyListRef, so pass the reference itself, kept alive meanwhile.
+        let reference = Unmanaged.passUnretained(plist)
+        return withExtendedLifetime(plist) {
+            withUnsafePointer(to: reference) {
+                AudioUnitSetProperty(unit, kAudioUnitProperty_ClassInfo, kAudioUnitScope_Global, 0, $0,
+                                     UInt32(MemoryLayout<Unmanaged<CFPropertyList>>.size)) == noErr
+            }
+        }
     }
 
     /// Renders `frames` frames of non-interleaved channels in place through the kernel's unit stage (for tests and the

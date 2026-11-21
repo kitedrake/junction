@@ -206,10 +206,12 @@ bottom of the canvas.
 - **Undo and redo** (⌘Z, ⇧⌘Z) take back any change to canvases and virtual devices: adding, moving, wiring, levels,
   device settings, even deleting a device. The Edit menu names the step. Turning routing on or off isn't undone.
 
+<!-- Screenshot not captured yet: run snapshot mode and copy multi-select-light.png and multi-select-dark.png into docs/screenshots, then remove this comment.
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="screenshots/multi-select-light.png">
   <img src="screenshots/multi-select-dark.png" alt="Two sources selected together, and the inspector listing them">
 </picture>
+-->
 
 ### Zoom and move around
 
@@ -222,10 +224,12 @@ bottom of the canvas.
   drag in it to move there; its buttons zoom out, back to actual size (the percentage), in, and to fit. **View ›
   Hide Minimap** puts it away.
 
+<!-- Screenshot not captured yet: run snapshot mode and copy zoomed-light.png and zoomed-dark.png into docs/screenshots, then remove this comment.
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="screenshots/zoomed-light.png">
   <img src="screenshots/zoomed-dark.png" alt="The Stream Mix canvas zoomed to 150 %, with the minimap framing the part in view">
 </picture>
+-->
 
 ### Keyboard and VoiceOver
 
@@ -266,10 +270,12 @@ What the canvas shows:
 
 Every item has an **Effects** box in its inspector. Click **Add Effect** and pick one:
 
+<!-- Screenshot not captured yet: run snapshot mode and copy effects-light.png and effects-dark.png into docs/screenshots, then remove this comment.
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="screenshots/effects-light.png">
   <img src="screenshots/effects-dark.png" alt="A microphone with a high-pass filter and a noise gate in the inspector">
 </picture>
+-->
 
 - **Built in**: **Gain** (a level), **Pan** (moves a stereo source left or right), **Mono** (both sides get the same
   sound) and **Noise Gate** (silences everything below its threshold, such as a quiet hum or keyboard noise between
@@ -300,10 +306,12 @@ Any effect Audio Unit installed on your Mac (from another maker, or one of Apple
 Choose **Add Effect › Audio Unit…**: the list shows every installed effect by maker. Type in the search field to
 narrow it down by name or maker, then pick one and click **Add** (or double-click it).
 
+<!-- Screenshot not captured yet: run snapshot mode and copy plugin-picker-light.png and plugin-picker-dark.png into docs/screenshots, then remove this comment.
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="screenshots/plugin-picker-light.png">
   <img src="screenshots/plugin-picker-dark.png" alt="The Add an Audio Unit window listing installed effects by maker, with a search field" width="72%">
 </picture>
+-->
 
 - **Open Window** shows the plugin's own controls (or a slider for each setting when it has no window of its own).
   The window belongs to whatever routes: Junction itself, or **Junction Helper** when routing runs in the background,
@@ -317,10 +325,12 @@ narrow it down by name or maker, then pick one and click **Add** (or double-clic
 - If a plugin is **missing** (removed, or the setup came from another Mac), its box says so, the sound passes through
   it, and its settings stay in the setup, so it works as before once it is installed again.
 
+<!-- Screenshot not captured yet: run snapshot mode and copy missing-plugin-light.png and missing-plugin-dark.png into docs/screenshots, then remove this comment.
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="screenshots/missing-plugin-light.png">
   <img src="screenshots/missing-plugin-dark.png" alt="A microphone whose Vocal Rider plugin isn't installed: the inspector says the sound passes through and its settings are kept">
 </picture>
+-->
 
 ### Delay and buffer size
 
@@ -345,10 +355,12 @@ existed: the node then shows a yellow triangle, and you should set both to the s
 Click **Mixer** in the toolbar (or choose **View › Show Mixer**, ⌘2) to see the device's canvas as a mixing desk.
 **Canvas** (⌘1) goes back. Each source has a strip on the left, then the virtual device, then each output:
 
+<!-- Screenshot not captured yet: run snapshot mode and copy mixer-light.png and mixer-dark.png into docs/screenshots, then remove this comment.
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="screenshots/mixer-light.png">
   <img src="screenshots/mixer-dark.png" alt="The Stream Mix mixer: strips for System Audio, the microphone, Music through DJ Deck, the device and the headphones, with the microphone soloed on the monitor">
 </picture>
+-->
 
 - The **fader** is the item's level, and **M** its mute: the same ones as in the inspector. Double-click or
   Option-click a fader for 0 dB.
@@ -413,10 +425,12 @@ Next to **Stream Without Chat…** (File menu, the **+** menu, and the **Templat
 inspector) are three more templates. Each makes a virtual microphone, a device apps see as an input only, and wires it
 on its canvas. Choosing the same name again reuses that device (and turns it on).
 
+<!-- Screenshot not captured yet: run snapshot mode and copy podcast-template-light.png and podcast-template-dark.png into docs/screenshots, then remove this comment.
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="screenshots/podcast-template-light.png">
   <img src="screenshots/podcast-template-dark.png" alt="The Podcast window: two microphones and a call app" width="72%">
 </picture>
+-->
 
 - **Podcast…**: pick two microphones (any input of any device, or the default input) and the call app. Each gets a
   channel pair of its own on the **Podcast** device: microphone 1 on channels 1–2, microphone 2 on 3–4, the call on
@@ -426,18 +440,22 @@ on its canvas. Choosing the same name again reuses that device (and turns it on)
   device carries what the music app plays; choose it as the microphone in the call app, and turn off the call app's
   noise suppression and echo cancellation so music comes through. You keep hearing the music app as usual.
 
+<!-- Screenshot not captured yet: run snapshot mode and copy daw-into-call-template-light.png and daw-into-call-template-dark.png into docs/screenshots, then remove this comment.
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="screenshots/daw-into-call-template-light.png">
   <img src="screenshots/daw-into-call-template-dark.png" alt="The DAW into a Call window" width="72%">
 </picture>
+-->
 
 - **Call into the DAW…**: pick the call app. The **Call to DAW** device carries the call's audio; choose it as an
   input in your music app and record channels 1–2 on a stereo track.
 
+<!-- Screenshot not captured yet: run snapshot mode and copy call-into-daw-template-light.png and call-into-daw-template-dark.png into docs/screenshots, then remove this comment.
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="screenshots/call-into-daw-template-light.png">
   <img src="screenshots/call-into-daw-template-dark.png" alt="The Call into the DAW window" width="72%">
 </picture>
+-->
 
 The apps on offer are the ones using audio now and the known chat or music apps installed on your Mac; **Choose
 App…** picks any other.
@@ -447,10 +465,12 @@ App…** picks any other.
 A scene remembers a whole setup so you can come back to it in one step: which virtual devices are on, their volumes
 and mutes, and every canvas with its nodes, cables, levels and mutes. Use one per show, session or room.
 
+<!-- Screenshot not captured yet: run snapshot mode and copy scene-menu-light.png and scene-menu-dark.png into docs/screenshots, then remove this comment.
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="screenshots/scene-menu-light.png">
   <img src="screenshots/scene-menu-dark.png" alt="The Routing menu listing the Streaming and Recording Only scenes, Streaming checked" width="60%">
 </picture>
+-->
 
 - **Save one**: **Routing › New Scene from Current Setup…**, or **New Scene** in the sidebar's **Scenes** section.
   Give it a name and click **Save**.
@@ -480,10 +500,12 @@ and program changes. Plug it in (USB, Bluetooth or a network session) and map it
 2. A banner above the canvas asks you to move a control. Turn a knob, push a fader, press a pad or send a program
    change: that control now drives it, and the keyboard button is highlighted (point at it to see which control). **Cancel** (or Esc) stops listening.
 
+<!-- Screenshot not captured yet: run snapshot mode and copy midi-learn-light.png and midi-learn-dark.png into docs/screenshots, then remove this comment.
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="screenshots/midi-learn-light.png">
   <img src="screenshots/midi-learn-dark.png" alt="MIDI Learn waiting for a control for the microphone's mute, with a banner above the canvas">
 </picture>
+-->
 
 How controls behave:
 
@@ -504,10 +526,12 @@ drives it. For each knob or fader you can choose how its values are read: **Knob
 three kinds of **encoder** (endless encoders send different values for up and down; if yours moves the wrong way or in
 big jumps, try another). The **−** button removes a mapping; Undo (⌘Z) brings it back.
 
+<!-- Screenshot not captured yet: run snapshot mode and copy midi-settings-light.png and midi-settings-dark.png into docs/screenshots, then remove this comment.
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="screenshots/midi-settings-light.png">
   <img src="screenshots/midi-settings-dark.png" alt="Settings listing a fader on the microphone's level, a pad muting System Audio, a button bypassing the noise gate and program changes switching scenes" width="72%">
 </picture>
+-->
 
 MIDI works wherever routing runs: with **Keep routing after quitting Junction** on (section 13), your controller keeps
 working after you quit Junction, and Junction finds the changes when you open it again. Deleting a node, cable, effect,

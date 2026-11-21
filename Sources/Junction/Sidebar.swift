@@ -215,6 +215,5 @@ struct DriverNotice: View {
 }
 
 func formatRate(_ rate: Double) -> String {
-    let value = rate / 1000
-    return formatSampleRate(rate)
+    formatSampleRate(rate)
 }

@@ -119,10 +119,12 @@ Next to it, three more sheets build a virtual microphone (an input-only device) 
 - **DAW into a Call…**: what a music app plays (optionally with your microphone) as the call app's microphone.
 - **Call into the DAW…**: the call app's audio as an input the music app records.
 
+<!-- Screenshot not captured yet: run snapshot mode and copy podcast-template-light.png and podcast-template-dark.png into docs/screenshots, then remove this comment.
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/podcast-template-light.png">
   <img src="docs/screenshots/podcast-template-dark.png" alt="The Podcast sheet" width="60%">
 </picture>
+-->
 
 ### Scenes
 
@@ -133,10 +135,12 @@ renames or deletes it. Switching changes only the canvases that differ: sinks th
 their new levels) and the others are rebuilt with the usual cross-fade. Devices made after a scene are left as they
 are; a deleted device leaves every scene.
 
+<!-- Screenshot not captured yet: run snapshot mode and copy scene-menu-light.png and scene-menu-dark.png into docs/screenshots, then remove this comment.
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/scene-menu-light.png">
   <img src="docs/screenshots/scene-menu-dark.png" alt="The Routing menu listing the Streaming and Recording Only scenes" width="60%">
 </picture>
+-->
 
 ### MIDI control
 
@@ -147,10 +151,12 @@ it, so it never jumps; endless encoders (three common kinds) nudge it. **Setting
 mappings, sets how each control's values are read and removes mappings. MIDI is read wherever routing runs, so with
 routing in the background it keeps working after Junction quits.
 
+<!-- Screenshot not captured yet: run snapshot mode and copy midi-learn-light.png and midi-learn-dark.png into docs/screenshots, then remove this comment.
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/midi-learn-light.png">
   <img src="docs/screenshots/midi-learn-dark.png" alt="MIDI Learn waiting for a control for the microphone's mute" width="60%">
 </picture>
+-->
 
 ### Mixer and headphone monitor
 
@@ -161,10 +167,12 @@ meters and the effect chain. It edits the same levels, mutes, cables and effects
 you can hear yourself differently from the stream. **S** on a strip, or **Listen on Monitor** in a port's context
 menu on the canvas, sends just that to the monitor, without changing the device's mix.
 
+<!-- Screenshot not captured yet: run snapshot mode and copy mixer-light.png and mixer-dark.png into docs/screenshots, then remove this comment.
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/mixer-light.png">
   <img src="docs/screenshots/mixer-dark.png" alt="The Stream Mix mixer: strips for System Audio, the microphone, Music through DJ Deck, the device and the headphones, with the microphone soloed on the monitor">
 </picture>
+-->
 
 *Screenshots made with Junction's snapshot mode on a made-up set of devices (see Development); GitHub shows the
 light or dark set to match your theme.*
