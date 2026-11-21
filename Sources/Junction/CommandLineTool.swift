@@ -18,7 +18,8 @@ enum CommandLineTool {
               --list            Driver status, audio devices, default devices and apps using audio.
               --diagnose [file] A report for bug reports: versions, devices, apps, the routing plan, recent routing
                                 events and the saved setup (it names your devices and apps). No audio is opened.
-              --self-test [dir] Checks the bundled driver, the planner, the mixing kernel and saving (no audio).
+              --self-test [dir] Checks the bundled driver and routing helper, the planner, the mixing kernel, the
+                                helper's XPC messages and saving (no audio; nothing is registered or launched).
               --loopback-test   With the driver installed: plays a tone into a temporary virtual device and checks
                                 it comes back out. Needs microphone permission for the calling app (e.g. Terminal).
               --device-test     With the driver installed: adds a temporary virtual device, renames it, changes its
@@ -125,6 +126,30 @@ enum CommandLineTool {
         }
         check(Bundle.main.url(forResource: "install-driver", withExtension: "sh") != nil, "install script bundled")
 
+        // Junction Helper: a signed UI-element app inside Junction.app, with the launch agent SMAppService registers.
+        let helperURL = RoutingHelper.helperURL
+        if let info = Bundle(url: helperURL)?.infoDictionary {
+            check(info["CFBundleIdentifier"] as? String == RoutingXPC.helperBundleIdentifier, "helper's bundle identifier")
+            check(info["LSUIElement"] as? Bool == true, "helper has no Dock icon (LSUIElement)")
+            check((info["NSMicrophoneUsageDescription"] as? String)?.contains(RoutingXPC.helperDisplayName) ?? false,
+                  "helper's permission prompts name it")
+            check(FileManager.default.isExecutableFile(atPath: Bundle.main.bundleURL.appendingPathComponent(RoutingXPC.helperExecutablePath).path),
+                  "helper executable present")
+            check(signatureIsValid(helperURL), "helper is code-signed")
+        } else {
+            check(false, "routing helper bundled in the app (\(RoutingXPC.helperBundlePath))")
+        }
+        if let agent = NSDictionary(contentsOf: RoutingHelper.agentPlistURL) as? [String: Any] {
+            check(agent["Label"] as? String == RoutingXPC.machServiceName
+                  && agent["BundleProgram"] as? String == RoutingXPC.helperExecutablePath
+                  && (agent["MachServices"] as? [String: Any])?[RoutingXPC.machServiceName] != nil,
+                  "launch agent names the helper and its XPC service")
+        } else {
+            check(false, "launch agent bundled (Contents/Library/LaunchAgents/\(RoutingXPC.agentPlistName))")
+        }
+        let usesHelper = Bundle.main.object(forInfoDictionaryKey: RoutingXPC.usesHelperKey) as? Bool
+        check(usesHelper != nil, "this build routes \(usesHelper == true ? "in the helper" : "inside the app")")
+
         // Planning: "stream without chat" lays out as expected.
         var graph = Graph()
         let discord = AppRef(bundleID: "com.hnc.Discord", name: "Discord")
@@ -205,6 +230,9 @@ enum CommandLineTool {
         history.undo()
         check(held.graph == graph, "undo restores the graph")
 
+        // The helper's XPC protocol, through a listener in this process and a stand-in router.
+        check(xpcRoundTrip(graph: graph, inventory: inventory), "routing service answers over XPC and routes what it is sent")
+
         // Saving.
         let base = folder.map { URL(fileURLWithPath: $0) } ?? FileManager.default.temporaryDirectory
         let store = Store(folder: base.appendingPathComponent("junction-self-test-\(UUID().uuidString)"))
@@ -222,6 +250,41 @@ enum CommandLineTool {
 
         print(tally.failures == 0 ? "Self-test passed." : "Self-test: \(tally.failures) failure(s).")
         return tally.failures == 0 ? 0 : 1
+    }
+
+    /// Says hello to a RoutingService on an anonymous listener, sends it the setup and waits for it to be planned.
+    private static func xpcRoundTrip(graph: Graph, inventory: Inventory) -> Bool {
+        final class StandIn: SinkRouting, @unchecked Sendable {
+            let planned = DispatchSemaphore(value: 0)
+            func apply(_ plan: RoutingPlan) { if !plan.sinks.isEmpty { planned.signal() } }
+            func forgetAfterRestart() {}
+            func stopAll() {}
+            func rebuildAll() {}
+            func resetHealth() {}
+            func processesChanged() {}
+            func takeMeters() -> [PortKey: Float] { [:] }
+        }
+        let standIn = StandIn()
+        let environment = RoutingService.Environment(readInventory: { inventory }, permission: { .allowed },
+                                                     requestMicrophone: { $0() }, processName: "Self-Test")
+        let service = RoutingService(graph: Graph(), keepRouting: false, events: EventLog(file: nil),
+                                     queue: DispatchQueue(label: "local.junction.self-test.service"),
+                                     environment: environment) { _ in standIn }
+        let listener = NSXPCListener.anonymous()
+        listener.delegate = service
+        listener.resume()
+        defer { listener.invalidate() }
+        let welcomed = DispatchSemaphore(value: 0)
+        let client = RoutingClient(endpoint: listener.endpoint, keepRouting: false,
+                                   callbackQueue: DispatchQueue(label: "local.junction.self-test.client")) { event in
+            if case .connected = event { welcomed.signal() }
+        }
+        client.connect()
+        guard welcomed.wait(timeout: .now() + 5) == .success else { return false }
+        client.send(graph: graph)
+        let routed = standIn.planned.wait(timeout: .now() + 5) == .success
+        client.goodbye()
+        return routed
     }
 
     private static func signatureIsValid(_ url: URL) -> Bool {

@@ -4,8 +4,8 @@ import JunctionKernel
 import os
 
 /// How one sink is doing.
-public struct SinkStatus: Equatable, Sendable {
-    public enum State: Equatable, Sendable { case running, failed }
+public struct SinkStatus: Codable, Equatable, Sendable {
+    public enum State: String, Codable, Equatable, Sendable { case running, failed }
     public var state: State
     public var message: String?
     /// While running: roughly how long audio takes from the sink's sources to the sink (seconds), and the buffer size
@@ -22,7 +22,7 @@ public struct SinkStatus: Equatable, Sendable {
 }
 
 /// A node channel for meters: `isOutput` is the node's right side.
-public struct PortKey: Hashable, Sendable {
+public struct PortKey: Codable, Hashable, Sendable {
     public var node: UUID
     public var isOutput: Bool
     public var channel: Int
@@ -292,6 +292,11 @@ public final class Router: @unchecked Sendable {
 }
 
 enum RouterError: Error, LocalizedError {
+    /// The process that opens the taps and devices (Junction, or Junction Helper), as permission settings list it.
+    static var processName: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "Junction"
+    }
+
     case tap(String, OSStatus)
     case aggregate(OSStatus)
     case start(OSStatus)
@@ -300,12 +305,12 @@ enum RouterError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .tap(let name, let status):
-            "Couldn't capture \(name) (\(HAL.describe(status))). Check System Settings › Privacy & Security › Screen & System Audio Recording."
+            "Couldn't capture \(name) (\(HAL.describe(status))). Check that \(Self.processName) may record system audio: System Settings › Privacy & Security › Screen & System Audio Recording."
         case .aggregate(let status): "Couldn't combine the devices (\(HAL.describe(status)))."
         case .missingDevice(let uid): "A device to convert to this rate went away (\(uid))."
         case .start(let status):
             status == kAudioDevicePermissionsError
-                ? "macOS didn't allow audio input. Check System Settings › Privacy & Security › Microphone."
+                ? "macOS didn't allow \(Self.processName) to use audio input. Check System Settings › Privacy & Security › Microphone."
                 : "Couldn't start audio (\(HAL.describe(status)))."
         }
     }
@@ -599,8 +604,10 @@ final class SinkRunner: @unchecked Sendable {
             bundleIDs = apps + matching.map(\.bundleID)
             description = CATapDescription(stereoMixdownOfProcesses: members)
         case .allExcept(let apps):
+            // Junction's app and its routing helper are both left out, whichever of them opens the tap.
             let matching = processes.filter {
                 apps.contains($0.appBundleID) || apps.contains($0.bundleID) || $0.pid == getpid()
+                    || HAL.ownBundleIDs.contains($0.appBundleID)
             }
             members = matching.map(\.objectID)
             bundleIDs = apps + matching.map(\.bundleID) + (own.map { [$0] } ?? [])

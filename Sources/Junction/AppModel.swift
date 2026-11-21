@@ -63,11 +63,28 @@ final class AppModel {
     private(set) var installedChatApps: [AppRef] = []
     /// The known music apps (`Templates.dawApps`) installed on this Mac.
     private(set) var installedDAWApps: [AppRef] = []
+    /// Where routing runs: in Junction Helper (in the background) or in the app, and why.
+    private(set) var placement: RoutingPlacement = .inProcess("Junction hasn't started routing yet.")
+    /// What macOS said when Junction registered its helper (nil: this build doesn't use it).
+    private(set) var helperRegistration: HelperRegistration?
+    /// Routing goes on after Junction quits (and resumes at login). Only Junction Helper can do that.
+    var keepRoutingAfterQuit = UserDefaults.standard.bool(forKey: RoutingHelper.keepRoutingKey) {
+        didSet {
+            guard !isDemo, keepRoutingAfterQuit != oldValue else { return }
+            UserDefaults.standard.set(keepRoutingAfterQuit, forKey: RoutingHelper.keepRoutingKey)
+            helper?.setKeepRouting(keepRoutingAfterQuit)
+        }
+    }
 
     /// Screenshots and demos: made-up devices, nothing saved, nothing routed.
     let isDemo: Bool
     private let store = Store()
+    /// Routing inside the app (plain builds, or when the helper isn't available)…
     @ObservationIgnored private var router: Router?
+    /// …or in Junction Helper, over XPC.
+    @ObservationIgnored private var helper: RoutingClient?
+    /// Peak levels the helper sent since the meters were last read.
+    @ObservationIgnored private var helperMeters: [PortKey: Float] = [:]
     @ObservationIgnored private var watcher: HAL.SystemWatcher?
     @ObservationIgnored private var restartWatcher: HAL.SystemWatcher?
     /// Watches the rate and channel layout of every device a sink uses, so a change rebuilds that sink at once.
@@ -133,10 +150,20 @@ final class AppModel {
             graph = Graph()
         }
         history.clear()
-        let router = Router { statuses in
-            Task { @MainActor in AppModel.shared.statuses = statuses }
+        // Only a build made for the helper asks macOS to register it; the others route here as before.
+        let asksForHelper = RoutingHelper.buildUsesHelper && RoutingHelper.isBundled && !RoutingHelper.isTesting
+        helperRegistration = asksForHelper ? RoutingHelper.register() : nil
+        placement = RoutingPlacement.choose(isDemo: isDemo, isTesting: RoutingHelper.isTesting,
+                                            buildUsesHelper: RoutingHelper.buildUsesHelper, helperBundled: RoutingHelper.isBundled,
+                                            registration: helperRegistration ?? .notRegistered)
+        if placement.usesHelper {
+            startHelper()
+        } else {
+            if case .inProcess(let reason) = placement, RoutingHelper.buildUsesHelper {
+                note("Routing runs inside Junction: \(reason)", .warning)
+            }
+            startRoutingInProcess()
         }
-        self.router = router
         // Rates, volumes and mutes changed from outside while Junction wasn't running (Audio MIDI Setup, a DAW, Sound
         // settings) are kept.
         if let published = DriverClient.publishedDevices() {
@@ -175,7 +202,7 @@ final class AppModel {
                 AppModel.shared.checkSilentTaps()
             }
         })
-        microphoneAccess = AVCaptureDevice.authorizationStatus(for: .audio)
+        if helper == nil { microphoneAccess = AVCaptureDevice.authorizationStatus(for: .audio) }
         replan(force: true)
         refreshPermissions()
     }
@@ -186,6 +213,67 @@ final class AppModel {
         restartTask?.cancel()
         router?.stopAll()
         saveNow()
+        helper?.goodbye()  // the helper stops routing unless it should keep going
+    }
+
+    // MARK: Where routing runs
+
+    private func startRoutingInProcess() {
+        router = Router { statuses in
+            Task { @MainActor in AppModel.shared.statuses = statuses }
+        }
+    }
+
+    /// Connects to Junction Helper (launchd starts it); it routes what the app sends it.
+    private func startHelper() {
+        let client = RoutingHelper.client(keepRouting: keepRoutingAfterQuit) { event in
+            MainActor.assumeIsolated { AppModel.shared.helperSaid(event) }
+        }
+        helper = client
+        client.connect()
+        client.send(graph: graph)  // sent once the helper answers
+    }
+
+    private func helperSaid(_ event: RoutingClient.Event) {
+        switch event {
+        case .connected(let state):
+            statuses = state.statuses
+            microphoneAccess = Self.authorization(state.permission)
+            Self.log.notice("Connected to \(state.processName, privacy: .public) (process \(state.processID))")
+            refreshPermissions()
+        case .notice(.statuses(let fresh)):
+            statuses = fresh
+        case .notice(.meters(let fresh)):
+            for (key, value) in fresh { helperMeters[key] = max(helperMeters[key] ?? 0, value) }
+        case .notice(.events(let logged)):
+            for event in logged { EventLog.shared.add(event.kind, event.message, date: event.date, persist: false) }
+        case .notice(.permission(let permission)):
+            microphoneAccess = Self.authorization(permission)
+            refreshPermissions()
+        case .unavailable(let reason):
+            // Route here instead, so audio keeps going.
+            guard helper != nil else { return }
+            helper = nil
+            helperMeters = [:]
+            placement = .inProcess(reason)
+            note("\(reason) Routing runs inside Junction instead.", .warning)
+            microphoneAccess = AVCaptureDevice.authorizationStatus(for: .audio)
+            startRoutingInProcess()
+            replan(force: true)
+            refreshPermissions()
+        }
+    }
+
+    /// The name macOS shows in permission prompts and System Settings for the process that routes.
+    var routingProcessName: String { placement.usesHelper ? RoutingXPC.helperDisplayName : "Junction" }
+
+    private static func authorization(_ permission: PermissionState) -> AVAuthorizationStatus {
+        switch permission {
+        case .allowed: .authorized
+        case .denied: .denied
+        case .restricted: .restricted
+        case .notAsked: .notDetermined
+        }
     }
 
     /// Demo mode: pretend macOS gave this answer about the Microphone permission (for screenshots).
@@ -241,6 +329,7 @@ final class AppModel {
     }
 
     private func replan(force: Bool = false) {
+        helper?.send(graph: graph)  // the helper plans for itself; it gets every change (sent only when it differs)
         let new = Planner.plan(graph, inventory: inventory)
         guard force || new != plan else { return }
         plan = new
@@ -415,11 +504,17 @@ final class AppModel {
     }
 
     private func pollMeters() {
-        guard let router, graph.isRoutingOn else {
+        guard graph.isRoutingOn, router != nil || helper != nil else {
             if !meters.isEmpty { meters = [:] }
             return
         }
-        let fresh = router.takeMeters()
+        let fresh: [PortKey: Float]
+        if let router {
+            fresh = router.takeMeters()
+        } else {
+            fresh = helperMeters
+            helperMeters = [:]
+        }
         let now = Date()
         for (key, value) in fresh where key.isOutput && value > 0.0005 { heard[key.node] = now }
         var next: [PortKey: Float] = [:]
@@ -451,16 +546,19 @@ final class AppModel {
 
     /// Follows the Microphone permission. When it is granted, every sink is built again (one that started without it
     /// may be running on silence). When routing needs it and macOS hasn't asked yet, asks now; the banner says why.
+    /// With Junction Helper it is the helper's permission that counts: the helper reports it and rebuilds by itself.
     func refreshPermissions() {
         guard !isDemo else { return }
-        let status = AVCaptureDevice.authorizationStatus(for: .audio)
-        if status != microphoneAccess {
-            let granted = status == .authorized
-            microphoneAccess = status
-            note("Microphone permission: \(Self.describe(status))", status == .authorized ? .info : .warning)
-            if granted { router?.rebuildAll() }
+        if helper == nil {
+            let status = AVCaptureDevice.authorizationStatus(for: .audio)
+            if status != microphoneAccess {
+                let granted = status == .authorized
+                microphoneAccess = status
+                note("Microphone permission: \(Self.describe(status))", status == .authorized ? .info : .warning)
+                if granted { router?.rebuildAll() }
+            }
         }
-        if status == .notDetermined, needsMicrophone, graph.isRoutingOn, !askedForMicrophone { requestMicrophone() }
+        if microphoneAccess == .notDetermined, needsMicrophone, graph.isRoutingOn, !askedForMicrophone { requestMicrophone() }
     }
 
     static func describe(_ status: AVAuthorizationStatus) -> String {
@@ -492,9 +590,14 @@ final class AppModel {
         return "\(version) (build \(build))"
     }
 
+    /// Asks macOS for the Microphone permission for the process that routes: the prompt names it.
     func requestMicrophone() {
         guard !isDemo else { return }
         askedForMicrophone = true
+        if let helper {
+            helper.requestMicrophone()
+            return
+        }
         AVCaptureDevice.requestAccess(for: .audio) { _ in
             Task { @MainActor in AppModel.shared.refreshPermissions() }
         }
@@ -600,6 +703,7 @@ final class AppModel {
                 if message == nil, !noticed {
                     AppModel.shared.note("No restart notice after the driver script; rebuilding routing anyway", .warning)
                     model.coreAudioRestarted()
+                    model.helper?.rebuildAll()
                 }
             }
         }
@@ -1083,7 +1187,7 @@ final class AppModel {
         var result = plan.issues[node] ?? []
         if let status = statuses[node], let message = status.message { result.insert(message, at: 0) }
         if silentTaps.contains(node) {
-            result.append("No sound yet, although apps it captures are playing. If you expect some, check that Junction may record system audio: System Settings › Privacy & Security › Screen & System Audio Recording.")
+            result.append("No sound yet, although apps it captures are playing. If you expect some, check that \(routingProcessName) may record system audio: System Settings › Privacy & Security › Screen & System Audio Recording.")
         }
         return result
     }

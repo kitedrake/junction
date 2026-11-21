@@ -16,6 +16,11 @@
 # releases" in the README):
 #   UPDATE_FEED_URL    the Sparkle update feed, e.g. https://example.com/updates/junction/appcast.xml
 #   UPDATE_PUBLIC_KEY  the EdDSA public key (base64) whose private half signs the updates
+#
+# Every build carries Junction Helper (Contents/Library/LoginItems/JunctionHelper.app), which can run routing in the
+# background, and its launch agent (Contents/Library/LaunchAgents/local.junction.helper.plist). Whether the app
+# registers and uses it is ROUTING_HELPER: 1 routes in the helper, 0 inside the app. It defaults to 1 for release
+# builds (UPDATE_FEED_URL set) and 0 otherwise, so plain and omso Builder builds route inside the app as before.
 set -eu
 cd "$(dirname "$0")"
 if [ -d /Applications/Xcode.app/Contents/Developer ]; then
@@ -27,6 +32,15 @@ build_number="$(date +%Y%m%d%H%M)"
 identity="${SIGN_IDENTITY:-${JUNCTION_SIGN_IDENTITY:--}}"
 feed="${UPDATE_FEED_URL:-}"
 key="${UPDATE_PUBLIC_KEY:-}"
+routing_helper="${ROUTING_HELPER:-}"
+if [ -z "$routing_helper" ]; then
+  if [ -n "$feed" ]; then routing_helper=1; else routing_helper=0; fi
+fi
+case "$routing_helper" in
+  1) uses_helper="<true/>" ;;
+  0) uses_helper="<false/>" ;;
+  *) echo "ROUTING_HELPER must be 1 or 0." >&2; exit 1 ;;
+esac
 if { [ -n "$feed" ] && [ -z "$key" ]; } || { [ -z "$feed" ] && [ -n "$key" ]; }; then
   echo "Set both UPDATE_FEED_URL and UPDATE_PUBLIC_KEY, or neither." >&2
   exit 1
@@ -63,8 +77,9 @@ xcrun clang -arch arm64 -arch x86_64 -mmacosx-version-min=26.0 -bundle -O2 -Wall
 sed -e "s/__VERSION__/$driver_version/" -e "s/__BUILD__/$build_number/" Driver/Info.plist > "$driver/Contents/Info.plist"
 sign_code "$driver"
 
-# 2. The app.
+# 2. The app and its routing helper.
 xcrun swift build $spm_flags -c release --product Junction
+xcrun swift build $spm_flags -c release --product JunctionHelper
 bindir="$(xcrun swift build $spm_flags -c release --show-bin-path)"
 app="build/Junction.app"
 rm -rf "$app"
@@ -84,6 +99,34 @@ if [ -n "$feed" ]; then
 fi
 if [ -f Resources/AppIcon.icns ]; then cp Resources/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"; fi
 ditto "$driver" "$app/Contents/Resources/JunctionDriver.driver"
+# Junction Helper: a UI-element app (no Dock icon). Its name is the one macOS shows in the permission prompts when
+# routing runs in it.
+helper="$app/Contents/Library/LoginItems/JunctionHelper.app"
+mkdir -p "$helper/Contents/MacOS" "$helper/Contents/Resources" "$app/Contents/Library/LaunchAgents"
+cp "$bindir/JunctionHelper" "$helper/Contents/MacOS/JunctionHelper"
+if [ -f Resources/AppIcon.icns ]; then cp Resources/AppIcon.icns "$helper/Contents/Resources/AppIcon.icns"; fi
+cat > "$helper/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>Junction Helper</string>
+  <key>CFBundleDisplayName</key><string>Junction Helper</string>
+  <key>CFBundleIdentifier</key><string>local.junction.helper</string>
+  <key>CFBundleExecutable</key><string>JunctionHelper</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>${version}</string>
+  <key>CFBundleVersion</key><string>${version}</string>
+  <key>LSMinimumSystemVersion</key><string>26.0</string>
+  <key>LSUIElement</key><true/>
+  <key>NSMicrophoneUsageDescription</key><string>Junction Helper routes audio in the background from your microphones, audio interfaces and Junction's virtual devices.</string>
+  <key>NSAudioCaptureUsageDescription</key><string>Junction Helper captures the sound apps play so Junction can route it in the background, for example to a stream without your call.</string>
+  <key>NSHumanReadableCopyright</key><string>Junction by omso. GNU GPL v3 or later.</string>
+</dict>
+</plist>
+PLIST
+cp Resources/local.junction.helper.plist "$app/Contents/Library/LaunchAgents/local.junction.helper.plist"
 cp scripts/install-driver.sh scripts/uninstall-driver.sh "$app/Contents/Resources/"
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -99,6 +142,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>CFBundleShortVersionString</key><string>${version}</string>
   <key>CFBundleVersion</key><string>${version}</string>
   $updates
+  <key>JunctionRoutingHelper</key>$uses_helper
   <key>LSMinimumSystemVersion</key><string>26.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.music</string>
   <key>NSHighResolutionCapable</key><true/>
@@ -110,8 +154,9 @@ cat > "$app/Contents/Info.plist" <<PLIST
 PLIST
 # Sign from the inside out.
 sign_code "$app/Contents/Resources/JunctionDriver.driver"
+sign_code "$helper" Resources/Junction.entitlements
 sign_code "$framework/Versions/B/Autoupdate"
 sign_code "$framework/Versions/B/Updater.app"
 sign_code "$framework"
 sign_code "$app" Resources/Junction.entitlements
-echo "Built $(pwd)/$app"
+echo "Built $(pwd)/$app (routing in the helper: $([ "$routing_helper" = 1 ] && echo on || echo off))"

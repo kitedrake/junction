@@ -108,11 +108,19 @@ struct JunctionApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillFinishLaunching(_ notification: Notification) {
         if !DockIcon.isShown { NSApp.setActivationPolicy(.accessory) }
+        MainActor.assumeIsolated { LoginLaunch.detect() }
     }
 
-    /// Routing starts with the app, not with the window (which a menu-bar-only setup may never show).
+    /// Routing starts with the app, not with the window (which a menu-bar-only setup may never show). Opened at login,
+    /// Junction stays in the menu bar: its window is closed straight away.
     func applicationDidFinishLaunching(_ notification: Notification) {
-        MainActor.assumeIsolated { AppModel.shared.start() }
+        MainActor.assumeIsolated {
+            AppModel.shared.start()
+            guard LoginLaunch.isActive, !AppModel.shared.isDemo else { return }
+            DispatchQueue.main.async {
+                for window in NSApp.windows where window.identifier?.rawValue.hasPrefix("main") ?? false { window.close() }
+            }
+        }
     }
 
     /// Routing keeps running from the menu bar when the window is closed.
@@ -381,7 +389,8 @@ struct DriverBanner: View {
     }
 }
 
-/// Routing reads audio inputs (every sink reads its device's own inputs), which needs macOS's Microphone permission.
+/// Routing reads audio inputs (every sink reads its device's own inputs), which needs macOS's Microphone permission for
+/// the process that routes: Junction, or Junction Helper. The banner names it.
 struct MicrophoneBanner: View {
     @Environment(AppModel.self) private var model
 
@@ -389,14 +398,14 @@ struct MicrophoneBanner: View {
         let undecided = model.microphoneAccess == .notDetermined
         GlassEffectContainer(spacing: 8) {
             HStack(spacing: 8) {
-                Label(undecided ? "Routing needs permission to use audio inputs."
-                                : "Junction isn't allowed to use audio inputs, so routing can't run.",
+                Label(undecided ? "\(model.routingProcessName) needs permission to use audio inputs for routing."
+                                : "\(model.routingProcessName) isn't allowed to use audio inputs, so routing can't run.",
                       systemImage: "mic.slash.fill")
                     .symbolRenderingMode(.multicolor)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 10)
                     .glassEffect(.regular, in: .capsule)
-                    .help("macOS calls it the Microphone permission. It covers microphones, audio interfaces and Junction's own virtual devices.")
+                    .help("macOS calls it the Microphone permission. It covers microphones, audio interfaces and Junction's own virtual devices. Turn on \(model.routingProcessName) under Privacy & Security › Microphone.")
                 Button(undecided ? "Allow…" : "Open System Settings") {
                     if undecided { model.requestMicrophone() } else { model.openPrivacySettings(.microphone) }
                 }

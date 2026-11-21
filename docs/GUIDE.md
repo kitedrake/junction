@@ -352,25 +352,47 @@ it is when you switch to that scene; deleting a device removes it from every sce
 
 - The **power button** in the toolbar, **Routing › Routing On** (⇧⌘R), or the **menu bar icon** turn all routing on
   or off. When it's off, your virtual devices still exist but stay silent.
-- **Closing the window** keeps routing going from the menu bar. **Quitting** Junction stops it.
+- **Closing the window** keeps routing going from the menu bar. **Quitting** Junction stops it, unless routing runs in
+  the background with **Keep routing after quitting Junction** on (see below).
 - The menu bar icon also switches scenes and each virtual device on or off, and offers driver updates.
 - **Junction › Settings…** (also in the menu bar icon's menu) has **Open at login**, so routing is ready after a
-  restart, and **Show in Dock**: turn it off to keep Junction in the menu bar only.
+  restart (Junction then starts in the menu bar, without its window), and **Show in Dock**: turn it off to keep
+  Junction in the menu bar only.
+
+### Routing in the background
+
+In the released Junction, routing runs in **Junction Helper**, a small helper inside Junction with no Dock icon or
+window. Settings shows **Routing runs in the background**. You don't need to do anything: Junction starts the helper
+when it needs it and sends it every change you make.
+
+- **Keep routing after quitting Junction** (Settings): with it on, your devices keep their sound after you quit
+  Junction, and routing starts again when you log in, even before you open Junction. With it off (the standard
+  setting), routing stops when you quit Junction, as before.
+- macOS lists the helper in System Settings › General › **Login Items & Extensions**, under **Allow in the
+  Background**, as Junction. **To turn the helper off**, switch Junction off there. Junction then routes by itself
+  and stops routing when it quits; Settings says **Routing runs inside Junction** and offers **Open Login Items** to
+  switch it back on.
+- Permissions belong to the helper: macOS asks for **Junction Helper**, and lists it under Microphone and Screen &
+  System Audio Recording. The banners and hints name it too.
+
+If you build Junction yourself, routing runs inside Junction unless you build with `ROUTING_HELPER=1`.
 
 ## 13. Permissions
 
-macOS asks for two permissions the first time Junction needs them:
+macOS asks for two permissions the first time Junction needs them. They belong to the process that routes:
+**Junction**, or **Junction Helper** when routing runs in the background (see section 12). The prompts and banners
+say which.
 
 - **Microphone**: to read any input, including Junction's own virtual devices.
 - **System Audio Recording**: for System Audio and app nodes.
 
 If you said no:
 
-- **Microphone**: a banner at the top of the canvas says so. Click **Open System Settings** and turn Junction on.
-  Routing starts again by itself.
+- **Microphone**: a banner at the top of the canvas says so. Click **Open System Settings** and turn Junction (or
+  Junction Helper) on. Routing starts again by itself.
 - **System Audio Recording**: macOS doesn't tell apps whether this one is allowed. If an App or System Audio item
   hears nothing while the apps it captures are playing, it shows a yellow triangle. Select it and click **Open
-  Privacy Settings…**, then turn Junction on under **Screen & System Audio Recording**.
+  Privacy Settings…**, then turn Junction (or Junction Helper) on under **Screen & System Audio Recording**.
 
 If you build Junction yourself, macOS may ask again after each rebuild.
 

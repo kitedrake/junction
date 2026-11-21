@@ -167,9 +167,8 @@ public enum HAL {
 
     /// Apps with audio processes, one entry per app, without Junction itself and without system services.
     static func audioApps() -> [AudioApp] {
-        let own = Bundle.main.bundleIdentifier ?? ""
         var apps: [String: AudioApp] = [:]
-        for process in audioProcesses() where process.appBundleID != own && process.pid != getpid() {
+        for process in audioProcesses() where !ownBundleIDs.contains(process.appBundleID) && process.pid != getpid() {
             // Real apps only: background services and system UI (Control Center, Siri…) aren't useful sources.
             let isWebKit = process.bundleID.hasPrefix("com.apple.WebKit")
             guard isWebKit || (process.appPath.map { !$0.hasPrefix("/System/Library/") } ?? false) else { continue }
@@ -178,6 +177,12 @@ public enum HAL {
             apps[process.appBundleID] = app
         }
         return apps.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    /// Junction itself: this process's bundle, the app and its routing helper (which lives inside the app, so its
+    /// processes belong to the app).
+    public static var ownBundleIDs: Set<String> {
+        Set([Bundle.main.bundleIdentifier, RoutingXPC.appBundleIdentifier, RoutingXPC.helperBundleIdentifier].compactMap { $0 })
     }
 
     /// The outermost .app bundle containing the process's executable, if any.

@@ -42,8 +42,13 @@ without your voice chat, step by step.
   converted, and its node shows it ("44.1 kHz, converted to 48 kHz"). **Automatic** is the default; **Off** combines
   the devices as they are, which needs them set to the same rate.
 - **Routing** (toolbar power button, menu bar, ⇧⌘R) starts and stops everything. Junction keeps routing from the menu
-  bar when the window is closed. **Settings** (⌘,) can open Junction at login (`SMAppService`) and hide its Dock icon
-  so it lives in the menu bar only.
+  bar when the window is closed. **Settings** (⌘,) can open Junction at login (`SMAppService`; it then starts in the
+  menu bar without its window) and hide its Dock icon so it lives in the menu bar only.
+- **Routing in the background**: in release builds, routing runs in **Junction Helper**, a small helper without a Dock
+  icon inside Junction.app. Settings says "Routing runs in the background" and has **Keep routing after quitting
+  Junction**: with it on, routing goes on after Junction quits and starts again at login; with it off (the default)
+  the helper stops with Junction. To turn the helper off altogether, switch Junction off in System Settings › General ›
+  Login Items & Extensions; Junction then routes by itself, as plain builds always do.
 - **Routing Log** (Routing › Show Routing Log, ⌥⌘L): what the router did and why (started, rebuilt, failed, trying
   again, tap membership). Events are also appended to `events.log` next to `graph.json`. **Copy Report** (or
   `Junction --diagnose`) makes a plain-text report for bug reports; it names your devices and apps.
@@ -131,7 +136,8 @@ It also rebuilds a single device's routing when a device it uses changes sample 
 stops moving (checked every 2 s, e.g. after sleep). Routing that fails to start is tried again after 2, 4, 8… up to
 60 seconds, and the node says why and when.
 
-macOS asks for two permissions the first time routing needs them: **Microphone** (reading any input, including
+macOS asks for two permissions the first time routing needs them, for the process that routes (Junction, or Junction
+Helper when routing runs in the background; the prompts and the banner name it): **Microphone** (reading any input, including
 Junction's own devices) and **System Audio Recording** (App and System Audio nodes). Junction asks for Microphone
 access itself as soon as routing needs it; if it's refused, a banner opens the right System Settings page, and
 routing is rebuilt once it's allowed. macOS offers no way to check System Audio Recording, so an App or System Audio
@@ -145,7 +151,7 @@ Requires macOS 26 (Liquid Glass and app capture by bundle ID) and Xcode 26 or ne
 
 ## How it works
 
-Three parts:
+Three parts (four with the helper):
 
 1. **Driver** (`Driver/JunctionDriver.c`): a Core Audio HAL plug-in (AudioServerPlugIn) loaded by `coreaudiod`. It
    publishes up to 32 loopback devices. The app sends it the list of enabled devices through a custom property on the
@@ -171,6 +177,19 @@ Three parts:
    converter's buffering and filter delay (32 input frames) count in the sink's delay estimate. Gain and mute changes
    don't rebuild anything; adding or removing cables rebuilds only the sinks they touch. A rebuilt sink is built next to the running one, then the two cross-fade over 25 ms, so edits don't
    leave a gap or click. When apps start or quit, taps are updated in place.
+4. **Junction Helper** (`Sources/JunctionHelper`, `RoutingService.swift`, `RoutingClient.swift`, `RoutingXPC.swift`):
+   in builds made for it, the planner and router run in a UI-element app (no Dock icon) at
+   `Junction.app/Contents/Library/LoginItems/JunctionHelper.app`, which Junction registers with
+   `SMAppService.agent` (launch agent `Contents/Library/LaunchAgents/local.junction.helper.plist`). launchd starts it
+   at login and when the app connects to its XPC service, `local.junction.helper`. The helper reads `graph.json` at
+   launch, plans and routes, and follows Core Audio restarts, wake and device changes itself. The app stays the
+   editor: it saves `graph.json`, sends every change to the helper, and receives statuses, meters, routing events
+   (the helper writes them to `events.log` too) and the helper's Microphone permission; it can also ask for a
+   rebuild or for the permission. Messages are Codable values sent as JSON over one `NSXPCConnection` method each
+   way; each side checks the other's code signature (bundle identifier, and the team when there is one). Without
+   "keep routing", the helper stops routing and quits when no app is connected. The app routes in its own process
+   when the build doesn't use the helper, in tests, in snapshot mode, when the helper is turned off in Login Items,
+   and when it can't reach the helper (it then logs why).
 
 The graph is saved to `~/Library/Application Support/Junction/graph.json` (schema 4: nodes belong to a device's
 canvas, receiving nodes can set a buffer size and sample-rate conversion, and named scenes are kept in `scenes`). A schema 1 file from the
@@ -183,7 +202,7 @@ schema 2 and 3 files get sample-rate conversion set to Automatic and start with 
 
 ```sh
 ./test.sh                                        # engine tests, kernel stress test + driver harness (sanitizers), installs nothing
-build/Junction.app/Contents/MacOS/Junction --self-test   # bundled driver loads, planning, kernel, saving
+build/Junction.app/Contents/MacOS/Junction --self-test   # bundled driver and helper, planning, kernel, XPC, saving
 build/Junction.app/Contents/MacOS/Junction --list        # driver status, devices, apps using audio
 build/Junction.app/Contents/MacOS/Junction --diagnose [file]   # bug report: versions, devices, plan, events, setup
 build/Junction.app/Contents/MacOS/Junction --loopback-test   # with the driver installed: tone in, tone out
@@ -203,6 +222,13 @@ into the driver bundle. `--loopback-test` is the real-system check: it adds a te
 records its input, and restores the device list. It needs microphone permission for the app running it (Terminal).
 `--device-test` checks that Core Audio follows the driver (a temporary device appears, is renamed, changes channels
 and rate, reports a rate set from outside, disappears and returns); it opens no audio and needs no permission.
+
+`build.sh` always puts Junction Helper and its launch agent into Junction.app; `ROUTING_HELPER` decides whether the
+app registers and uses it (`JunctionRoutingHelper` in its Info.plist): `1` routes in the helper, `0` inside the app.
+It defaults to `1` for release builds (`UPDATE_FEED_URL` set) and `0` for plain and omso Builder builds, which route
+inside the app as before. `ROUTING_HELPER=1 SIGN_IDENTITY="Apple Development: …" ./build.sh` makes a development
+build with the helper. The tests drive the helper's XPC protocol through an in-process listener with a stand-in
+router; `--self-test` checks the helper bundle, its signature and launch agent, and the same XPC round trip.
 
 `omso-build.json` describes the build for omso Builder: `build.sh`, `test.sh`, then `Junction --self-test`;
 **Build & Install** copies `Junction.app` to `/Applications/omso`. Installing the driver stays a separate,
@@ -251,7 +277,14 @@ system-audio permissions and **Install Driver…** with the first one.
 - Safari and other WebKit apps play through one shared process ("Safari & Web Views"), so they can only be captured
   or left out together.
 - Cross-fading a rebuilt sink (when cables are added or removed) hasn't been tried with real audio yet.
-- Routing stops when Junction quits; it keeps running from the menu bar when the window is closed.
+- Routing keeps running from the menu bar when the window is closed. It stops when Junction quits, unless it runs in
+  Junction Helper with **Keep routing after quitting Junction** on.
+- Junction Helper hasn't been tried on a real Mac yet: registering it with `SMAppService`, launchd starting it at
+  login and on demand, the code-signature checks between app and helper with a Developer ID, the permission prompts
+  naming it, and routing real audio from it are all unverified. Only its XPC protocol (in one process), the
+  fallback to routing inside the app, and the bundle's layout and signature are tested. Release builds use it by
+  default; build with `ROUTING_HELPER=0` to leave it out of use. Starting without the window at login relies on
+  macOS marking the launch as a login item, also unverified.
 - A one-sided or hidden device keeps working inside Junction through a hidden companion device (`<uid>.routing`)
   that the driver publishes only for Junction. Whether every app honours the hidden flag and the channel names
   hasn't been checked on a real Mac yet.
