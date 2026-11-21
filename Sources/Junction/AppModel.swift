@@ -46,6 +46,10 @@ final class AppModel {
     /// A virtual device waiting for the user to confirm its deletion.
     var deviceToDelete: UUID?
     var showInspector = true
+    /// The shown canvas as nodes and cables, or as a mixer (the same graph either way).
+    var showsMixer = UserDefaults.standard.bool(forKey: "showsMixer") {
+        didSet { UserDefaults.standard.set(showsMixer, forKey: "showsMixer") }
+    }
     /// The template sheet that is open.
     var template: TemplateKind?
     /// The scene being named (a new one, or one being renamed).
@@ -1133,10 +1137,12 @@ final class AppModel {
     /// drag, a fader). Routing, inventory and driver updates change `graph` directly and aren't undone.
     @discardableResult
     private func edit(_ name: String, coalescing key: String? = nil, _ change: (inout Graph) -> Void) -> Bool {
-        // A mapping whose node, cable, effect, device or scene went goes with it (in the same undo step).
+        // A mapping whose node, cable, effect, device or scene went goes with it (in the same undo step), and so do
+        // the monitor's level and solo/listen for a node that went.
         let changed = history.perform(name, coalescing: key) { graph in
             change(&graph)
             graph.pruneMIDI()
+            graph.pruneMonitors()
         }
         if changed { historyVersion += 1 }
         return changed
@@ -1648,6 +1654,71 @@ final class AppModel {
         midiLearning = learning
         midiSources = sources
     }
+
+    // MARK: Mixer and monitor
+
+    /// The shown canvas's strips (see `Mixer.strips`).
+    var mixerStrips: [MixerStrip] { canvas.map { Mixer.strips(on: $0, graph: graph, inventory: inventory) } ?? [] }
+
+    /// The shown canvas's monitor, if it has one.
+    var monitor: MonitorMix? { canvas.flatMap(graph.monitor(for:)) }
+
+    /// Pans a strip by changing its cables' levels (one undo step per drag).
+    func setPan(_ pan: Double, of node: UUID) {
+        edit("Change Pan", coalescing: "pan \(node)") { Mixer.setPan(pan, of: node, in: &$0) }
+    }
+
+    /// Changes the shown canvas's monitor as one undo step (several in a row with the same name, as a fader drag).
+    func updateMonitor(_ name: String, _ change: (inout MonitorMix) -> Void) {
+        guard let canvas else { return }
+        edit(name, coalescing: "monitor \(canvas) \(name)") { $0.updateMonitor(for: canvas, change) }
+    }
+
+    /// Where a monitor can play: Default Output and every output device that isn't one of Junction's.
+    var monitorOutputs: [MonitorOutput] {
+        [.defaultOutput] + inventory.devices.filter { $0.outputChannels > 0 && !$0.isJunction }.map { .device($0.ref) }
+    }
+
+    func monitorOutputTitle(_ output: MonitorOutput?) -> String {
+        switch output {
+        case nil: "None"
+        case .defaultOutput: "Default Output"
+        case .device(let ref): inventory.device(ref.uid)?.name ?? ref.name
+        }
+    }
+
+    func setMonitorOutput(_ output: MonitorOutput?) {
+        if let output, let problem = Rules.monitorProblem(output, inventory: inventory) {
+            alert = problem.message
+            return
+        }
+        updateMonitor(output == nil ? "Turn Off Monitor" : "Choose Monitor Output") { $0.output = output }
+        endEditing()
+    }
+
+    /// Solo/listen isn't an edit: it changes the graph without an undo step and starts off after a relaunch.
+    private func changeListening(_ change: (inout MonitorMix) -> Void) {
+        guard let canvas else { return }
+        graph.updateMonitor(for: canvas, change)
+    }
+
+    func toggleSolo(_ strip: MixerStrip) { changeListening { Mixer.toggleSolo(strip, in: &$0) } }
+
+    /// Listens to one port on the monitor (the canvas's port menu), or stops.
+    func toggleListening(_ port: PortRef) {
+        guard hasMonitorOutput || isListening(to: port) else {
+            alert = "Choose where the monitor plays in the mixer first (View › Show Mixer)."
+            return
+        }
+        changeListening { $0.toggleListening(port) }
+    }
+
+    func clearListening() { changeListening { $0.listening = [] } }
+
+    func isListening(to port: PortRef) -> Bool { monitor?.isListening(to: port) ?? false }
+
+    /// Whether the shown canvas's monitor plays somewhere (solo/listen needs it).
+    var hasMonitorOutput: Bool { monitor?.output != nil }
 
     // MARK: Status for the canvas
 

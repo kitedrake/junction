@@ -32,6 +32,9 @@ without your voice chat, step by step.
   of its own where macOS allows it, and is saved with the setup, settings made in its window included. One that keeps
   holding up the audio thread is offered for bypass; each destination counts its overloads. A plugin that isn't
   installed shows as missing, passes the audio through and keeps its saved settings.
+- **Mixer** (⌘2): the shown canvas as channel strips, one per source, the device and each output, with faders, pan,
+  mute, solo, meters and effects, editing the same graph as the canvas; plus a **headphone monitor** per device with
+  its own levels, and solo/listen on any strip or port that doesn't change the device's mix.
 - **Navigation**: zoom about the pointer with a pinch or ⌘-scroll, or with ⌘+, ⌘−, ⌘0 (actual size) and ⌥⌘0 (fit);
   scroll or drag empty canvas to move around. A minimap shows the whole canvas and where you are; click it to go
   there.
@@ -147,6 +150,20 @@ routing in the background it keeps working after Junction quits.
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/midi-learn-light.png">
   <img src="docs/screenshots/midi-learn-dark.png" alt="MIDI Learn waiting for a control for the microphone's mute" width="60%">
+</picture>
+
+### Mixer and headphone monitor
+
+**View › Show Mixer** (⌘2, or the Canvas/Mixer switch in the toolbar) shows a device's canvas as a mixing desk: a
+strip per source, the device and each output, with a fader, pan where the cables have a left and a right, mute, solo,
+meters and the effect chain. It edits the same levels, mutes, cables and effects as the canvas (⌘1 goes back). The
+**Monitor** strip plays the device's sources on headphones or speakers at levels of its own, before their faders, so
+you can hear yourself differently from the stream. **S** on a strip, or **Listen on Monitor** in a port's context
+menu on the canvas, sends just that to the monitor, without changing the device's mix.
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/mixer-light.png">
+  <img src="docs/screenshots/mixer-dark.png" alt="The Stream Mix mixer: strips for System Audio, the microphone, Music through DJ Deck, the device and the headphones, with the microphone soloed on the monitor">
 </picture>
 
 *Screenshots made with Junction's snapshot mode on a made-up set of devices (see Development); GitHub shows the
@@ -312,6 +329,15 @@ MIDI mappings are kept in `midi`: each one's `target` (a cable's level, a node's
 device's switch or a scene, by ID), its `trigger` (a controller, note or program number and its channel), its `mode`
 (`absolute`, `toggle`, `relative`, `relativeOffset` or `relativeSigned`) and the `controller` it was learned from.
 Mappings whose target is gone (and no scene holds it) are dropped on load and with every edit.
+Headphone monitors are kept in `monitors`, at most one per virtual device: its `device`, its `output` (a `device` by
+UID, or `defaultOutput`; absent when it plays nowhere), `gainDB`, `isMuted`, a `sends` entry per source whose
+monitor level was changed (`node`, `gainDB`, `isOn`; others are heard at 0 dB) and `listening`, the ports solo/listen
+sends to it (saved, since the helper gets the graph this way, but cleared on load). Older files and schema 4 files
+without `monitors` have none; a deleted device's monitor is dropped. The mixer has no state of its own: a strip's pan
+is the level of its cables to the left and right channels. The planner adds a monitor as one more sink after the
+canvas's own (using the ID of the monitor), fed by copies of the cables into the device at the monitor's levels,
+without the sources' levels, mutes or effects; it never plays into one of Junction's devices (`Rules.monitorProblem`,
+also checked by the planner while Default Output points at one), so it can't close a loop.
 
 ## Development
 
@@ -449,6 +475,11 @@ system-audio permissions and **Install Driver…** with the first one.
   side are tested with recorded MIDI bytes. Only MIDI 1.0 messages are read (a MIDI 2.0 controller works in its
   MIDI 1.0 mode), any connected controller sending a mapped message drives it, and a mapping can't be limited to one
   controller.
+- The headphone monitor hasn't been heard through real devices yet: it is a sink of its own, so its sources join a
+  second aggregate device (and taps are made twice), which hasn't been tried with real hardware. It hears sources
+  before their effects (an effect runs in one place), and a monitor on the same device as an output on the canvas
+  plays alongside it. Solo/listen plays only the listened ports; it doesn't silence the other strips in the device's
+  mix, and scenes don't include monitors.
 - Routing keeps running from the menu bar when the window is closed. It stops when Junction quits, unless it runs in
   Junction Helper with **Keep routing after quitting Junction** on.
 - Junction Helper hasn't been tried on a real Mac yet: registering it with `SMAppService`, launchd starting it at

@@ -208,14 +208,14 @@ public enum Planner {
             return false
         }
 
-        for sink in graph.nodes {
-            let cables = graph.cables.filter { $0.to.node == sink.id }
-            guard !cables.isEmpty else { continue }
+        /// Plans one sink from the cables into it. A monitor's sink is `dry`: it hears its sources before their level,
+        /// mute and effects (an effect runs in one place, the device's sink), at the levels of its own cables.
+        func planSink(_ sink: Node, _ cables: [Cable], name: String? = nil, dry: Bool = false) {
             guard let sinkUID = info.feedUID(sink), let sinkDevice = inventory.device(sinkUID), sinkDevice.outputChannels > 0
             else {
                 plan.note(sink.id, unavailableReason(sink, graph: graph, inventory: inventory))
                 plan.idleCables.formUnion(cables.map(\.id))
-                continue
+                return
             }
             var subDevices = [SubDevice(uid: sinkUID, inputChannels: sinkDevice.inputChannels,
                                         outputChannels: sinkDevice.outputChannels, sampleRate: sinkDevice.sampleRate,
@@ -231,7 +231,8 @@ public enum Planner {
                     plan.idleCables.insert(cable.id)
                     continue
                 }
-                let gain = source.isMuted ? 0 : Gain.linear(source.gainDB) * Gain.linear(cable.gainDB)
+                let gain = dry ? Gain.linear(cable.gainDB)
+                    : source.isMuted ? 0 : Gain.linear(source.gainDB) * Gain.linear(cable.gainDB)
                 switch source.kind {
                 case .application(let app):
                     guard cable.from.channel < 2 else { plan.idleCables.insert(cable.id); continue }
@@ -353,7 +354,7 @@ public enum Planner {
                 }
                 return Route(cable: item.cable.id, source: item.cable.from, input: input, output: item.cable.to.channel, gain: item.gain)
             }
-            guard !routes.isEmpty else { continue }
+            guard !routes.isEmpty else { return }
             // A slot per source node: a lane per channel its cables use. The virtual device's own effects run in its
             // own sink, after the mix, so as a source into outputs it has none here.
             var slots: [EffectSlot] = []
@@ -372,16 +373,34 @@ public enum Planner {
                 }
                 let source = graph.node(node)
                 let isDevice = if case .virtualDevice = source?.kind { true } else { false }
-                slots.append(EffectSlot(node: node, inputs: inputs, effects: isDevice ? [] : source?.effects ?? []))
+                slots.append(EffectSlot(node: node, inputs: inputs, effects: isDevice || dry ? [] : source?.effects ?? []))
             }
             for index in routes.indices { routes[index].lane = laneOf[routes[index].source]! }
             plan.sinks.append(SinkPlan(
-                sinkNode: sink.id, name: info.title(sink), sinkUID: sinkUID, sinkOutputChannels: sinkDevice.outputChannels,
+                sinkNode: sink.id, name: name ?? info.title(sink), sinkUID: sinkUID, sinkOutputChannels: sinkDevice.outputChannels,
                 subDevices: subDevices, taps: taps, routes: routes,
                 masterGain: sink.isMuted ? 0 : Gain.linear(sink.gainDB), bufferFrames: sink.bufferFrames,
                 inputChannels: inputChannels,
                 outputChannels: subDevices.reduce(0) { $0 + $1.outputChannels }, converted: converted,
-                captures: captures, slots: slots, effects: sink.effects))
+                captures: captures, slots: slots, effects: dry ? [] : sink.effects))
+        }
+
+        for sink in graph.nodes {
+            let cables = graph.cables.filter { $0.to.node == sink.id }
+            guard !cables.isEmpty else { continue }
+            planSink(sink, cables)
+        }
+        // Monitors last, so the device's own sinks come first in the loop guard; a monitor never plays into one of
+        // Junction's devices (`Rules.monitorProblem`), so it can't close a loop either.
+        for monitor in graph.monitors {
+            guard let output = monitor.output, let device = graph.virtualDevice(monitor.device) else { continue }
+            if Rules.monitorProblem(output, inventory: inventory) != nil {
+                plan.note(monitor.id, Rules.Problem.monitorFeedback.message)
+                continue
+            }
+            guard let (sink, cables) = Mixer.monitorSink(monitor, graph: graph, inventory: inventory) else { continue }
+            planSink(sink, cables, name: "\(device.name) monitor", dry: true)
+            plan.idleCables.subtract(cables.map(\.id))  // not the graph's cables
         }
         return plan
     }
@@ -426,6 +445,8 @@ public enum Rules {
         /// Neither end is the canvas's virtual device (or the ends are on different canvases).
         case bypassesDevice
         case feedback
+        /// A monitor would play into one of Junction's own devices.
+        case monitorFeedback
 
         public var message: String {
             switch self {
@@ -433,6 +454,7 @@ public enum Rules {
             case .alreadyConnected: "These channels are already connected."
             case .bypassesDevice: "Connect sources into the virtual device, and the virtual device out to outputs."
             case .feedback: "That would feed a virtual device's audio back into itself."
+            case .monitorFeedback: "A monitor can't play into one of Junction's own devices. Pick headphones or speakers."
             }
         }
     }

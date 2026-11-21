@@ -285,7 +285,8 @@ public struct Graph: Codable, Equatable, Sendable {
     /// contain, so they need no conversion for it, and effect chains on nodes (`Node.effects`: each effect's component
     /// codes, bypass, parameters and Audio Unit state; absent in older files, which means none), and MIDI mappings
     /// (`midi`: each one's control, how its values are read, and the cable, node, effect, device or scene it drives;
-    /// absent in older files, which means none).
+    /// absent in older files, which means none), and headphone monitors (`monitors`: per virtual device, its output,
+    /// level, mute and a level per source; absent in older files, which means none).
     public static let currentSchema = 4
     public var schema = Graph.currentSchema
     public var virtualDevices: [VirtualDevice] = []
@@ -297,19 +298,22 @@ public struct Graph: Codable, Equatable, Sendable {
     public var scenes: [RoutingScene] = []
     /// MIDI controls and what they drive (see MIDI.swift).
     public var midi: [MIDIMapping] = []
+    /// Headphone monitors, at most one per virtual device (see Mixer.swift).
+    public var monitors: [MonitorMix] = []
 
     public init(virtualDevices: [VirtualDevice] = [], nodes: [Node] = [], cables: [Cable] = [], isRoutingOn: Bool = true,
-                scenes: [RoutingScene] = [], midi: [MIDIMapping] = []) {
+                scenes: [RoutingScene] = [], midi: [MIDIMapping] = [], monitors: [MonitorMix] = []) {
         self.virtualDevices = virtualDevices
         self.nodes = nodes
         self.cables = cables
         self.isRoutingOn = isRoutingOn
         self.scenes = scenes
         self.midi = midi
+        self.monitors = monitors
     }
 
-    /// Files from before scenes have no `scenes`, and files from before MIDI control no `midi`: they load with none
-    /// (see `upgrade`).
+    /// Files from before scenes have no `scenes`, files from before MIDI control no `midi`, and files from before
+    /// monitors no `monitors`: they load with none (see `upgrade`).
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         schema = try values.decode(Int.self, forKey: .schema)
@@ -319,6 +323,7 @@ public struct Graph: Codable, Equatable, Sendable {
         isRoutingOn = try values.decode(Bool.self, forKey: .isRoutingOn)
         scenes = try values.decodeIfPresent([RoutingScene].self, forKey: .scenes) ?? []
         midi = try values.decodeIfPresent([MIDIMapping].self, forKey: .midi) ?? []
+        monitors = try values.decodeIfPresent([MonitorMix].self, forKey: .monitors) ?? []
     }
 
     public func node(_ id: UUID) -> Node? { nodes.first { $0.id == id } }
@@ -341,14 +346,17 @@ public struct Graph: Codable, Equatable, Sendable {
         nodes.removeAll { $0.id == id }
         cables.removeAll { $0.from.node == id || $0.to.node == id }
         pruneMIDI()
+        pruneMonitors()
     }
 
-    /// Removes a virtual device and its canvas: its nodes and cables, also from the scenes, and their MIDI mappings.
+    /// Removes a virtual device and its canvas: its nodes and cables, also from the scenes, its monitor, and their
+    /// MIDI mappings.
     public mutating func removeVirtualDevice(_ id: UUID) {
         let gone = Set(nodes.filter { $0.canvas == id || $0.kind == .virtualDevice(id) }.map(\.id))
         nodes.removeAll { gone.contains($0.id) }
         cables.removeAll { gone.contains($0.from.node) || gone.contains($0.to.node) }
         virtualDevices.removeAll { $0.id == id }
+        monitors.removeAll { $0.device == id }
         let devices = Set(virtualDevices.map(\.id))
         for index in scenes.indices { scenes[index].keepOnly(devices) }
         pruneMIDI()
@@ -357,7 +365,8 @@ public struct Graph: Codable, Equatable, Sendable {
     /// Brings a loaded graph up to date: converts the shared canvas of schema 1, turns on sample-rate conversion and
     /// sets the device options for files from before they existed, then tidies the canvases. Scenes and MIDI mappings
     /// are new in schema 4: older files have none, scenes naming deleted devices lose those parts, and mappings whose
-    /// target is gone are dropped.
+    /// target is gone are dropped. So are monitors: older files have none, a deleted device's monitor goes, a device
+    /// keeps one at most, and solo/listen starts off.
     public mutating func upgrade() {
         if schema < 2 { moveToCanvases() }
         if schema < 4 {
@@ -366,12 +375,16 @@ public struct Graph: Codable, Equatable, Sendable {
             convertEffects()
             scenes = []
             midi = []
+            monitors = []
         }
         schema = Graph.currentSchema
         tidyCanvases()
         let devices = Set(virtualDevices.map(\.id))
         for index in scenes.indices { scenes[index].keepOnly(devices) }
         pruneMIDI()
+        var monitored = Set<UUID>()
+        monitors.removeAll { !devices.contains($0.device) || !monitored.insert($0.device).inserted }
+        for index in monitors.indices { monitors[index].listening = [] }
     }
 
     /// Schema 1 had one shared canvas. Each node moves to the canvas of the virtual device it is wired to (copied, with

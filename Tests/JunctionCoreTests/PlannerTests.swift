@@ -224,14 +224,17 @@ final class PlannerTests: XCTestCase {
         XCTAssertEqual(loaded.scenes, [], "schema 3 files have no scenes")
         XCTAssertTrue(loaded.nodes.allSatisfy(\.effects.isEmpty), "schema 3 files have no effects")
         XCTAssertEqual(loaded.midi, [], "schema 3 files have no MIDI mappings")
+        XCTAssertEqual(loaded.monitors, [], "schema 3 files have no monitors")
         // A schema 3 file half written by a development build that had effects or MIDI mappings loses them, like its
         // scenes.
         var halfWritten = graph
         halfWritten.nodes[sinkIndex].effects = [Effect(.limiter)]
         halfWritten.midi = [MIDIMapping(target: .nodeMute(graph.nodes[sinkIndex].id), trigger: .note(channel: 0, number: 36))]
+        halfWritten.monitors = [MonitorMix(device: device.id, output: .defaultOutput)]
         halfWritten.upgrade()
         XCTAssertEqual(halfWritten.nodes[sinkIndex].effects, [])
         XCTAssertEqual(halfWritten.midi, [])
+        XCTAssertEqual(halfWritten.monitors, [])
 
         // Schema 4 keeps the choice.
         var changed = loaded
@@ -271,6 +274,30 @@ final class PlannerTests: XCTestCase {
         }
         XCTAssertEqual(store.load()?.nodes[sinkIndex].effects.map(\.kind), [.gate, .limiter])
         XCTAssertEqual(store.load()?.scenes.first?.nodes[sinkIndex].effects, [gate, limiter], "scenes keep effects")
+
+        // …and monitors: output, level, mute and sends. Solo/listen is saved (the helper gets the graph as JSON) but
+        // starts off when a file is loaded.
+        let source = try XCTUnwrap(dressed.nodes.first { $0.id != dressed.nodes[sinkIndex].id })
+        var monitor = MonitorMix(device: device.id, output: .device(DeviceRef(uid: Demo.speakers.uid, name: Demo.speakers.name,
+                                                                              inputChannels: 0, outputChannels: 2)),
+                                 gainDB: -6, isMuted: true, sends: [MonitorSend(node: source.id, gainDB: -3, isOn: false)])
+        monitor.listening = [PortRef(node: source.id, channel: 1)]
+        dressed.monitors = [monitor]
+        try store.save(dressed)
+        let withMonitor = try String(contentsOf: store.graphURL, encoding: .utf8)
+        XCTAssertTrue(withMonitor.contains("\"monitors\""))
+        var unsoloed = monitor
+        unsoloed.listening = []
+        XCTAssertEqual(store.load()?.monitors, [unsoloed])
+        XCTAssertEqual(try JSONDecoder().decode(Graph.self, from: JSONEncoder().encode(dressed)).monitors, [monitor],
+                       "the helper gets solo/listen")
+        // A device keeps one monitor, and a deleted device's goes.
+        var doubled = dressed
+        doubled.monitors += [MonitorMix(device: device.id), MonitorMix(device: UUID())]
+        doubled.upgrade()
+        XCTAssertEqual(doubled.monitors, [unsoloed])
+        doubled.removeVirtualDevice(device.id)
+        XCTAssertEqual(doubled.monitors, [])
     }
 
     func testDeviceOptionsInTheDriverConfiguration() throws {

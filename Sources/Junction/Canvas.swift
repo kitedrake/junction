@@ -945,6 +945,14 @@ struct NodeCard: View {
             .accessibilityAddTraits(.isButton)
             .accessibilityHint("Opens a list of the channels it can connect to")
             .accessibilityAction { connecting = end }
+            .accessibilityAction(named: model.isListening(to: end.port) ? "Stop Listening" : "Listen on Monitor") {
+                model.toggleListening(end.port)
+            }
+            .contextMenu {
+                Button(model.isListening(to: end.port) ? "Stop Listening" : "Listen on Monitor") { model.toggleListening(end.port) }
+                    .disabled(!model.hasMonitorOutput)
+                if !model.hasMonitorOutput { Text("Choose a monitor output in the mixer first") }
+            }
             .popover(isPresented: Binding(get: { connecting == end }, set: { if !$0, connecting == end { connecting = nil } }),
                      arrowEdge: end.isOutput ? .trailing : .leading) {
                 ConnectChooser(end: end) { problem in

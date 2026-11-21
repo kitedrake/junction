@@ -82,6 +82,10 @@ enum Demo {
             MIDIMapping(target: .scene(graph.scenes[0].id), trigger: .program(channel: 0, number: 0), controller: midiController),
             MIDIMapping(target: .scene(graph.scenes[1].id), trigger: .program(channel: 0, number: 1), controller: midiController),
         ]
+        // A headphone monitor of Stream Mix on the AirPods: the mic a little quieter than in the stream, the music off.
+        graph.monitors = [MonitorMix(device: stream.id, output: .device(headphones.ref), gainDB: -4,
+                                     sends: [MonitorSend(node: mic.id, gainDB: -6),
+                                             MonitorSend(node: musicThroughDeck.id, isOn: false)])]
         model.graph = graph
         model.showCanvas(stream.id)
         let inventory = Inventory(
@@ -128,7 +132,11 @@ enum Demo {
         meter(streamNode, true, [0.5, 0.45])
         meter(recordingNode, false, [0.18, 0.18, 0.3, 0.3])
         meter(phones, false, [0.12, 0.11])
-        model.setDemoState(inventory: inventory, statuses: [streamNode.id: streaming, recordingNode.id: running, phones.id: running],
+        let monitorID = graph.monitors[0].id
+        meters[PortKey(node: monitorID, isOutput: false, channel: 0)] = 0.28
+        meters[PortKey(node: monitorID, isOutput: false, channel: 1)] = 0.26
+        model.setDemoState(inventory: inventory, statuses: [streamNode.id: streaming, recordingNode.id: running, phones.id: running,
+                                                            monitorID: running],
                            meters: meters)
         model.selection = .node(system.id)
         // Settings as a released build shows them before the driver installer is allowed: crash reports on.
@@ -221,6 +229,19 @@ enum Snapshot {
             await both("zoomed")
             model.zoomToActualSize()
             model.viewport = CanvasViewport()
+            // The mixer of the same canvas, the mic soloed on the headphone monitor.
+            model.showsMixer = true
+            if let mic = model.mixerStrips.first(where: { model.node($0.node)?.kind == .defaultInput }) {
+                model.selection = .node(mic.node)
+                model.toggleSolo(mic)
+            }
+            await both("mixer")
+            resize(980, 560)
+            await both("mixer-minimum-size")
+            resize(1440, 810)
+            model.clearListening()
+            model.showsMixer = false
+            model.selection = nil
             if let first = model.canvas, let other = model.graph.virtualDevices.first(where: { $0.id != first }) {
                 model.showCanvas(other.id)
                 await both("second-canvas")

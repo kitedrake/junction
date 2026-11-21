@@ -72,7 +72,8 @@ the sidebar and the canvas offer **Install Driver…**.
   on the left and feed the device; outputs sit on the right and let you hear it.
 - **Inspector** (right): settings and levels for whatever you select. Show or hide it with the button at the top
   right (⌥⌘I).
-- **Toolbar**: the power button turns all routing on or off; **+** adds things to the canvas.
+- **Toolbar**: **Canvas** and **Mixer** switch between the canvas and the mixer (section 7); the power button turns
+  all routing on or off; **+** adds things to the canvas.
 
 ## 4. Make a virtual device
 
@@ -339,6 +340,42 @@ Select the virtual device or an output to change **Conversion** under **Sample r
 choice) converts any device at another rate. **Off** combines them as they are, as Junction did before conversion
 existed: the node then shows a yellow triangle, and you should set both to the same rate in Audio MIDI Setup.
 
+### The mixer
+
+Click **Mixer** in the toolbar (or choose **View › Show Mixer**, ⌘2) to see the device's canvas as a mixing desk.
+**Canvas** (⌘1) goes back. Each source has a strip on the left, then the virtual device, then each output:
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="screenshots/mixer-light.png">
+  <img src="screenshots/mixer-dark.png" alt="The Stream Mix mixer: strips for System Audio, the microphone, Music through DJ Deck, the device and the headphones, with the microphone soloed on the monitor">
+</picture>
+
+- The **fader** is the item's level, and **M** its mute: the same ones as in the inspector. Double-click or
+  Option-click a fader for 0 dB.
+- **Pan** appears where the item's cables reach both a left and a right channel (a source into the device's channels
+  1 and 2, an output's channels 1 and 2). It turns down the cables on one side, so you'll see their levels change on
+  the canvas too. Double-click it to center.
+- The **meters** show what the item sends (sources, the device) or receives (outputs).
+- The **effects** box lists the chain: click an effect to bypass it or turn it back on, and **Add** to add one. Click
+  the strip's name to edit the effects' settings in the inspector.
+
+Everything you change in the mixer changes the canvas, and the other way round, with the same undo.
+
+### Headphone monitor and solo
+
+The **Monitor** strip on the right is a separate mix for your headphones. Choose where it plays from its menu
+(headphones, speakers, or Default Output; never one of Junction's own devices). It plays the device's sources as
+they are wired into it, at **levels of its own**: the headphone button and slider at the bottom of each source strip.
+Those levels apply before the source's fader and mute, so you can turn your microphone down or mute it in the stream
+and still hear it, or leave the music out of your headphones while the stream keeps it. The monitor has its own
+fader, mute and meters. It hears sources before their effects.
+
+**S** (solo) on any strip sends just that item to the monitor instead of its mix: a source, the device's own sound
+(what apps recording it hear), or what an output receives. You can also right-click any channel on the canvas and
+choose **Listen on Monitor** to hear that one channel alone. Solo and listen never change the device's mix or what
+your outputs play. Click **S** again, or **Stop Listening** in the Monitor strip, to go back to the monitor's mix.
+Solo isn't kept when Junction restarts, and scenes don't change the monitor.
+
 ## 8. Leave apps out
 
 Select a **System Audio** node to see its **Leave out** list in the inspector.
@@ -537,7 +574,9 @@ Sending a device's sound back into itself would make it ring louder and louder. 
 - a device can't go to **Default Output** while System Settings › Sound plays through that same device, or take
   **Default Input** while that's the same device;
 - an app *through* a device counts as that device's sound: "Music through DJ Deck" can't go into DJ Deck, nor into a
-  device that already feeds DJ Deck.
+  device that already feeds DJ Deck;
+- a headphone monitor never plays into one of Junction's devices: if Sound settings point Default Output at one, the
+  monitor stops and says why in its strip.
 
 If you change Sound settings later in a way that would close a loop, Junction stops using that cable (it turns
 dashed) and explains why on the node.
@@ -608,6 +647,7 @@ report as Copy Report, followed by the crash log macOS wrote. Nothing is sent un
 | Routing on/off | ⇧⌘R |
 | Switch to scene 1–9 | ⌃⌘1 … ⌃⌘9 |
 | Show or hide the inspector | ⌥⌘I |
+| Show the canvas / the mixer | ⌘1 / ⌘2 |
 | Routing Log | ⌥⌘L |
 | Settings | ⌘, |
 | Delete the selected cable or items | Delete (on the canvas) or ⌘⌫ |

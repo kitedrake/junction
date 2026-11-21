@@ -222,6 +222,17 @@ enum CommandLineTool {
         check(sink?.subDevices.map(\.uid) == [device.uid, "mic"], "sub-devices: virtual device first, then the mic")
         check(sink?.routes.map(\.input) == [3, 4, 2, 2], "routes read the tap after the devices (\(sink?.routes.map(\.input) ?? []))")
         check(sink?.taps.first?.mode == .allExcept(["com.hnc.Discord"]), "tap leaves Discord out")
+        // A headphone monitor is one more sink, and never one of Junction's devices.
+        var monitored = graph, monitoredInventory = inventory
+        monitoredInventory.devices.append(DeviceInfo(uid: "phones", name: "Phones", inputChannels: 0, outputChannels: 2))
+        monitored.updateMonitor(for: device.id) {
+            $0.output = .device(DeviceRef(uid: "phones", name: "Phones", inputChannels: 0, outputChannels: 2))
+        }
+        let monitorPlan = Planner.plan(monitored, inventory: monitoredInventory)
+        check(monitorPlan.sinks.count == 2 && monitorPlan.sinks.first == sink && monitorPlan.sinks.last?.sinkUID == "phones"
+              && Rules.monitorProblem(.device(DeviceRef(uid: device.uid, name: device.name, inputChannels: 2, outputChannels: 2)),
+                                      inventory: inventory) != nil,
+              "a monitor is planned as its own sink and refuses Junction's devices")
 
         // Kernel: a known mix.
         let frames = 128

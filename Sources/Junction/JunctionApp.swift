@@ -70,6 +70,11 @@ struct JunctionApp: App {
             CommandGroup(after: .sidebar) {
                 Button(model.showInspector ? "Hide Inspector" : "Show Inspector") { model.showInspector.toggle() }
                     .keyboardShortcut("i", modifiers: [.command, .option])
+                Divider()
+                Button("Show Canvas") { model.showsMixer = false }
+                    .keyboardShortcut("1")
+                Button("Show Mixer") { model.showsMixer = true }
+                    .keyboardShortcut("2")
                 Button(model.showMinimap ? "Hide Minimap" : "Show Minimap") { model.showMinimap.toggle() }
                 Divider()
                 Group {
@@ -249,7 +254,9 @@ struct RootView: View {
             Sidebar()
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 340)
         } detail: {
-            CanvasView()
+            Group {
+                if model.showsMixer, model.canvas != nil { MixerView() } else { CanvasView() }
+            }
                 .overlay(alignment: .top) {
                     if let target = model.midiLearning {
                         MIDILearnBanner(target: target)
@@ -263,9 +270,18 @@ struct RootView: View {
                     if model.canvas == nil { EmptyCanvas() }
                 }
                 .overlay(alignment: .bottom) {
-                    if let device = model.canvasDevice, model.canvasNodes.count == 1 { CanvasHint(device: device) }
+                    if !model.showsMixer, let device = model.canvasDevice, model.canvasNodes.count == 1 { CanvasHint(device: device) }
                 }
                 .toolbar {
+                    ToolbarItemGroup(placement: .principal) {
+                        Picker("View", selection: $model.showsMixer) {
+                            Label("Canvas", systemImage: "point.3.connected.trianglepath.dotted").tag(false)
+                            Label("Mixer", systemImage: "slider.vertical.3").tag(true)
+                        }
+                        .pickerStyle(.segmented)
+                        .help("Show the canvas as nodes and cables, or as a mixer")
+                        .disabled(model.canvas == nil)
+                    }
                     ToolbarItemGroup(placement: .primaryAction) {
                         Toggle(isOn: $model.graph.isRoutingOn) {
                             Label("Routing", systemImage: "power")
