@@ -20,6 +20,10 @@ without your voice chat, step by step.
   it on another channel to move it, or on empty canvas (it turns red) to remove it. Clicking a cable and pressing
   Delete works too, and right-clicking the device offers **Disconnect** for each node wired to it. Meters show levels;
   cables glow with the audio they carry; dashed cables carry nothing right now (an end is missing or routing is off).
+- **Editing**: select several nodes with a drag box or ⇧-click, move them together, and cut, copy, paste or duplicate
+  (⌘D) them with the cables between them, onto the same canvas or another device's (cables plug into that device;
+  ones it doesn't allow are left out). **Tidy Up** (⌃⌘T) lays a canvas out: sources, device, outputs. Every canvas
+  and virtual-device edit can be undone and redone (⌘Z, ⇧⌘Z).
 - **No feedback**: every cable runs into the canvas's virtual device or out of it, so devices never feed each other.
   Junction also refuses (or, if Sound settings change later, mutes) a device sent to Default Output while Sound
   settings play through that same device, and Default Input into the device it stands for.

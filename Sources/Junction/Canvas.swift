@@ -4,18 +4,16 @@ import SwiftUI
 
 /// Node geometry, shared by drawing and hit-testing so cables meet the ports exactly.
 enum NodeLayout {
-    static let width: CGFloat = 236
-    static let header: CGFloat = 54
-    static let row: CGFloat = 24
-    static let topPadding: CGFloat = 6
-    static let bottomPadding: CGFloat = 10
+    static let width = CGFloat(CanvasMetrics.nodeWidth)
+    static let header = CGFloat(CanvasMetrics.header)
+    static let row = CGFloat(CanvasMetrics.row)
+    static let topPadding = CGFloat(CanvasMetrics.topPadding)
+    static let bottomPadding = CGFloat(CanvasMetrics.bottomPadding)
     static let portRadius: CGFloat = 6
 
-    static func rows(_ ports: PortCounts) -> Int { max(1, max(ports.inputs, ports.outputs)) }
+    static func rows(_ ports: PortCounts) -> Int { CanvasMetrics.rows(ports) }
 
-    static func height(for ports: PortCounts) -> CGFloat {
-        header + topPadding + CGFloat(rows(ports)) * row + bottomPadding
-    }
+    static func height(for ports: PortCounts) -> CGFloat { CGFloat(CanvasMetrics.height(for: ports)) }
 
     static func origin(_ node: Node) -> CGPoint { CGPoint(x: node.x, y: node.y) }
 
@@ -31,9 +29,7 @@ enum NodeLayout {
     static func busOutputPoint(_ node: Node) -> CGPoint { CGPoint(x: node.x + width, y: node.y + header / 2) }
     static func busInputPoint(_ node: Node) -> CGPoint { CGPoint(x: node.x, y: node.y + header / 2) }
 
-    static func frame(_ node: Node, _ ports: PortCounts) -> CGRect {
-        CGRect(x: node.x, y: node.y, width: width, height: height(for: ports))
-    }
+    static func frame(_ node: Node, _ ports: PortCounts) -> CGRect { CanvasMetrics.frame(node, ports) }
 }
 
 /// What the user is dragging out of a port.
@@ -56,6 +52,8 @@ struct CanvasView: View {
     @State private var wire: PendingWire?
     @State private var dragOrigins: [UUID: CGPoint] = [:]
     @State private var refusal: String?
+    /// The drag box being drawn on empty canvas.
+    @State private var box: (start: CGPoint, end: CGPoint)?
     /// Where the pointer last was over the canvas, for the right-click menu. Not observed: hovering mustn't redraw.
     @State private var pointer = PointerSpot()
     @FocusState private var focused: Bool
@@ -69,9 +67,23 @@ struct CanvasView: View {
                     .frame(width: bounds.width, height: bounds.height)
                     .contentShape(Rectangle())
                     .onTapGesture(coordinateSpace: .named("canvas")) { location in
-                        model.selection = hitCable(at: location, info: info).map { .cable($0) }
+                        if let cable = hitCable(at: location, info: info) {
+                            model.selection = .cable(cable)
+                        } else if !NSEvent.modifierFlags.contains(.shift) {
+                            model.selection = nil
+                        }
                         focused = true
                     }
+                    .gesture(
+                        DragGesture(minimumDistance: 4, coordinateSpace: .named("canvas"))
+                            .onChanged { value in box = (value.startLocation, value.location) }
+                            .onEnded { value in
+                                box = nil
+                                model.selectNodes(in: rect(value.startLocation, value.location),
+                                                  extending: NSEvent.modifierFlags.contains(.shift))
+                                focused = true
+                            }
+                    )
                     .onContinuousHover(coordinateSpace: .named("canvas")) { phase in
                         if case .active(let location) = phase { pointer.location = location }
                     }
@@ -80,17 +92,41 @@ struct CanvasView: View {
                         AddMenuItems(spot: { [pointer] in
                             pointer.location.map { CGPoint(x: max(0, $0.x - 30), y: max(0, $0.y - 20)) }
                         })
+                        Divider()
+                        Button("Paste") { model.paste() }
+                            .disabled(!model.canPaste)
+                        Button("Select All") { model.selectAll() }
+                        Button("Tidy Up") { model.tidyUp() }
                     }
                 CableLayer(wire: wire)
                     .frame(width: bounds.width, height: bounds.height)
                     .allowsHitTesting(false)
                 ForEach(model.canvasNodes) { node in
                     NodeCard(node: node, wire: $wire, onWireEnd: finishWire, onMove: { translation in
-                        let origin = dragOrigins[node.id] ?? CGPoint(x: node.x, y: node.y)
-                        dragOrigins[node.id] = origin
-                        model.moveNode(node.id, to: CGPoint(x: origin.x + translation.width, y: origin.y + translation.height))
-                    }, onMoveEnd: { dragOrigins[node.id] = nil })
+                        // Dragging a selected node moves the whole selection.
+                        if dragOrigins.isEmpty {
+                            let moving = model.isSelected(node.id) ? model.selectedNodes : [node.id]
+                            for other in model.canvasNodes where moving.contains(other.id) {
+                                dragOrigins[other.id] = CGPoint(x: other.x, y: other.y)
+                            }
+                        }
+                        model.moveNodes(dragOrigins.mapValues {
+                            CGPoint(x: $0.x + translation.width, y: $0.y + translation.height)
+                        })
+                    }, onMoveEnd: {
+                        dragOrigins = [:]
+                        model.endEditing()
+                    })
                     .offset(x: node.x, y: node.y)
+                }
+                if let box {
+                    let frame = rect(box.start, box.end)
+                    Rectangle()
+                        .fill(Color.accentColor.opacity(0.12))
+                        .strokeBorder(Color.accentColor.opacity(0.8), lineWidth: 1)
+                        .frame(width: frame.width, height: frame.height)
+                        .offset(x: frame.minX, y: frame.minY)
+                        .allowsHitTesting(false)
                 }
             }
             .frame(width: bounds.width, height: bounds.height, alignment: .topLeading)
@@ -117,6 +153,10 @@ struct CanvasView: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: refusal)
+    }
+
+    private func rect(_ a: CGPoint, _ b: CGPoint) -> CGRect {
+        CGRect(x: min(a.x, b.x), y: min(a.y, b.y), width: abs(a.x - b.x), height: abs(a.y - b.y))
     }
 
     private func contentBounds(_ info: NodeInfo) -> CGSize {
@@ -391,7 +431,7 @@ struct NodeCard: View {
         let info = model.info
         let ports = info.ports(node)
         let labels = (inputs: info.channelLabels(node, outputs: false), outputs: info.channelLabels(node, outputs: true))
-        let selected = model.selection == .node(node.id)
+        let selected = model.isSelected(node.id)
         let tint = NodeStyle.tint(node.kind)
         let issues = model.issues(for: node.id)
         let failing = model.isFailing(node.id)
@@ -433,7 +473,7 @@ struct NodeCard: View {
                     Circle().fill(.green).frame(width: 7, height: 7).help("Running")
                 }
                 Button {
-                    model.updateNode(node.id) { $0.isMuted.toggle() }
+                    model.updateNode(node.id, node.isMuted ? "Unmute" : "Mute") { $0.isMuted.toggle() }
                 } label: {
                     Image(systemName: node.isMuted ? "speaker.slash.fill" : "speaker.wave.1")
                         .foregroundStyle(node.isMuted ? .red : .secondary)
@@ -450,7 +490,9 @@ struct NodeCard: View {
                     .onChanged { onMove($0.translation) }
                     .onEnded { _ in onMoveEnd() }
             )
-            .simultaneousGesture(TapGesture().onEnded { model.selection = .node(node.id) })
+            .simultaneousGesture(TapGesture().onEnded {
+                model.click(node.id, extending: NSEvent.modifierFlags.contains(.shift))
+            })
 
             Rectangle().fill(.separator).frame(height: 0.5).padding(.horizontal, 10)
 
@@ -491,7 +533,9 @@ struct NodeCard: View {
         .opacity(isDisabledDevice ? 0.6 : 1)
         .overlay(alignment: .topLeading) { portOverlay(ports, tint: tint) }
         .contextMenu {
-            Button(node.isMuted ? "Unmute" : "Mute") { model.updateNode(node.id) { $0.isMuted.toggle() } }
+            Button(node.isMuted ? "Unmute" : "Mute") {
+                model.updateNode(node.id, node.isMuted ? "Unmute" : "Mute") { $0.isMuted.toggle() }
+            }
             let linked = model.linkedNodes(node.id)
             if model.isDeviceNode(node), !linked.isEmpty {
                 Menu("Disconnect") {
@@ -506,12 +550,25 @@ struct NodeCard: View {
                     .disabled(linked.isEmpty)
             }
             Divider()
+            if !model.isDeviceNode(node) {
+                // On a node outside the selection these act on that node alone.
+                Button("Copy") { selectForMenu(); model.copySelection() }
+                Button("Duplicate") { selectForMenu(); model.duplicateSelection() }
+            }
+            Button("Tidy Up") { model.tidyUp() }
+            Divider()
             if case .virtualDevice(let device) = node.kind {
                 Button("Delete Virtual Device…", role: .destructive) { model.deviceToDelete = device }
+            } else if model.isSelected(node.id), model.selectedNodes.count > 1 {
+                Button("Remove \(model.selectedNodes.count) Nodes from Canvas", role: .destructive) { model.deleteSelection() }
             } else {
                 Button("Remove from Canvas", role: .destructive) { model.removeNode(node.id) }
             }
         }
+    }
+
+    private func selectForMenu() {
+        if !model.isSelected(node.id) { model.selection = .node(node.id) }
     }
 
     private var isDisabledDevice: Bool {

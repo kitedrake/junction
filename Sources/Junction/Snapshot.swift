@@ -109,6 +109,9 @@ enum Snapshot {
             await both("device")
             if let cable = model.canvasCables.first(where: { $0.gainDB < 0 }) { model.selection = .cable(cable.id) }
             await both("cable")
+            // Several nodes picked with a drag box: the selection inspector.
+            model.selection = Selection.of(Set(model.canvasNodes.filter { $0.x < CanvasColumn.device }.map(\.id)))
+            await both("multi-select")
             if let first = model.canvas, let other = model.graph.virtualDevices.first(where: { $0.id != first }) {
                 model.showCanvas(other.id)
                 await both("second-canvas")

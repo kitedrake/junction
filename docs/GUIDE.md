@@ -159,6 +159,26 @@ Each cable joins a channel on the right of one item to a channel on the left of 
 Every cable goes into the canvas's device or out of it. Junction refuses anything else and tells you why at the
 bottom of the canvas.
 
+### Select, copy and tidy up
+
+- **Select several items**: drag a box over empty canvas, or hold ⇧ and click items to add or take them out of the
+  selection. ⌘A selects everything on the canvas. Drag any selected item to move them all; the inspector lists them.
+- **Copy, cut, paste and duplicate** (Edit menu, or right-click an item): copied items take the cables between them
+  along, including their cables to and from the device. Paste onto the same canvas, or pick another device in the
+  sidebar and paste there: the cables then plug into that device. Cables that wouldn't be allowed there (a channel
+  the device doesn't have, or one that would feed a device back into itself) are left out. **Duplicate** (⌘D) copies
+  and pastes in one step. The device itself is never copied; each canvas has just its own.
+- **Delete** removes every selected item and its cables. The device stays: delete it from the sidebar.
+- **Tidy Up** (Edit menu, ⌃⌘T, or right-click the canvas) lines the canvas up: sources on the left, the device in the
+  middle, outputs on the right, none on top of another.
+- **Undo and redo** (⌘Z, ⇧⌘Z) take back any change to canvases and virtual devices: adding, moving, wiring, levels,
+  device settings, even deleting a device. The Edit menu names the step. Turning routing on or off isn't undone.
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="screenshots/multi-select-light.png">
+  <img src="screenshots/multi-select-dark.png" alt="Two sources selected together, and the inspector listing them">
+</picture>
+
 ## 7. Levels and muting
 
 Select an item or a cable to see its level in the inspector:
@@ -310,7 +330,14 @@ devices and apps, so read it before sharing it.
 | Show or hide the inspector | ⌥⌘I |
 | Routing Log | ⌥⌘L |
 | Settings | ⌘, |
-| Delete the selected cable or item | Delete (on the canvas) or ⌘⌫ |
+| Delete the selected cable or items | Delete (on the canvas) or ⌘⌫ |
+| Undo / Redo | ⌘Z / ⇧⌘Z |
+| Cut / Copy / Paste | ⌘X / ⌘C / ⌘V |
+| Duplicate the selected items | ⌘D |
+| Select everything on the canvas | ⌘A |
+| Add an item to the selection, or take it out | ⇧-click |
+| Select with a box | Drag on empty canvas |
+| Tidy Up | ⌃⌘T |
 | Reset a fader to 0 dB | Option-click, Command-click or double-click |
 | Add something where you click | Right-click the canvas |
 | Remove a cable | Drag it off its input onto empty canvas |

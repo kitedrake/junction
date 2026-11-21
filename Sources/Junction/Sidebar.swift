@@ -92,20 +92,24 @@ struct VirtualDeviceRow: View {
             Spacer(minLength: 4)
             Toggle("", isOn: Binding(
                 get: { device.isEnabled },
-                set: { value in model.updateVirtualDevice(device.id) { $0.isEnabled = value } }))
+                set: { value in model.updateVirtualDevice(device.id, value ? "Turn On" : "Turn Off") { $0.isEnabled = value } }))
                 .toggleStyle(.switch)
                 .controlSize(.mini)
                 .labelsHidden()
                 .help(device.isEnabled ? "Published: apps can use it" : "Off: apps don't see it")
         }
         .contextMenu {
-            Button(device.isEnabled ? "Turn Off" : "Turn On") { model.updateVirtualDevice(device.id) { $0.isEnabled.toggle() } }
-            Button(device.isHidden ? "Show to Apps" : "Hide from Apps") { model.updateVirtualDevice(device.id) { $0.isHidden.toggle() } }
+            Button(device.isEnabled ? "Turn Off" : "Turn On") {
+                model.updateVirtualDevice(device.id, device.isEnabled ? "Turn Off" : "Turn On") { $0.isEnabled.toggle() }
+            }
+            Button(device.isHidden ? "Show to Apps" : "Hide from Apps") {
+                model.updateVirtualDevice(device.id, device.isHidden ? "Show to Apps" : "Hide from Apps") { $0.isHidden.toggle() }
+            }
             Menu("Apps See It As") {
                 ForEach(DeviceDirection.allCases, id: \.self) { direction in
                     Toggle(direction.title, isOn: Binding(
                         get: { device.direction == direction },
-                        set: { _ in model.updateVirtualDevice(device.id) { $0.direction = direction } }))
+                        set: { _ in model.updateVirtualDevice(device.id, "Change Direction") { $0.direction = direction } }))
                 }
             }
             Divider()

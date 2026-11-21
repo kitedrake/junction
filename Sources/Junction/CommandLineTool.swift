@@ -193,6 +193,18 @@ enum CommandLineTool {
             check(false, "kernel converter created")
         }
 
+        // Editing: duplicating the System Audio node brings its cables into the device; undo puts the graph back.
+        final class Held { var graph: Graph; init(_ graph: Graph) { self.graph = graph } }
+        let held = Held(graph)
+        let history = EditHistory(read: { held.graph }, write: { held.graph = $0 })
+        let sources = Set(graph.nodes.filter(\.kind.isTap).map(\.id))
+        if let copied = Editing.copy(sources, from: graph) {
+            history.perform("Duplicate") { Editing.paste(copied, into: &$0, canvas: device.id, inventory: inventory) }
+        }
+        check(held.graph.cables.count == graph.cables.count + 2, "duplicating a node brings its cables")
+        history.undo()
+        check(held.graph == graph, "undo restores the graph")
+
         // Saving.
         let base = folder.map { URL(fileURLWithPath: $0) } ?? FileManager.default.temporaryDirectory
         let store = Store(folder: base.appendingPathComponent("junction-self-test-\(UUID().uuidString)"))

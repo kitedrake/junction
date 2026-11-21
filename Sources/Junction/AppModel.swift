@@ -7,10 +7,7 @@ import os
 import SwiftUI
 import UniformTypeIdentifiers
 
-enum Selection: Hashable {
-    case node(UUID)
-    case cable(UUID)
-}
+typealias Selection = CanvasSelection
 
 /// Which side of the canvas a new node goes on: sources feed the virtual device, outputs play it.
 enum NodeRole {
@@ -30,6 +27,12 @@ final class AppModel {
     private(set) var statuses: [UUID: SinkStatus] = [:]
     var meters: [PortKey: Float] = [:]
     var selection: Selection?
+    /// Nodes copied or cut, ready to paste onto any canvas (also on the pasteboard).
+    private(set) var clipboard: Clipboard?
+    /// Bumped on every edit, undo and redo, so the Edit menu's Undo and Redo titles follow.
+    private(set) var historyVersion = 0
+    /// A text field is being edited: the Edit menu passes Undo, Cut, Copy, Paste… on to it.
+    private(set) var isEditingText = false
     /// The virtual device whose canvas is shown, as picked in the sidebar.
     private var pickedCanvas: UUID?
     /// A virtual device waiting for the user to confirm its deletion.
@@ -74,11 +77,23 @@ final class AppModel {
     @ObservationIgnored private var assertControlsUntil: [UUID: Date] = [:]
     /// Tells when the driver changes its list by itself (a volume set in Sound settings).
     @ObservationIgnored private var configWatcher: DriverClient.ConfigWatcher?
+    /// Undo and redo of every canvas and sidebar edit.
+    @ObservationIgnored private var history: EditHistory!
+    @ObservationIgnored private var textObservers: [NSObjectProtocol] = []
+    /// The pasteboard's change count when Junction last put nodes on it.
+    @ObservationIgnored private var clipboardChangeCount = 0
     private static let log = Logger(subsystem: "local.junction", category: "routing")
 
     init(demo: Bool) {
         isDemo = demo
         graph = Graph()
+        history = EditHistory(read: { [unowned self] in graph }, write: { [unowned self] restored in
+            // Undo puts back the canvases; whether routing is on stays as it is.
+            var restored = restored
+            restored.isRoutingOn = graph.isRoutingOn
+            graph = restored
+            historyVersion += 1
+        })
     }
 
     // MARK: Life cycle
@@ -91,6 +106,11 @@ final class AppModel {
             Task { @MainActor in AppModel.shared.events = EventLog.shared.recent }
         }
         refreshInstalledChatApps()
+        for (name, editing) in [(NSText.didBeginEditingNotification, true), (NSText.didEndEditingNotification, false)] {
+            textObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { _ in
+                MainActor.assumeIsolated { AppModel.shared.isEditingText = editing }
+            })
+        }
         if isDemo {
             Demo.load(into: self)
             return
@@ -100,6 +120,7 @@ final class AppModel {
         } else {
             graph = Graph()
         }
+        history.clear()
         let router = Router { statuses in
             Task { @MainActor in AppModel.shared.statuses = statuses }
         }
@@ -172,6 +193,7 @@ final class AppModel {
     // MARK: Changes
 
     private func graphChanged(from old: Graph) {
+        if let selection, selection.pruned(to: graph) != selection { self.selection = selection.pruned(to: graph) }
         if !isDemo {
             saveTask?.cancel()
             saveTask = Task { [weak self] in
@@ -607,12 +629,13 @@ final class AppModel {
         let role = role ?? (ports.outputs > 0 && ports.inputs == 0 ? .source : .output)
         let spot = point ?? freeSpot(role: role, canvas: canvas)
         let node = Node(kind: kind, x: spot.x, y: spot.y, canvas: canvas)
-        var updated = graph
-        updated.nodes.append(node)
-        updated.cables += role == .source
-            ? Rules.busCables(from: node.id, to: device.id, graph: updated, inventory: inventory)
-            : Rules.busCables(from: device.id, to: node.id, graph: updated, inventory: inventory)
-        graph = updated
+        let inventory = inventory
+        edit("Add \(info.title(node))") { graph in
+            graph.nodes.append(node)
+            graph.cables += role == .source
+                ? Rules.busCables(from: node.id, to: device.id, graph: graph, inventory: inventory)
+                : Rules.busCables(from: device.id, to: node.id, graph: graph, inventory: inventory)
+        }
         selection = .node(node.id)
         return node.id
     }
@@ -625,41 +648,97 @@ final class AppModel {
         return CGPoint(x: column, y: bottom + 30)
     }
 
+    // MARK: Undo
+
+    /// Applies a user's edit to the graph as one undo step (several, with the same `key` in a row, make one step: a
+    /// drag, a fader). Routing, inventory and driver updates change `graph` directly and aren't undone.
+    @discardableResult
+    private func edit(_ name: String, coalescing key: String? = nil, _ change: (inout Graph) -> Void) -> Bool {
+        let changed = history.perform(name, coalescing: key, change)
+        if changed { historyVersion += 1 }
+        return changed
+    }
+
+    /// A drag or a fader was let go: the next change is a new undo step.
+    func endEditing() { history.endCoalescing() }
+
+    var canUndo: Bool { _ = historyVersion; return history.canUndo }
+    var canRedo: Bool { _ = historyVersion; return history.canRedo }
+    var undoTitle: String { _ = historyVersion; return history.canUndo ? history.undoManager.undoMenuItemTitle : "Undo" }
+    var redoTitle: String { _ = historyVersion; return history.canRedo ? history.undoManager.redoMenuItemTitle : "Redo" }
+
+    func undo() {
+        history.undo()
+        historyVersion += 1
+    }
+
+    func redo() {
+        history.redo()
+        historyVersion += 1
+    }
+
     // MARK: Editing
 
-    func moveNode(_ id: UUID, to point: CGPoint) {
-        guard let index = graph.nodes.firstIndex(where: { $0.id == id }) else { return }
-        graph.nodes[index].x = max(0, point.x)
-        graph.nodes[index].y = max(0, point.y)
+    /// Moves nodes to new top-left corners (one undo step per drag, see `endEditing`).
+    func moveNodes(_ positions: [UUID: CGPoint]) {
+        edit(positions.count == 1 ? "Move" : "Move Nodes", coalescing: "move") { graph in
+            for index in graph.nodes.indices {
+                guard let point = positions[graph.nodes[index].id] else { continue }
+                graph.nodes[index].x = max(0, point.x)
+                graph.nodes[index].y = max(0, point.y)
+            }
+        }
     }
 
-    func updateNode(_ id: UUID, _ change: (inout Node) -> Void) {
-        guard let index = graph.nodes.firstIndex(where: { $0.id == id }) else { return }
-        change(&graph.nodes[index])
+    func updateNode(_ id: UUID, _ name: String = "Change Node", _ change: (inout Node) -> Void) {
+        edit(name, coalescing: "node \(id) \(name)") { graph in
+            guard let index = graph.nodes.firstIndex(where: { $0.id == id }) else { return }
+            change(&graph.nodes[index])
+        }
     }
 
-    func updateCable(_ id: UUID, _ change: (inout Cable) -> Void) {
-        guard let index = graph.cables.firstIndex(where: { $0.id == id }) else { return }
-        change(&graph.cables[index])
+    func updateCable(_ id: UUID, _ name: String = "Change Level", _ change: (inout Cable) -> Void) {
+        edit(name, coalescing: "cable \(id) \(name)") { graph in
+            guard let index = graph.cables.firstIndex(where: { $0.id == id }) else { return }
+            change(&graph.cables[index])
+        }
     }
 
     /// Removes a node from its canvas; a virtual device's own node stays (it is the canvas).
     func removeNode(_ id: UUID) {
         guard let node = graph.node(id), !isDeviceNode(node) else { return }
-        graph.removeNode(id)
-        if selection == .node(id) { selection = nil }
+        edit("Remove \(info.title(node))") { Editing.remove([id], from: &$0) }
     }
 
-    func isDeviceNode(_ node: Node) -> Bool {
-        if case .virtualDevice = node.kind { return true }
-        return false
-    }
+    func isDeviceNode(_ node: Node) -> Bool { Editing.isDeviceNode(node) }
 
     func removeCable(_ id: UUID) {
-        graph.cables.removeAll { $0.id == id }
-        if selection == .cable(id) { selection = nil }
+        edit("Disconnect") { $0.cables.removeAll { $0.id == id } }
     }
 
+    /// The nodes selected on the canvas (one or several).
+    var selectedNodes: Set<UUID> { selection?.nodeIDs ?? [] }
+
+    func isSelected(_ node: UUID) -> Bool { selection?.contains(node: node) ?? false }
+
+    /// A click on a node: selects it alone, or with ⇧ adds it to (or takes it out of) the selection.
+    func click(_ node: UUID, extending: Bool) {
+        selection = extending ? Selection.toggling(node, in: selection) : .node(node)
+    }
+
+    /// A drag box: selects the nodes it touches (added to the selection with ⇧).
+    func selectNodes(in rect: CGRect, extending: Bool) {
+        guard let canvas else { return }
+        let boxed = Editing.nodes(in: rect, canvas: canvas, graph: graph, inventory: inventory)
+        selection = extending ? Selection.boxed(boxed, extending: selection) : Selection.of(boxed)
+    }
+
+    func selectAll() {
+        selection = Selection.of(Set(canvasNodes.map(\.id)))
+    }
+
+    /// Delete: a cable, or the selected nodes. The virtual device alone asks first (it takes its canvas with it); in a
+    /// selection of several it stays.
     func deleteSelection() {
         switch selection {
         case .node(let id):
@@ -668,9 +747,65 @@ final class AppModel {
             } else {
                 removeNode(id)
             }
+        case .nodes(let ids):
+            edit("Remove Nodes") { Editing.remove(ids, from: &$0) }
         case .cable(let id): removeCable(id)
         case nil: break
         }
+    }
+
+    /// Whether the selection has nodes that can be copied (anything but the canvas's device).
+    var canCopy: Bool { Editing.copy(selectedNodes, from: graph) != nil }
+
+    func copySelection() {
+        guard let copied = Editing.copy(selectedNodes, from: graph) else { return }
+        clipboard = copied
+        guard let data = try? JSONEncoder().encode(copied) else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setData(data, forType: NSPasteboard.PasteboardType(Clipboard.pasteboardType))
+        clipboardChangeCount = pasteboard.changeCount
+    }
+
+    func cutSelection() {
+        copySelection()
+        guard clipboard != nil else { return }
+        let ids = selectedNodes
+        edit("Cut") { Editing.remove(ids, from: &$0) }
+    }
+
+    var canPaste: Bool { clipboard != nil && canvas != nil }
+
+    /// Pastes the copied nodes onto the shown canvas (which can be another device's) and selects them. Cables that
+    /// wouldn't be allowed here are left out.
+    func paste() {
+        let pasteboard = NSPasteboard.general
+        if pasteboard.changeCount != clipboardChangeCount {  // copied elsewhere since, or by another Junction
+            clipboard = pasteboard.data(forType: NSPasteboard.PasteboardType(Clipboard.pasteboardType))
+                .flatMap { try? JSONDecoder().decode(Clipboard.self, from: $0) }
+            clipboardChangeCount = pasteboard.changeCount
+        }
+        guard let clipboard, let canvas else { return }
+        paste(clipboard, name: "Paste", onto: canvas)
+    }
+
+    func duplicateSelection() {
+        guard let canvas, let copied = Editing.copy(selectedNodes, from: graph) else { return }
+        paste(copied, name: "Duplicate", onto: canvas)
+    }
+
+    private func paste(_ clipboard: Clipboard, name: String, onto canvas: UUID) {
+        var pasted: Set<UUID> = []
+        let inventory = inventory
+        edit(name) { pasted = Editing.paste(clipboard, into: &$0, canvas: canvas, inventory: inventory) }
+        selection = Selection.of(pasted)
+    }
+
+    /// Tidy Up: sources on the left, the device in the middle, outputs on the right, none overlapping.
+    func tidyUp() {
+        guard let canvas else { return }
+        let inventory = inventory
+        edit("Tidy Up") { Editing.tidyUp(&$0, canvas: canvas, inventory: inventory) }
     }
 
     /// Connects two channels; returns why not when it can't.
@@ -678,7 +813,7 @@ final class AppModel {
     func connect(from: PortRef, to: PortRef) -> Rules.Problem? {
         if let problem = Rules.check(from: from, to: to, graph: graph, inventory: inventory) { return problem }
         let cable = Cable(from: from, to: to)
-        graph.cables.append(cable)
+        edit("Connect") { $0.cables.append(cable) }
         selection = .cable(cable.id)
         return nil
     }
@@ -694,17 +829,19 @@ final class AppModel {
             return Rules.check(from: PortRef(node: source, channel: 0), to: PortRef(node: target, channel: 0),
                                graph: graph, inventory: inventory) ?? .alreadyConnected
         }
-        graph.cables.append(contentsOf: cables)
+        edit("Connect All Channels") { $0.cables.append(contentsOf: cables) }
         return nil
     }
 
     func disconnectAll(_ node: UUID) {
-        graph.cables.removeAll { $0.from.node == node || $0.to.node == node }
+        edit("Disconnect") { $0.cables.removeAll { $0.from.node == node || $0.to.node == node } }
     }
 
     /// Removes the cables between two nodes, in either direction.
     func disconnect(_ a: UUID, _ b: UUID) {
-        graph.cables.removeAll { ($0.from.node == a && $0.to.node == b) || ($0.from.node == b && $0.to.node == a) }
+        edit("Disconnect") {
+            $0.cables.removeAll { ($0.from.node == a && $0.to.node == b) || ($0.from.node == b && $0.to.node == a) }
+        }
     }
 
     /// The nodes a node has cables to or from, in canvas order.
@@ -718,7 +855,7 @@ final class AppModel {
     func moveCable(_ id: UUID, to port: PortRef) -> Rules.Problem? {
         var updated = graph
         if let problem = Rules.move(id, to: port, in: &updated, inventory: inventory) { return problem }
-        graph = updated
+        edit("Move Cable") { $0 = updated }
         selection = .cable(id)
         return nil
     }
@@ -739,34 +876,31 @@ final class AppModel {
             number += 1
         }
         let device = VirtualDevice(name: candidate, channels: channels)
-        var updated = graph
-        updated.virtualDevices.append(device)
-        updated.nodes.append(Node(kind: .virtualDevice(device.id), x: CanvasColumn.device, y: 60, canvas: device.id))
-        graph = updated
+        edit("New Virtual Device") { graph in
+            graph.virtualDevices.append(device)
+            graph.nodes.append(Node(kind: .virtualDevice(device.id), x: CanvasColumn.device, y: 60, canvas: device.id))
+        }
         pickedCanvas = device.id
         selection = nil
         return device
     }
 
-    func updateVirtualDevice(_ id: UUID, _ change: (inout VirtualDevice) -> Void) {
-        guard let index = graph.virtualDevices.firstIndex(where: { $0.id == id }) else { return }
-        var updated = graph
-        change(&updated.virtualDevices[index])
-        let name = updated.virtualDevices[index].name.trimmingCharacters(in: .whitespaces)
-        updated.virtualDevices[index].name = name.isEmpty ? "Virtual Device" : name
-        let info = NodeInfo(graph: updated, inventory: inventory)
-        updated.pruneCables { info.ports($0) }
-        graph = updated
+    func updateVirtualDevice(_ id: UUID, _ name: String = "Change Virtual Device", _ change: (inout VirtualDevice) -> Void) {
+        let inventory = inventory
+        edit(name, coalescing: "device \(id) \(name)") { updated in
+            guard let index = updated.virtualDevices.firstIndex(where: { $0.id == id }) else { return }
+            change(&updated.virtualDevices[index])
+            let name = updated.virtualDevices[index].name.trimmingCharacters(in: .whitespaces)
+            updated.virtualDevices[index].name = name.isEmpty ? "Virtual Device" : name
+            let info = NodeInfo(graph: updated, inventory: inventory)
+            updated.pruneCables { info.ports($0) }
+        }
     }
 
     /// Deletes a virtual device with its canvas.
     func removeVirtualDevice(_ id: UUID) {
-        graph.removeVirtualDevice(id)
-        switch selection {
-        case .node(let node) where graph.node(node) == nil: selection = nil
-        case .cable(let cable) where !graph.cables.contains(where: { $0.id == cable }): selection = nil
-        default: break
-        }
+        let name = graph.virtualDevice(id)?.name ?? "Virtual Device"
+        edit("Delete \(name)") { $0.removeVirtualDevice(id) }
     }
 
     /// Makes the "stream without chat" setup and shows its canvas.
@@ -776,10 +910,9 @@ final class AppModel {
             alert = "Junction can publish up to \(VirtualDevice.maximumCount) virtual devices."
             return
         }
-        var updated = graph
-        let device = Templates.streamWithoutChat(&updated, excluding: apps, deviceName: deviceName)
-        graph = updated
-        pickedCanvas = device.id
+        var device: VirtualDevice?
+        edit("Stream Without Chat") { device = Templates.streamWithoutChat(&$0, excluding: apps, deviceName: deviceName) }
+        if let device { pickedCanvas = device.id }
         selection = nil
     }
 

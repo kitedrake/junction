@@ -38,13 +38,7 @@ struct JunctionApp: App {
                     .keyboardShortcut("n")
                 Button("Stream Without Chat…") { model.showStreamTemplate = true }
             }
-            CommandGroup(after: .pasteboard) {
-                // ⌘⌫ here; plain Delete is handled by the canvas only while it has focus, so typing in the inspector
-                // never deletes a node.
-                Button("Delete") { model.deleteSelection() }
-                    .keyboardShortcut(.delete, modifiers: .command)
-                    .disabled(model.selection == nil)
-            }
+            EditCommands(model: model)
             CommandMenu("Routing") {
                 Toggle("Routing On", isOn: Binding(get: { model.graph.isRoutingOn }, set: { model.graph.isRoutingOn = $0 }))
                     .keyboardShortcut("r", modifiers: [.command, .shift])
@@ -112,6 +106,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+/// Undo, Redo, Cut, Copy, Paste, Duplicate, Delete, Select All and Tidy Up act on the canvas; while a text field is
+/// focused, the ones a text field knows go to it instead.
+struct EditCommands: Commands {
+    let model: AppModel
+
+    var body: some Commands {
+        CommandGroup(replacing: .undoRedo) {
+            Button(model.canUndo || model.isEditingText ? model.undoTitle : "Undo") {
+                if !forwardToText("undo:") { model.undo() }
+            }
+            .keyboardShortcut("z")
+            .disabled(!model.canUndo && !model.isEditingText)
+            Button(model.canRedo || model.isEditingText ? model.redoTitle : "Redo") {
+                if !forwardToText("redo:") { model.redo() }
+            }
+            .keyboardShortcut("z", modifiers: [.command, .shift])
+            .disabled(!model.canRedo && !model.isEditingText)
+        }
+        CommandGroup(replacing: .pasteboard) {
+            // Always enabled: a text field may want them even when the canvas has nothing to act on.
+            Button("Cut") { if !forwardToText("cut:") { model.cutSelection() } }
+                .keyboardShortcut("x")
+            Button("Copy") { if !forwardToText("copy:") { model.copySelection() } }
+                .keyboardShortcut("c")
+            Button("Paste") { if !forwardToText("paste:") { model.paste() } }
+                .keyboardShortcut("v")
+            Button("Duplicate") { model.duplicateSelection() }
+                .keyboardShortcut("d")
+                .disabled(!model.canCopy)
+            // ⌘⌫ here; plain Delete is handled by the canvas only while it has focus, so typing in the inspector
+            // never deletes a node.
+            Button("Delete") { model.deleteSelection() }
+                .keyboardShortcut(.delete, modifiers: .command)
+                .disabled(model.selection == nil)
+            Button("Select All") { if !forwardToText("selectAll:") { model.selectAll() } }
+                .keyboardShortcut("a")
+            Divider()
+            Button("Tidy Up") { model.tidyUp() }
+                .keyboardShortcut("t", modifiers: [.command, .control])
+                .disabled(model.canvas == nil)
+        }
+    }
+
+    /// Sends a standard edit action to the focused text field, if there is one. Returns whether it did.
+    @MainActor private func forwardToText(_ action: String) -> Bool {
+        guard NSApp.keyWindow?.firstResponder is NSText else { return false }
+        return NSApp.sendAction(Selector((action)), to: nil, from: nil)
+    }
+}
+
 struct MenuBarContent: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openWindow) private var openWindow
@@ -125,7 +169,7 @@ struct MenuBarContent: View {
             ForEach(model.graph.virtualDevices) { device in
                 Toggle(device.name, isOn: Binding(
                     get: { device.isEnabled },
-                    set: { value in model.updateVirtualDevice(device.id) { $0.isEnabled = value } }))
+                    set: { value in model.updateVirtualDevice(device.id, value ? "Turn On" : "Turn Off") { $0.isEnabled = value } }))
             }
         }
         if model.failingSinkCount > 0 {

@@ -11,6 +11,8 @@ struct InspectorView: View {
                 switch model.selection {
                 case .node(let id):
                     if let node = model.node(id) { NodeInspector(node: node) } else { Overview() }
+                case .nodes(let ids):
+                    SelectionInspector(nodes: model.canvasNodes.filter { ids.contains($0.id) })
                 case .cable(let id):
                     if let cable = model.graph.cables.first(where: { $0.id == id }) { CableInspector(cable: cable) } else { Overview() }
                 case nil:
@@ -43,6 +45,7 @@ private struct Overview: View {
                 Help(symbol: "contextualmenu.and.cursorarrow", text: "Right-click the canvas (or use the sidebar) to add a source or an output; it connects to the device by itself.")
                 Help(symbol: "hand.draw", text: "Drag from a channel on the right of a node to a channel on the left of another to change the wiring.")
                 Help(symbol: "line.3.horizontal", text: "Drag the bar beside a node's title onto another node to connect all channels at once.")
+                Help(symbol: "rectangle.dashed", text: "Drag a box on empty canvas, or ⇧-click nodes, to select several: move, copy, duplicate or remove them together. Paste works on any device's canvas.")
                 Help(symbol: "cursorarrow.click", text: "To remove a cable, drag it off the channel it plugs into and let go on empty canvas, or click it and press Delete.")
                 Help(symbol: "mic", text: "Apps see each virtual device as a microphone (what you send into it) and as a speaker; its inspector can make it one or the other, or hide it.")
             }
@@ -103,11 +106,11 @@ private struct NodeInspector: View {
         GroupBox {
             VStack(alignment: .leading, spacing: 10) {
                 GainSlider(title: ports.outputs > 0 && ports.inputs == 0 ? "Level sent" : "Level", dB: node.gainDB) { value in
-                    model.updateNode(node.id) { $0.gainDB = value }
+                    model.updateNode(node.id, "Change Level") { $0.gainDB = value }
                 }
-                Toggle("Mute", isOn: Binding(get: { node.isMuted }, set: { value in model.updateNode(node.id) { $0.isMuted = value } }))
+                Toggle("Mute", isOn: Binding(get: { node.isMuted }, set: { value in model.updateNode(node.id, value ? "Mute" : "Unmute") { $0.isMuted = value } }))
                 if node.kind.isTap {
-                    Toggle(isOn: Binding(get: { node.mutesOriginal }, set: { value in model.updateNode(node.id) { $0.mutesOriginal = value } })) {
+                    Toggle(isOn: Binding(get: { node.mutesOriginal }, set: { value in model.updateNode(node.id, "Only Through Junction") { $0.mutesOriginal = value } })) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Only through Junction")
                             Text("Takes this audio away from the speakers it normally plays on while Junction captures it.")
@@ -146,6 +149,41 @@ private struct NodeInspector: View {
     }
 }
 
+/// Several nodes selected: what they are, and what can be done to all of them.
+private struct SelectionInspector: View {
+    @Environment(AppModel.self) private var model
+    let nodes: [Node]
+
+    var body: some View {
+        let info = model.info
+        Text("\(nodes.count) Nodes Selected").font(.title3.weight(.semibold))
+        GroupBox {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(nodes) { node in
+                    HStack(spacing: 8) {
+                        NodeIcon(kind: node.kind, ports: info.ports(node), size: 18)
+                        Text(info.title(node)).lineLimit(1)
+                    }
+                }
+            }
+            .padding(6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        Text("Drag any of them to move them together. Copy and paste carry the cables between them, onto this canvas or another device's.")
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        HStack {
+            Button("Duplicate") { model.duplicateSelection() }
+                .disabled(!model.canCopy)
+            Button("Tidy Up") { model.tidyUp() }
+            Spacer()
+            Button("Remove", role: .destructive) { model.deleteSelection() }
+                .disabled(!model.canCopy)
+        }
+    }
+}
+
 private struct VirtualDeviceSettings: View {
     @Environment(AppModel.self) private var model
     let device: VirtualDevice
@@ -156,7 +194,7 @@ private struct VirtualDeviceSettings: View {
             VStack(alignment: .leading, spacing: 10) {
                 Toggle("Available to apps", isOn: Binding(
                     get: { device.isEnabled },
-                    set: { value in model.updateVirtualDevice(device.id) { $0.isEnabled = value } }))
+                    set: { value in model.updateVirtualDevice(device.id, "Available to Apps") { $0.isEnabled = value } }))
                 LabeledContent("Name") {
                     TextField("Name", text: $name)
                         .onSubmit { commitName() }
@@ -166,27 +204,27 @@ private struct VirtualDeviceSettings: View {
                 }
                 Picker("Channels", selection: Binding(
                     get: { device.channels },
-                    set: { value in model.updateVirtualDevice(device.id) { $0.channels = value } })) {
+                    set: { value in model.updateVirtualDevice(device.id, "Change Channels") { $0.channels = value } })) {
                     ForEach(VirtualDevice.channelChoices, id: \.self) { Text("\($0)").tag($0) }
                 }
                 Picker("Sample rate", selection: Binding(
                     get: { device.sampleRate },
-                    set: { value in model.updateVirtualDevice(device.id) { $0.sampleRate = value } })) {
+                    set: { value in model.updateVirtualDevice(device.id, "Change Sample Rate") { $0.sampleRate = value } })) {
                     ForEach(VirtualDevice.sampleRateChoices, id: \.self) { Text(formatRate($0)).tag($0) }
                 }
                 Picker("Apps see it as", selection: Binding(
                     get: { device.direction },
-                    set: { value in model.updateVirtualDevice(device.id) { $0.direction = value } })) {
+                    set: { value in model.updateVirtualDevice(device.id, "Change Direction") { $0.direction = value } })) {
                     ForEach(DeviceDirection.allCases, id: \.self) { Text($0.title).tag($0) }
                 }
                 Picker("Icon", selection: Binding(
                     get: { device.icon },
-                    set: { value in model.updateVirtualDevice(device.id) { $0.icon = value } })) {
+                    set: { value in model.updateVirtualDevice(device.id, "Change Icon") { $0.icon = value } })) {
                     ForEach(DeviceIcon.allCases, id: \.self) { Text($0.title).tag($0) }
                 }
                 Toggle("Hidden from apps", isOn: Binding(
                     get: { device.isHidden },
-                    set: { value in model.updateVirtualDevice(device.id) { $0.isHidden = value } }))
+                    set: { value in model.updateVirtualDevice(device.id, "Hide from Apps") { $0.isHidden = value } }))
                 Text(explanation)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -212,7 +250,7 @@ private struct VirtualDeviceSettings: View {
 
     private func commitName() {
         guard name != device.name else { return }
-        model.updateVirtualDevice(device.id) { $0.name = name }
+        model.updateVirtualDevice(device.id, "Rename") { $0.name = name }
     }
 }
 
@@ -227,13 +265,13 @@ private struct VirtualDeviceLevels: View {
             VStack(alignment: .leading, spacing: 10) {
                 if device.showsOutput {
                     side("Played into it", volume: device.outputVolume, muted: device.outputMuted,
-                         setVolume: { value in model.updateVirtualDevice(device.id) { $0.outputVolume = value } },
-                         setMuted: { value in model.updateVirtualDevice(device.id) { $0.outputMuted = value } })
+                         setVolume: { value in model.updateVirtualDevice(device.id, "Change Volume") { $0.outputVolume = value } },
+                         setMuted: { value in model.updateVirtualDevice(device.id, "Mute") { $0.outputMuted = value } })
                 }
                 if device.showsInput {
                     side("Recorded from it", volume: device.inputVolume, muted: device.inputMuted,
-                         setVolume: { value in model.updateVirtualDevice(device.id) { $0.inputVolume = value } },
-                         setMuted: { value in model.updateVirtualDevice(device.id) { $0.inputMuted = value } })
+                         setVolume: { value in model.updateVirtualDevice(device.id, "Change Volume") { $0.inputVolume = value } },
+                         setMuted: { value in model.updateVirtualDevice(device.id, "Mute") { $0.inputMuted = value } })
                 }
                 Text("The same volume apps and Sound settings show for “\(device.name)”.")
                     .font(.caption)
@@ -266,7 +304,8 @@ private struct VirtualDeviceLevels: View {
                 Toggle("Mute", isOn: Binding(get: { muted }, set: setMuted))
                     .controlSize(.small)
             }
-            Slider(value: Binding(get: { volume }, set: { setVolume(($0 * 100).rounded() / 100) }), in: 0...1)
+            Slider(value: Binding(get: { volume }, set: { setVolume(($0 * 100).rounded() / 100) }), in: 0...1,
+                   onEditingChanged: { if !$0 { model.endEditing() } })
                 .controlSize(.small)
                 .disabled(muted)
         }
@@ -290,7 +329,7 @@ private struct ChannelNameField: View {
 
     private func commit() {
         guard text != (device.channelName(channel) ?? "") else { return }
-        model.updateVirtualDevice(device.id) { device in
+        model.updateVirtualDevice(device.id, "Rename Channel") { device in
             while device.channelNames.count <= channel { device.channelNames.append("") }
             device.channelNames[channel] = text
         }
@@ -312,7 +351,7 @@ private struct SampleRateSettings: View {
                 if receives {
                     Picker("Conversion", selection: Binding(
                         get: { node.rateConversion },
-                        set: { value in model.updateNode(node.id) { $0.rateConversion = value } })) {
+                        set: { value in model.updateNode(node.id, "Change Conversion") { $0.rateConversion = value } })) {
                         Text("Automatic").tag(RateConversion.automatic)
                         Text("Off").tag(RateConversion.off)
                     }
@@ -340,7 +379,7 @@ private struct SinkTiming: View {
             VStack(alignment: .leading, spacing: 8) {
                 Picker("Buffer size", selection: Binding(
                     get: { node.bufferFrames ?? 0 },
-                    set: { value in model.updateNode(node.id) { $0.bufferFrames = value == 0 ? nil : value } })) {
+                    set: { value in model.updateNode(node.id, "Change Buffer Size") { $0.bufferFrames = value == 0 ? nil : value } })) {
                     Text("Automatic").tag(0)
                     ForEach(Node.bufferChoices, id: \.self) { Text("\($0) frames").tag($0) }
                 }
@@ -421,7 +460,7 @@ private struct ExcludedApps: View {
     }
 
     private func set(_ apps: [AppRef]) {
-        model.updateNode(node.id) { $0.kind = .systemAudio(excluding: apps) }
+        model.updateNode(node.id, "Change Apps Left Out") { $0.kind = .systemAudio(excluding: apps) }
     }
 }
 
@@ -508,6 +547,7 @@ private struct CableInspector: View {
 
 /// A level fader. Option- or Command-click (or double-click) puts it back to 0 dB.
 struct GainSlider: View {
+    @Environment(AppModel.self) private var model
     let title: String?
     let dB: Double
     let onChange: (Double) -> Void
@@ -524,7 +564,8 @@ struct GainSlider: View {
                     .foregroundStyle(.secondary)
                     .font(.callout)
             }
-            Slider(value: Binding(get: { dB }, set: { onChange(($0 * 2).rounded() / 2) }), in: Gain.floorDB...Gain.ceilingDB)
+            Slider(value: Binding(get: { dB }, set: { onChange(($0 * 2).rounded() / 2) }), in: Gain.floorDB...Gain.ceilingDB,
+                   onEditingChanged: { if !$0 { model.endEditing() } })
                 .controlSize(.small)
                 .onTapGesture(count: 2) { onChange(0) }
                 .overlay {
