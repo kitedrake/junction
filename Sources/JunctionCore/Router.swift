@@ -194,6 +194,7 @@ public final class Router: @unchecked Sendable {
             do {
                 try runner.start(processes: processes ?? [], fadingIn: true)
                 let replacing = runners[sink.sinkNode] != nil
+                if replacing { runner.waitForFirstCycle() }  // so the old one doesn't fade out before this one plays
                 retire(sink.sinkNode)
                 lock.lock()
                 runners[sink.sinkNode] = runner
@@ -432,6 +433,12 @@ final class SinkRunner: @unchecked Sendable {
     var isSilent: Bool { procID == nil || jk_renderer_fade_level(renderer) == 0 }
 
     var cycles: UInt64 { jk_renderer_cycle_count(renderer) }
+
+    /// Waits (up to 0.1 s) until the IOProc has run once.
+    func waitForFirstCycle() {
+        let deadline = Date().addingTimeInterval(0.1)
+        while cycles == 0, Date() < deadline { Thread.sleep(forTimeInterval: 0.002) }
+    }
 
     func stop() {
         if let procID {
