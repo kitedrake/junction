@@ -19,7 +19,7 @@ enum CommandLineTool {
               --diagnose [file] A report for bug reports: versions, devices, apps, the routing plan, recent routing
                                 events and the saved setup (it names your devices and apps). No audio is opened.
               --self-test [dir] Checks the bundled driver, routing helper and driver installer, the planner, the mixing
-                                kernel, both helpers' XPC messages, crash reports and saving (no audio; nothing is
+                                kernel and its effects, both helpers' XPC messages, crash reports and saving (no audio; nothing is
                                 installed, registered or launched).
               --loopback-test   With the driver installed: plays a tone into a temporary virtual device and checks
                                 it comes back out. Needs microphone permission for the calling app (e.g. Terminal).
@@ -246,6 +246,10 @@ enum CommandLineTool {
             check(false, "kernel renderer created")
         }
 
+        // Effects: a built-in gain on a source's lane before the mix, and Apple's peak limiter rendered by the kernel.
+        check(builtInEffectRenders(), "kernel runs a source's effect chain before the mix")
+        check(appleEffectRenders(), "Apple's peak limiter renders through the kernel (no permission needed)")
+
         // Sample-rate conversion: a 44.1 kHz source into a 48 kHz sink stays out of the aggregate and is converted.
         var converting = inventory
         converting.devices[0].sampleRate = 44100
@@ -302,6 +306,50 @@ enum CommandLineTool {
 
         print(tally.failures == 0 ? "Self-test passed." : "Self-test: \(tally.failures) failure(s).")
         return tally.failures == 0 ? 0 : 1
+    }
+
+    /// A mono source through one lane with a gain of 0.5 into a mono sink.
+    private static func builtInEffectRenders() -> Bool {
+        guard let renderer = jk_renderer_create_slots(1, 1, 1, [1], [0], [1], nil, 0, 1, [1], [0]),
+              let chain = jk_chain_create(1, 48_000, 1)
+        else { return false }
+        defer { jk_renderer_destroy(renderer); jk_chain_destroy(chain) }
+        jk_chain_add(chain, JK_EFFECT_GAIN)
+        jk_chain_set_parameter(chain, 0, 0, 0.5)
+        var ticket: UInt64 = 0
+        _ = jk_renderer_swap_chain(renderer, 0, chain, &ticket)
+        var input = [Float](repeating: 1, count: 64), output = [Float](repeating: 0, count: 64)
+        let rendered = input.withUnsafeMutableBufferPointer { inBuffer in
+            output.withUnsafeMutableBufferPointer { outBuffer -> Bool in
+                var inList = AudioBufferList(mNumberBuffers: 1, mBuffers: AudioBuffer(mNumberChannels: 1, mDataByteSize: 256,
+                                                                                         mData: inBuffer.baseAddress))
+                var outList = AudioBufferList(mNumberBuffers: 1, mBuffers: AudioBuffer(mNumberChannels: 1, mDataByteSize: 256,
+                                                                                          mData: outBuffer.baseAddress))
+                var time = AudioTimeStamp()
+                _ = jk_renderer_ioproc(0, &time, &inList, &time, &outList, &time, UnsafeMutableRawPointer(renderer))
+                return true
+            }
+        }
+        _ = jk_renderer_swap_chain(renderer, 0, nil, &ticket)
+        return rendered && abs(output[10] - 0.5) < 1e-6 && input[10] == 1
+    }
+
+    /// A tone through AUPeakLimiter as the router's chains render it.
+    private static func appleEffectRenders() -> Bool {
+        guard let unit = try? EffectUnit(Effect(.limiter), channels: 1, sampleRate: 48_000) else { return false }
+        let frames = 512
+        let samples = UnsafeMutablePointer<Float>.allocate(capacity: frames)
+        defer { samples.deallocate() }
+        var peak: Float = 0, finite = true
+        for buffer in 0..<20 {
+            for f in 0..<frames { samples[f] = Float(0.5 * sin(Double(buffer * frames + f) * 2 * .pi * 1000 / 48_000)) }
+            unit.process([samples], frames: frames)
+            for f in 0..<frames {
+                finite = finite && samples[f].isFinite
+                peak = max(peak, abs(samples[f]))
+            }
+        }
+        return finite && peak > 0.05 && unit.errorCount == 0
     }
 
     /// Says hello to a RoutingService on an anonymous listener, sends it the setup and waits for it to be planned.

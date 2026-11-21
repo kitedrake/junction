@@ -12,12 +12,19 @@ public struct SinkStatus: Codable, Equatable, Sendable {
     /// macOS gave its routing (frames).
     public var latency: TimeInterval?
     public var bufferFrames: Int?
+    /// While running: the delay each node's effect chain adds in this sink (included in `latency`), by node.
+    public var effectLatencies: [UUID: TimeInterval]?
+    /// Effects that couldn't be made (left out of their chain), by effect, with the reason.
+    public var effectProblems: [UUID: String]?
 
-    public init(state: State, message: String? = nil, latency: TimeInterval? = nil, bufferFrames: Int? = nil) {
+    public init(state: State, message: String? = nil, latency: TimeInterval? = nil, bufferFrames: Int? = nil,
+                effectLatencies: [UUID: TimeInterval]? = nil, effectProblems: [UUID: String]? = nil) {
         self.state = state
         self.message = message
         self.latency = latency
         self.bufferFrames = bufferFrames
+        self.effectLatencies = effectLatencies
+        self.effectProblems = effectProblems
     }
 }
 
@@ -55,6 +62,8 @@ public final class Router: @unchecked Sendable {
     private var healthTimer: DispatchSourceTimer?
     static let log = Logger(subsystem: "local.junction", category: "routing")
     private let events: EventLog
+    /// Audio Units by effect, kept across sink rebuilds (`queue` only).
+    private let effects = EffectPool()
 
     struct Failure {
         var key: String
@@ -180,14 +189,17 @@ public final class Router: @unchecked Sendable {
         var processes: [HAL.AudioProcess]?
         for sink in plan.sinks {
             if let runner = runners[sink.sinkNode], runner.plan.structureKey == sink.structureKey, !rebuildingAll {
-                runner.update(gains: sink)
+                runner.update(sink, pool: effects)
+                if statuses[sink.sinkNode]?.state == .running {
+                    statuses[sink.sinkNode] = runner.status(message: statuses[sink.sinkNode]?.message)
+                }
                 continue
             }
             // A sink that keeps failing waits for its next attempt; its status keeps the reason.
             if let failure = failures[sink.sinkNode], failure.next > now, runners[sink.sinkNode] == nil { continue }
             // Build the replacement while the old sink keeps playing, then swap them over with a cross-fade.
             if processes == nil, !sink.taps.isEmpty { processes = HAL.audioProcesses() }
-            guard let runner = SinkRunner(plan: sink) else {
+            guard let runner = SinkRunner(plan: sink, pool: effects) else {
                 retire(sink.sinkNode)
                 statuses[sink.sinkNode] = SinkStatus(state: .failed, message: "Out of memory.")
                 continue
@@ -201,8 +213,7 @@ public final class Router: @unchecked Sendable {
                 runners[sink.sinkNode] = runner
                 lock.unlock()
                 progress[sink.sinkNode] = nil
-                statuses[sink.sinkNode] = SinkStatus(state: .running, message: runner.layoutWarning,
-                                                     latency: runner.latency, bufferFrames: runner.bufferFrames)
+                statuses[sink.sinkNode] = runner.status(message: runner.layoutWarning)
                 events.add(.info, "\(sink.name): \(replacing ? "rebuilt" : "started"). \(runner.summary)")
                 if let warning = runner.layoutWarning { events.add(.warning, "\(sink.name): \(warning)") }
             } catch {
@@ -211,6 +222,7 @@ public final class Router: @unchecked Sendable {
                 recordFailure(sink, error.localizedDescription)
             }
         }
+        effects.keep(Set(plan.sinks.flatMap(\.effectKeys)))
         onStatus(statuses)
         Self.stopAfterFading(retiring)
         scheduleRetry()
@@ -247,6 +259,7 @@ public final class Router: @unchecked Sendable {
         lock.unlock()
         progress = progress.filter { current[$0.key] != nil }
         var stalled: [UUID] = []
+        for runner in current.values { runner.freeRetiredChains() }
         for (id, runner) in current {
             let cycles = runner.activity
             if let last = progress[id], zip(last.cycles, cycles).contains(where: { $0 == $1 }) {
@@ -335,13 +348,18 @@ final class SinkRunner: @unchecked Sendable {
     /// Frames in one cross-fade at the aggregate's sample rate.
     private var fadeFrames = UInt32(Router.crossFadeSeconds * 48_000)
     let startedAt = Date()
-    /// Measured once the aggregate exists: see `measureTiming`.
-    private(set) var latency: TimeInterval?
+    /// Measured once the aggregate exists: see `measureTiming` (without the effects, which `latency` adds).
+    private var baseLatency: TimeInterval?
     private(set) var bufferFrames: Int?
+    /// The chains in the renderer: one per source slot, and the one after the mix. Chains swapped out wait in
+    /// `retired` until the audio thread is done with them (`freeRetiredChains`).
+    private var slotChains: [LiveChain?]
+    private var mixChain: LiveChain?
+    private var retired: [(chain: LiveChain, ticket: UInt64)] = []
+    private var effectProblems: [UUID: String] = [:]
 
-    init?(plan: SinkPlan) {
+    init?(plan: SinkPlan, pool: EffectPool) {
         self.plan = plan
-        let sources = plan.routes.map { UInt32($0.input) }
         let destinations = plan.routes.map { UInt32($0.output) }
         let gains = plan.routes.map(\.gain)
         var converters: [OpaquePointer] = []
@@ -361,22 +379,86 @@ final class SinkRunner: @unchecked Sendable {
             jk_converter_set_same_clock(converter, capture.sameClock ? 1 : 0)
             converters.append(converter)
         }
-        guard let renderer = jk_renderer_create_converting(UInt32(plan.inputChannels), UInt32(plan.sinkOutputChannels),
-                                                           UInt32(plan.routes.count), sources, destinations, gains,
-                                                           converters, UInt32(converters.count))
+        let slotChannels = plan.slots.map { UInt32($0.inputs.count) }
+        let laneSources = plan.slots.flatMap { $0.inputs.map(UInt32.init) }
+        guard let renderer = jk_renderer_create_slots(UInt32(plan.inputChannels), UInt32(plan.sinkOutputChannels),
+                                                      UInt32(plan.routes.count), plan.routes.map { UInt32($0.lane) },
+                                                      destinations, gains, converters, UInt32(converters.count),
+                                                      UInt32(slotChannels.count), slotChannels, laneSources)
         else {
             converters.forEach { jk_converter_destroy($0) }
             return nil
         }
         self.renderer = renderer
         self.converters = converters
+        slotChains = Array(repeating: nil, count: plan.slots.count)
         jk_renderer_set_master_gain(renderer, plan.masterGain)
+        updateChains(plan, pool: pool)
     }
 
     deinit {
         jk_renderer_destroy(renderer)
         captures.forEach { jk_capture_destroy($0) }
         converters.forEach { jk_converter_destroy($0) }
+        // The chains (and the units only they hold) go with them: nothing renders them any more.
+    }
+
+    /// Brings the chains in line with the plan: effects in the same order only get new bypass and parameters; any
+    /// other change builds a new chain and swaps it in.
+    private func updateChains(_ plan: SinkPlan, pool: EffectPool) {
+        var problems: [UUID: String] = [:]
+        func chain(_ current: LiveChain?, _ effects: [Effect], position: ChainPosition, channels: Int,
+                   slot: UInt32) -> LiveChain? {
+            if let current, current.fits(effects) {
+                current.update(effects, pool: pool, position: position)
+                return current
+            }
+            let built = LiveChain(effects, position: position, channels: channels, sampleRate: plan.sampleRate, pool: pool)
+            var ticket: UInt64 = 0
+            _ = jk_renderer_swap_chain(renderer, slot, built?.pointer, &ticket)
+            if let current { retired.append((current, ticket)) }
+            return built
+        }
+        for (index, slot) in plan.slots.enumerated() where index < slotChains.count {
+            slotChains[index] = chain(slotChains[index], slot.effects, position: .source, channels: slot.inputs.count,
+                                      slot: UInt32(index))
+        }
+        mixChain = chain(mixChain, plan.effects, position: .mix, channels: plan.sinkOutputChannels, slot: JK_OUTPUT_CHAIN)
+        for effect in plan.slots.flatMap(\.effects) + plan.effects {
+            if let problem = pool.problems[effect.id] { problems[effect.id] = problem }
+        }
+        effectProblems = problems
+        freeRetiredChains()
+    }
+
+    /// Frees chains swapped out once no IO cycle can still be processing them (or the IOProc is gone).
+    func freeRetiredChains() {
+        retired.removeAll { procID == nil || jk_renderer_is_done_with(renderer, $0.ticket) != 0 }
+    }
+
+    /// What effect chains add to the delay: the slowest source chain plus the chain after the mix.
+    var effectLatency: TimeInterval {
+        (slotChains.compactMap { $0?.latency }.max() ?? 0) + (mixChain?.latency ?? 0)
+    }
+
+    var latency: TimeInterval? { baseLatency.map { $0 + effectLatency } }
+
+    /// The delay each node's chain adds here.
+    var effectLatencies: [UUID: TimeInterval] {
+        var result: [UUID: TimeInterval] = [:]
+        for (slot, chain) in zip(plan.slots, slotChains) where chain != nil { result[slot.node] = chain!.latency }
+        if let mixChain { result[plan.sinkNode] = mixChain.latency }
+        return result
+    }
+
+    /// The kernel chains in place (per source slot, then after the mix) and those waiting to be freed, for tests.
+    var chainPointers: [OpaquePointer?] { slotChains.map { $0?.pointer } + [mixChain?.pointer] }
+    var retiredChainCount: Int { retired.count }
+
+    func status(message: String?) -> SinkStatus {
+        SinkStatus(state: .running, message: message, latency: latency, bufferFrames: bufferFrames,
+                   effectLatencies: effectLatencies.isEmpty ? nil : effectLatencies,
+                   effectProblems: effectProblems.isEmpty ? nil : effectProblems)
     }
 
     /// Builds and starts the sink. With `fadingIn` it starts silent and fades in over one cross-fade.
@@ -524,7 +606,7 @@ final class SinkRunner: @unchecked Sendable {
         for index in plan.captures.indices where plan.converted.count + index < converters.count {
             slowest = max(slowest, jk_converter_expected_delay(converters[plan.converted.count + index], buffer, 512))
         }
-        latency = slowest + outputSide
+        baseLatency = slowest + outputSide
     }
 
     /// Starts fading the sink out; `isSilent` turns true once the fade has been rendered.
@@ -573,12 +655,14 @@ final class SinkRunner: @unchecked Sendable {
         taps.removeAll()
     }
 
-    func update(gains plan: SinkPlan) {
+    /// A plan with the same structure: new gains, and the effect chains brought up to date.
+    func update(_ plan: SinkPlan, pool: EffectPool) {
         for (index, route) in plan.routes.enumerated() where index < self.plan.routes.count {
             jk_renderer_set_route_gain(renderer, UInt32(index), route.gain)
         }
         jk_renderer_set_master_gain(renderer, plan.masterGain)
         self.plan = plan
+        updateChains(plan, pool: pool)
     }
 
     /// Updates each tap's process list; returns a line per tap that changed, for the event log.
@@ -617,6 +701,9 @@ final class SinkRunner: @unchecked Sendable {
         }
         for tap in taps { parts.append("\(tap.plan.name) \(Self.membership(tap.plan, tap.processes.count))") }
         for capture in plan.captures { parts.append("captures \(capture.name)") }
+        let effectCount = slotChains.compactMap { $0?.stages.compactMap { $0 }.count }.reduce(0, +)
+            + (mixChain?.stages.compactMap { $0 }.count ?? 0)
+        if effectCount > 0 { parts.append("\(effectCount) effect\(effectCount == 1 ? "" : "s")") }
         if let bufferFrames { parts.append("buffer \(bufferFrames) frames") }
         if let latency { parts.append(String(format: "about %.0f ms", latency * 1000)) }
         return parts.joined(separator: ", ")
@@ -626,8 +713,9 @@ final class SinkRunner: @unchecked Sendable {
         var result: [PortKey: Float] = [:]
         var inputPeaks: [Int: Float] = [:]
         for route in plan.routes {
-            let peak = inputPeaks[route.input] ?? jk_renderer_take_input_peak(renderer, UInt32(route.input))
-            inputPeaks[route.input] = peak
+            // The lane: after the source's effects.
+            let peak = inputPeaks[route.lane] ?? jk_renderer_take_input_peak(renderer, UInt32(route.lane))
+            inputPeaks[route.lane] = peak
             let key = PortKey(node: route.source.node, isOutput: true, channel: route.source.channel)
             result[key] = max(result[key] ?? 0, peak)
         }

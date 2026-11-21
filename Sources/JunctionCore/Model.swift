@@ -194,12 +194,15 @@ public struct Node: Codable, Identifiable, Hashable, Sendable {
     public var bufferFrames: Int?
     /// For nodes that receive cables: whether devices running at another sample rate are converted.
     public var rateConversion: RateConversion
+    /// The node's effect chain, in order: on a source, its channels before they are mixed into the device; on the
+    /// virtual device, the mix before it goes into the device; on an output, what it receives (see Effects.swift).
+    public var effects: [Effect]
 
     public static let bufferChoices = [64, 128, 256, 512, 1024]
 
     public init(id: UUID = UUID(), kind: NodeKind, x: Double = 0, y: Double = 0, gainDB: Double = 0, isMuted: Bool = false,
                 mutesOriginal: Bool = false, canvas: UUID? = nil, bufferFrames: Int? = nil,
-                rateConversion: RateConversion = .automatic) {
+                rateConversion: RateConversion = .automatic, effects: [Effect] = []) {
         self.id = id
         self.kind = kind
         self.x = x
@@ -210,9 +213,10 @@ public struct Node: Codable, Identifiable, Hashable, Sendable {
         self.canvas = canvas
         self.bufferFrames = bufferFrames
         self.rateConversion = rateConversion
+        self.effects = effects
     }
 
-    /// Files before schema 4 have no `rateConversion`; `Graph.upgrade` decides what it becomes.
+    /// Files before schema 4 have no `rateConversion` or `effects`; `Graph.upgrade` decides what they become.
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decode(UUID.self, forKey: .id)
@@ -225,6 +229,7 @@ public struct Node: Codable, Identifiable, Hashable, Sendable {
         canvas = try values.decodeIfPresent(UUID.self, forKey: .canvas)
         bufferFrames = try values.decodeIfPresent(Int.self, forKey: .bufferFrames)
         rateConversion = try values.decodeIfPresent(RateConversion.self, forKey: .rateConversion) ?? .automatic
+        effects = try values.decodeIfPresent([Effect].self, forKey: .effects) ?? []
     }
 }
 
@@ -277,7 +282,8 @@ public struct Graph: Codable, Equatable, Sendable {
     /// (`Node.rateConversion`), and virtual devices have a direction, channel names, an icon, a hidden switch and a
     /// volume and mute per side, and the graph keeps named scenes (`scenes`; absent in older files, which means none).
     /// Schema 4 also has the "<app> through <device>" source (`NodeKind.appThroughDevice`), which older files can't
-    /// contain, so they need no conversion for it.
+    /// contain, so they need no conversion for it, and effect chains on nodes (`Node.effects`: each effect's component
+    /// codes, bypass, parameters and Audio Unit state; absent in older files, which means none).
     public static let currentSchema = 4
     public var schema = Graph.currentSchema
     public var virtualDevices: [VirtualDevice] = []
@@ -346,6 +352,7 @@ public struct Graph: Codable, Equatable, Sendable {
         if schema < 4 {
             convertRates()
             convertDevices()
+            convertEffects()
             scenes = []
         }
         schema = Graph.currentSchema
@@ -407,6 +414,12 @@ public struct Graph: Codable, Equatable, Sendable {
             virtualDevices[index] = VirtualDevice(id: device.id, name: device.name, channels: device.channels,
                                                   sampleRate: device.sampleRate, isEnabled: device.isEnabled)
         }
+    }
+
+    /// Schema 3 and older had no effects: every node starts with an empty chain (a file half written by a development
+    /// build loses what it had, as with its scenes).
+    mutating func convertEffects() {
+        for index in nodes.indices { nodes[index].effects = [] }
     }
 
     /// Keeps the canvases consistent: every virtual device has exactly one device node on its own canvas; nodes on no

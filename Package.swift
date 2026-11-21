@@ -17,7 +17,8 @@ let package = Package(
             name: "JunctionKernel",
             path: "Sources/JunctionKernel",
             publicHeadersPath: "include",
-            cSettings: [.unsafeFlags(["-O3"])]
+            cSettings: [.unsafeFlags(["-O3"])],
+            linkerSettings: [.linkedFramework("AudioToolbox")]  // effect chains render Audio Units
         ),
         .target(
             name: "JunctionCore",

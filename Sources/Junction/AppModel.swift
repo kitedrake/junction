@@ -114,6 +114,8 @@ final class AppModel {
     @ObservationIgnored private var restartTask: Task<Void, Never>?
     @ObservationIgnored private var lastCoreAudioRestart: Date?
     @ObservationIgnored private var saveTask: Task<Void, Never>?
+    /// The parameters each Audio Unit effect had when its state was last read (see `refreshEffectStates`).
+    @ObservationIgnored private var capturedParameters: [UUID: [String: Double]] = [:]
     @ObservationIgnored private var refreshPending = false
     @ObservationIgnored private var timers: [Timer] = []
     @ObservationIgnored private var started = false
@@ -353,11 +355,31 @@ final class AppModel {
 
     private func saveNow() {
         guard !isDemo, !isUninstalled else { return }
+        refreshEffectStates()
         do {
             try store.save(graph)
         } catch {
             alert = "Couldn't save the routing setup: \(error.localizedDescription)"
         }
+    }
+
+    /// Reads the whole state of Audio Unit effects whose parameters changed since it was last read (a unit is made
+    /// here, not rendered), so the file keeps it. Not an undo step: the state follows the parameters.
+    private func refreshEffectStates() {
+        var updated = graph
+        var changed = false
+        for node in updated.nodes.indices {
+            for index in updated.nodes[node].effects.indices {
+                let effect = updated.nodes[node].effects[index]
+                guard effect.kind?.isBuiltIn == false,
+                      effect.state == nil || capturedParameters[effect.id] != effect.parameters else { continue }
+                capturedParameters[effect.id] = effect.parameters
+                guard let state = EffectUnit.capturedState(effect), state != effect.state else { continue }
+                updated.nodes[node].effects[index].state = state
+                changed = true
+            }
+        }
+        if changed { graph = updated }
     }
 
     private func replan(force: Bool = false) {
@@ -1119,6 +1141,57 @@ final class AppModel {
             guard let index = graph.nodes.firstIndex(where: { $0.id == id }) else { return }
             change(&graph.nodes[index])
         }
+    }
+
+    // MARK: Effects
+
+    func addEffect(_ kind: EffectKind, to node: UUID) {
+        updateNode(node, "Add \(kind.title)") { $0.effects.append(Effect(kind)) }
+        endEditing()
+    }
+
+    func removeEffect(_ effect: UUID, from node: UUID) {
+        let title = self.node(node)?.effects.first { $0.id == effect }?.kind?.title ?? "Effect"
+        updateNode(node, "Remove \(title)") { $0.effects.removeAll { $0.id == effect } }
+        endEditing()
+    }
+
+    /// Moves an effect earlier (-1) or later (+1) in its chain.
+    func moveEffect(_ effect: UUID, in node: UUID, by offset: Int) {
+        updateNode(node, "Move Effect") { node in
+            guard let index = node.effects.firstIndex(where: { $0.id == effect }) else { return }
+            let target = index + offset
+            guard node.effects.indices.contains(target) else { return }
+            node.effects.swapAt(index, target)
+        }
+        endEditing()
+    }
+
+    func setEffectBypass(_ effect: UUID, in node: UUID, _ bypass: Bool) {
+        updateNode(node, bypass ? "Bypass Effect" : "Turn On Effect") { node in
+            guard let index = node.effects.firstIndex(where: { $0.id == effect }) else { return }
+            node.effects[index].bypass = bypass
+        }
+        endEditing()
+    }
+
+    /// A parameter while its slider moves (one undo step per drag, see `endEditing`).
+    func setEffectParameter(_ effect: UUID, in node: UUID, _ parameter: EffectParameter, _ value: Double) {
+        updateNode(node, "Change \(parameter.name)") { node in
+            guard let index = node.effects.firstIndex(where: { $0.id == effect }) else { return }
+            node.effects[index].set(parameter, value)
+        }
+    }
+
+    /// The delay a node's effects add where it runs (from the routing's status), or nil when it isn't running.
+    func effectLatency(_ node: UUID) -> TimeInterval? {
+        let values = statuses.values.compactMap { $0.effectLatencies?[node] }
+        return values.isEmpty ? nil : values.max()
+    }
+
+    /// Why an effect is left out of its chain, if it is.
+    func effectProblem(_ effect: UUID) -> String? {
+        statuses.values.lazy.compactMap { $0.effectProblems?[effect] }.first
     }
 
     func updateCable(_ id: UUID, _ name: String = "Change Level", _ change: (inout Cable) -> Void) {

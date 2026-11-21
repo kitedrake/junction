@@ -195,10 +195,12 @@ final class PlannerTests: XCTestCase {
         object["nodes"] = (object["nodes"] as? [[String: Any]])?.map { node in
             var node = node
             node["rateConversion"] = nil
+            node["effects"] = nil
             return node
         }
         let old = try JSONSerialization.data(withJSONObject: object)
         XCTAssertFalse(String(decoding: old, as: UTF8.self).contains("rateConversion"))
+        XCTAssertFalse(String(decoding: old, as: UTF8.self).contains("effects"))
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("junction-schema4-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: folder) }
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -220,6 +222,12 @@ final class PlannerTests: XCTestCase {
         XCTAssertFalse(loadedDevice.outputMuted || loadedDevice.inputMuted)
         XCTAssertEqual(loadedDevice.name, device.name)
         XCTAssertEqual(loaded.scenes, [], "schema 3 files have no scenes")
+        XCTAssertTrue(loaded.nodes.allSatisfy(\.effects.isEmpty), "schema 3 files have no effects")
+        // A schema 3 file half written by a development build that had effects loses them, like its scenes.
+        var halfWritten = graph
+        halfWritten.nodes[sinkIndex].effects = [Effect(.limiter)]
+        halfWritten.upgrade()
+        XCTAssertEqual(halfWritten.nodes[sinkIndex].effects, [])
 
         // Schema 4 keeps the choice.
         var changed = loaded
@@ -239,11 +247,26 @@ final class PlannerTests: XCTestCase {
         dressed.virtualDevices[0].isHidden = true
         dressed.virtualDevices[0].outputVolume = 0.25
         dressed.virtualDevices[0].inputMuted = true
+        // …and effects: component codes, bypass, parameters and an Audio Unit's state.
+        var limiter = Effect(.limiter)
+        limiter.bypass = true
+        limiter.parameters["2"] = -6
+        limiter.state = Data([0x62, 0x70, 0x6C, 0x69, 0x73, 0x74])
+        var gate = Effect(.gate)
+        gate.set(EffectKind.gate.parameters[0], -50)
+        dressed.nodes[sinkIndex].effects = [gate, limiter]
         // …and scenes.
         dressed.scenes = [RoutingScene(name: "Dressed", capturing: dressed)]
         try store.save(dressed)
         XCTAssertEqual(store.load(), dressed)
-        XCTAssertTrue(try String(contentsOf: store.graphURL, encoding: .utf8).contains("\"name\" : \"Dressed\""))
+        let saved = try String(contentsOf: store.graphURL, encoding: .utf8)
+        XCTAssertTrue(saved.contains("\"name\" : \"Dressed\""))
+        for text in ["\"type\" : \"aufx\"", "\"subtype\" : \"lmtr\"", "\"manufacturer\" : \"appl\"", "\"bypass\" : true",
+                     "\"state\" : \"YnBsaXN0\""] {
+            XCTAssertTrue(saved.contains(text), "saved with \(text)")
+        }
+        XCTAssertEqual(store.load()?.nodes[sinkIndex].effects.map(\.kind), [.gate, .limiter])
+        XCTAssertEqual(store.load()?.scenes.first?.nodes[sinkIndex].effects, [gate, limiter], "scenes keep effects")
     }
 
     func testDeviceOptionsInTheDriverConfiguration() throws {

@@ -260,6 +260,35 @@ What the canvas shows:
   the node to read it in the inspector. If something fails to start, Junction tries again by itself, and the node
   says why and when.
 
+### Effects
+
+Every item has an **Effects** box in its inspector. Click **Add Effect** and pick one:
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="screenshots/effects-light.png">
+  <img src="screenshots/effects-dark.png" alt="A microphone with a high-pass filter and a noise gate in the inspector">
+</picture>
+
+- **Built in**: **Gain** (a level), **Pan** (moves a stereo source left or right), **Mono** (both sides get the same
+  sound) and **Noise Gate** (silences everything below its threshold, such as a quiet hum or keyboard noise between
+  words).
+- **Audio Units** from macOS: **High-Pass Filter** (removes rumble below its cutoff), **Equalizer** (low, mid and high
+  bands), **Compressor** (evens out loud and quiet parts) and **Limiter** (stops peaks going over the top).
+
+Where the effects work depends on the item:
+
+- On a **source**, they process it before it is mixed into the device: a high-pass filter and a noise gate on a
+  microphone, for example.
+- On the **virtual device**, they process the mix before it goes into the device, so the apps recording it hear them:
+  a limiter on a stream mix, for example. They don't change what apps play into the device directly.
+- On an **output**, they process what it receives.
+
+Effects run from top to bottom. Each one has a switch to turn it off for a moment (bypass), arrows to move it up or
+down, and a remove button; double-click a slider to put it back to its default. The meters under the list show the
+levels after the effects (the meters on the canvas do too). Some effects, such as the limiter, look ahead and add a
+little delay: the box says how much, and the delay under **Delay** includes it. Effects are saved with the setup and
+with scenes, and they keep working when Junction routes in the background.
+
 ### Delay and buffer size
 
 A selected cable shows roughly how long sound takes to travel through it. Select the virtual device or an output to

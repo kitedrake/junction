@@ -23,8 +23,14 @@ enum Demo {
                                     sampleRate: 44100)
         // Stream Mix: system audio without Discord, plus the mic, monitored on headphones.
         let system = Node(kind: .systemAudio(excluding: [discord]), x: 40, y: 50, canvas: stream.id)
-        let mic = Node(kind: .defaultInput, x: 40, y: 250, canvas: stream.id)
-        let streamNode = Node(kind: .virtualDevice(stream.id), x: 330, y: 130, canvas: stream.id)
+        // The mic cleaned up before the mix (a high-pass and a gate, the gate set a little lower), and a limiter on
+        // the whole stream.
+        var highPass = Effect(.highPass), gate = Effect(.gate)
+        highPass.set(EffectKind.highPass.parameters[0], 100)
+        gate.set(EffectKind.gate.parameters[0], -48)
+        let mic = Node(kind: .defaultInput, x: 40, y: 250, canvas: stream.id, effects: [highPass, gate])
+        let streamNode = Node(kind: .virtualDevice(stream.id), x: 330, y: 130, canvas: stream.id,
+                              effects: [Effect(.limiter)])
         let phones = Node(kind: .device(headphones.ref), x: 620, y: 130, canvas: stream.id)
         let musicThroughDeck = Node(kind: .appThroughDevice(music, device: deck.id), x: 40, y: 420, canvas: stream.id)
         let deckNode = Node(kind: .virtualDevice(deck.id), x: 330, y: 100, canvas: deck.id)
@@ -79,6 +85,8 @@ enum Demo {
             driver: .installed(version: DriverClient.bundledVersion ?? "0.2.0"),
             deviceClients: [DeviceClient(pid: 4242, bundleID: music.bundleID, deviceUID: deck.uid, app: music)])
         let running = SinkStatus(state: .running, latency: 0.0117, bufferFrames: 512)
+        var streaming = running
+        streaming.effectLatencies = [mic.id: 0, streamNode.id: 0]
         var meters: [PortKey: Float] = [:]
         func meter(_ node: Node, _ output: Bool, _ values: [Float]) {
             for (channel, value) in values.enumerated() { meters[PortKey(node: node.id, isOutput: output, channel: channel)] = value }
@@ -92,7 +100,7 @@ enum Demo {
         meter(streamNode, true, [0.5, 0.45])
         meter(recordingNode, false, [0.18, 0.18, 0.3, 0.3])
         meter(phones, false, [0.12, 0.11])
-        model.setDemoState(inventory: inventory, statuses: [streamNode.id: running, recordingNode.id: running, phones.id: running],
+        model.setDemoState(inventory: inventory, statuses: [streamNode.id: streaming, recordingNode.id: running, phones.id: running],
                            meters: meters)
         model.selection = .node(system.id)
         // Settings as a released build shows them before the driver installer is allowed: crash reports on.
@@ -148,6 +156,11 @@ enum Snapshot {
 
             if let stream = model.canvas.flatMap(model.graph.deviceNode) { model.selection = .node(stream.id) }
             await both("device")
+            // The mic's effect chain: a high-pass filter and a noise gate before the mix, meters after them.
+            if let mic = model.canvasNodes.first(where: { !$0.effects.isEmpty && $0.kind == .defaultInput }) {
+                model.selection = .node(mic.id)
+            }
+            await both("effects")
             if let cable = model.canvasCables.first(where: { $0.gainDB < 0 }) { model.selection = .cable(cable.id) }
             await both("cable")
             // Several nodes picked with a drag box: the selection inspector.

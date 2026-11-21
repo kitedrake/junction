@@ -135,6 +135,7 @@ public enum Editing {
             copy.canvas = canvas
             copy.x = max(0, node.x + offset)
             copy.y = max(0, node.y + offset)
+            for index in copy.effects.indices { copy.effects[index].id = UUID() }  // its own units, not the original's
             ids[node.id] = copy.id
             graph.nodes.append(copy)
         }

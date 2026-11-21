@@ -21,6 +21,11 @@ without your voice chat, step by step.
   it on another channel to move it, or on empty canvas (it turns red) to remove it. Clicking a cable and pressing
   Delete works too, and right-clicking the device offers **Disconnect** for each node wired to it. Meters show levels;
   cables glow with the audio they carry; dashed cables carry nothing right now (an end is missing or routing is off).
+- **Effects**: every node has an effect chain in its inspector. On a source it processes that source before the mix;
+  on the virtual device, the mix before it goes into the device (what apps recording it hear); on an output, what it
+  receives. Gain, pan, mono and a noise gate are built in; a high-pass filter, a three-band equalizer, a compressor
+  and a limiter are Apple's Audio Units. Each effect can be bypassed and moved up or down; the inspector shows the
+  levels after the chain and the delay it adds (also counted in the destination's delay).
 - **Navigation**: zoom about the pointer with a pinch or ⌘-scroll, or with ⌘+, ⌘−, ⌘0 (actual size) and ⌥⌘0 (fit);
   scroll or drag empty canvas to move around. A minimap shows the whole canvas and where you are; click it to go
   there.
@@ -196,7 +201,9 @@ Three parts (five with the helpers):
    stays out of the aggregate when the sink's conversion is Automatic and is listed as converted instead; the set of
    converted devices is part of the sink's structure, so a change rebuilds it. It drops cables that would feed a
    virtual device back into itself (for example via Default Output set to that device), and notes missing devices
-   and, with conversion off, sample-rate mismatches.
+   and, with conversion off, sample-rate mismatches. Each source gets a slot of lanes in its sink, one per channel its
+   cables use, after all the input channels; routes read the lanes. A source's effects run on its lanes, the sink
+   node's effects (the virtual device's, or an output's) after the mix. Effects aren't part of a sink's structure.
 3. **Router** (`Router.swift` + the C kernel in `Sources/JunctionKernel`): builds the taps and aggregate devices and
    runs one IOProc per sink. The IOProc is plain C (no Swift reference counting, locks or allocation on the audio
    thread): it copies aggregate input channels to sink output channels with gains that glide over one buffer, and
@@ -208,6 +215,19 @@ Three parts (five with the helpers):
    converter's buffering and filter delay (32 input frames) count in the sink's delay estimate. Gain and mute changes
    don't rebuild anything; adding or removing cables rebuilds only the sinks they touch. A rebuilt sink is built next to the running one, then the two cross-fade over 25 ms, so edits don't
    leave a gap or click. When apps start or quit, taps are updated in place.
+   **Effects** (`Effects.swift`, `JunctionEffects.c`): a chain is an ordered list of stages for a fixed number of
+   non-interleaved channels. Gain, pan (a balance), mono and a noise gate are built into the kernel; the high-pass
+   filter (AUHighPass), equalizer (AUNBandEQ, three bands), compressor (AUDynamicsProcessor) and limiter
+   (AUPeakLimiter) are Apple's Audio Units, created and initialised on the router's queue (non-interleaved float at
+   the sink's rate, `MaximumFramesPerSlice` 4096, input callback and buffers made there) and rendered by the kernel
+   with `AudioUnitRender`. A slot without effects passes its channels through without a copy. Bypass and the built-in
+   effects' parameters are atomics; Audio Unit parameters go through `AudioUnitSetParameter`. Any other change builds
+   a new chain and swaps it in with one atomic pointer exchange; the old chain is freed once every IO cycle that
+   began before the swap has finished (counted by the IOProc), or once the IOProc is gone. Units live in a pool keyed
+   by effect (before or after the mix), so a rebuilt sink and a new chain reuse them with their state; a unit two
+   sinks reach during a cross-fade is rendered by one at a time (a try-lock; the other passes the audio through).
+   Each chain's `kAudioUnitProperty_Latency` is added to the sink's delay estimate and shown on its node. Meters on
+   sources and sinks are taken after their effects. Effects run wherever routing runs (Junction Helper or the app).
 4. **Junction Helper** (`Sources/JunctionHelper`, `RoutingService.swift`, `RoutingClient.swift`, `RoutingXPC.swift`):
    in builds made for it, the planner and router run in a UI-element app (no Dock icon) at
    `Junction.app/Contents/Library/LoginItems/JunctionHelper.app`, which Junction registers with
@@ -236,11 +256,14 @@ Three parts (five with the helpers):
 
 The graph is saved to `~/Library/Application Support/Junction/graph.json` (schema 4: nodes belong to a device's
 canvas, receiving nodes can set a buffer size and sample-rate conversion, named scenes are kept in `scenes`, and a
-source can be an app through a virtual device, `appThroughDevice`, which older files can't contain). A schema 1 file from the
+source can be an app through a virtual device, `appThroughDevice`, which older files can't contain; nodes keep their
+effect chains in `effects`: each effect's four-character `type`, `subtype` and `manufacturer`, `bypass`, the
+`parameters` set in Junction, and an Audio Unit's `state`, its `kAudioUnitProperty_ClassInfo` as a base64 binary
+property list, restored when its unit is made). A schema 1 file from the
 shared-canvas versions is converted on load: each node moves to the canvas of the device it was wired to (unwired
 ones to the first device), and cables between devices are dropped. Schema 2 files load with automatic buffer sizes;
-schema 2 and 3 files get sample-rate conversion set to Automatic and start with no scenes (a schema 4 file without
-`scenes` has none either); parts of a scene naming a deleted device are dropped on load.
+schema 2 and 3 files get sample-rate conversion set to Automatic and start with no scenes and no effects (a schema 4
+file without `scenes` or `effects` has none either); parts of a scene naming a deleted device are dropped on load.
 
 ## Development
 
@@ -256,7 +279,10 @@ JUNCTION_SNAPSHOT=/tmp/shots build/Junction.app/Contents/MacOS/Junction   # demo
 
 The kernel stress test (`Tests/KernelHarness/stress.c`) runs the sample-rate converter and the renderer under
 address and undefined-behaviour sanitizers with random buffer sizes, stalls on either side and every pair of common
-rates. The driver harness (`Tests/DriverHarness/harness.c`) loads the driver into a test process with a stand-in Core Audio
+rates, then swaps effect chains (random built-in effects, before and after the mix) from one thread while another
+renders through them, so a chain freed too early shows up as a use-after-free. The engine tests drive chains with a
+fake effect (order, bypass, swapping while rendering, no allocation on the rendering thread, counted through
+libmalloc's logging hook) and render Apple's four units, which needs no permission. The driver harness (`Tests/DriverHarness/harness.c`) loads the driver into a test process with a stand-in Core Audio
 host and checks the device list, properties, configuration changes, saved state across a simulated restart (also a
 list saved by driver 0.1), bit-exact loopback, the volume and mute controls with their ramp, directions and their
 hidden companions, channel names, icons, hidden devices, property-change notifications, the shared clock (same
@@ -348,6 +374,11 @@ system-audio permissions and **Install Driver…** with the first one.
 - Safari and other WebKit apps play through one shared process ("Safari & Web Views"), so they can only be captured
   or left out together.
 - Cross-fading a rebuilt sink (when cables are added or removed) hasn't been tried with real audio yet.
+- Effects haven't been heard through real devices yet; Apple's units are rendered only in tests. Effects on the
+  virtual device process what Junction mixes into it, not what apps play into it directly. A chain needs IO buffers
+  of at most 4096 frames (longer ones pass the audio through unprocessed). While a rebuilt sink cross-fades with the
+  one it replaces, an Audio Unit both reach renders for one of them at a time; the other passes that buffer through.
+  Pan is a balance between pairs of channels and does nothing on a mono source.
 - Routing keeps running from the menu bar when the window is closed. It stops when Junction quits, unless it runs in
   Junction Helper with **Keep routing after quitting Junction** on.
 - Junction Helper hasn't been tried on a real Mac yet: registering it with `SMAppService`, launchd starting it at

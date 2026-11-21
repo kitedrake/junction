@@ -7,7 +7,9 @@ import Foundation
 // source device at another nominal sample rate stays out of the aggregate when the sink's conversion is Automatic:
 // it runs on its own IOProc and the kernel converts it to the sink's rate. An "<app> through <device>" source reads
 // the driver's per-app ring for that app (see Capture.swift) and is converted the same way, after the converted
-// devices.
+// devices. Each source gets a slot of lanes (one per channel its cables use) after all of those channels: routes read
+// the lanes, which carry the source's channels through its effect chain (or untouched while it has none), and the
+// sink's own chain runs after the mix. Effects aren't part of a sink's structure: changing them swaps a chain.
 
 public struct RoutingPlan: Equatable, Sendable {
     public var sinks: [SinkPlan] = []
@@ -45,6 +47,16 @@ public struct SinkPlan: Equatable, Sendable, Identifiable {
     public var converted: [SubDevice] = []
     /// Apps captured through a virtual device: their channels follow the converted devices', one after another.
     public var captures: [CapturePlan] = []
+    /// One per source node, in the order of its first cable: the lanes routes read (from `laneBase` on), each carrying
+    /// one input channel, and the effects that process them before the mix.
+    public var slots: [EffectSlot] = []
+    /// The sink node's effects, after the mix.
+    public var effects: [Effect] = []
+
+    /// The first lane: after the aggregate's inputs, the converted devices' and the captures' channels.
+    public var laneBase: Int {
+        inputChannels + converted.reduce(0) { $0 + $1.inputChannels } + captures.reduce(0) { $0 + $1.channels }
+    }
 
     public var id: UUID { sinkNode }
 
@@ -60,8 +72,17 @@ public struct SinkPlan: Equatable, Sendable, Identifiable {
         let tapKeys = taps.map { "\($0.node.uuidString):\($0.mode):\($0.mutesOriginal)" }.joined(separator: ",")
         let routeKeys = routes.map { "\($0.input)>\($0.output)" }.joined(separator: ",")
         let captureKeys = captures.map(\.key).joined(separator: ",")
-        return "\(sinkUID)|\(key(subDevices))|\(tapKeys)|\(routeKeys)|\(bufferFrames ?? 0)|converted:\(key(converted))|captures:\(captureKeys)"
+        let slotKeys = slots.map { $0.inputs.map(String.init).joined(separator: "+") }.joined(separator: ",")
+        return "\(sinkUID)|\(key(subDevices))|\(tapKeys)|\(routeKeys)|\(bufferFrames ?? 0)|converted:\(key(converted))|captures:\(captureKeys)|slots:\(slotKeys)"
     }
+}
+
+/// A source's lanes in a sink and the effects on them.
+public struct EffectSlot: Equatable, Sendable {
+    public var node: UUID
+    /// The input channel each lane carries (the source's channels its cables use, in order).
+    public var inputs: [Int]
+    public var effects: [Effect]
 }
 
 /// One app's audio read from the driver's per-app rings of one virtual device.
@@ -157,6 +178,8 @@ public struct Route: Equatable, Sendable {
     /// Channel index in the sink's output.
     public var output: Int
     public var gain: Float
+    /// The lane the renderer reads: `input` after its source's effects (see `SinkPlan.slots`).
+    public var lane: Int = 0
 }
 
 public enum Planner {
@@ -321,7 +344,7 @@ public enum Planner {
                 captureOffsets.append(total)
                 total += capture.channels
             }
-            let routes = pending.map { item -> Route in
+            var routes = pending.map { item -> Route in
                 let input = switch item.origin {
                 case .device(let uid): offsets[uid]! + item.cable.from.channel
                 case .tap(let index): tapBase + index * 2 + item.cable.from.channel
@@ -331,13 +354,34 @@ public enum Planner {
                 return Route(cable: item.cable.id, source: item.cable.from, input: input, output: item.cable.to.channel, gain: item.gain)
             }
             guard !routes.isEmpty else { continue }
+            // A slot per source node: a lane per channel its cables use. The virtual device's own effects run in its
+            // own sink, after the mix, so as a source into outputs it has none here.
+            var slots: [EffectSlot] = []
+            var laneOf: [PortRef: Int] = [:]
+            var lane = total
+            var sourceNodes: [UUID] = []
+            for route in routes where !sourceNodes.contains(route.source.node) { sourceNodes.append(route.source.node) }
+            for node in sourceNodes {
+                let used = routes.filter { $0.source.node == node }
+                let channels = Set(used.map(\.source.channel)).sorted()
+                var inputs: [Int] = []
+                for channel in channels {
+                    laneOf[PortRef(node: node, channel: channel)] = lane
+                    inputs.append(used.first { $0.source.channel == channel }!.input)
+                    lane += 1
+                }
+                let source = graph.node(node)
+                let isDevice = if case .virtualDevice = source?.kind { true } else { false }
+                slots.append(EffectSlot(node: node, inputs: inputs, effects: isDevice ? [] : source?.effects ?? []))
+            }
+            for index in routes.indices { routes[index].lane = laneOf[routes[index].source]! }
             plan.sinks.append(SinkPlan(
                 sinkNode: sink.id, name: info.title(sink), sinkUID: sinkUID, sinkOutputChannels: sinkDevice.outputChannels,
                 subDevices: subDevices, taps: taps, routes: routes,
                 masterGain: sink.isMuted ? 0 : Gain.linear(sink.gainDB), bufferFrames: sink.bufferFrames,
                 inputChannels: inputChannels,
                 outputChannels: subDevices.reduce(0) { $0 + $1.outputChannels }, converted: converted,
-                captures: captures))
+                captures: captures, slots: slots, effects: sink.effects))
         }
         return plan
     }

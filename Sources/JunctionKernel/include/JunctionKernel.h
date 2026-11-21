@@ -4,10 +4,13 @@
 // at another sample rate stays outside the aggregate: its own IOProc feeds a converter (a lock-free ring and a
 // resampler), and the renderer reads the converted audio after the aggregate's channels. Per-app capture works the
 // same way: the renderer's IOProc pumps what an app played into one of Junction's devices from the driver's shared
-// ring (JunctionCaptureRing.h) into a converter of its own.
+// ring (JunctionCaptureRing.h) into a converter of its own. Effect chains (built-in effects and Audio Units) process
+// each source's channels before the mix (on lanes of their own) and the sink's channels after it; a chain is swapped
+// in with one atomic pointer store and freed once the audio thread can no longer be using it.
 #ifndef JUNCTION_KERNEL_H
 #define JUNCTION_KERNEL_H
 
+#include <AudioToolbox/AudioUnit.h>
 #include <CoreAudio/CoreAudio.h>
 #include <stdint.h>
 
@@ -104,6 +107,73 @@ void jk_capture_pump(JKCapture *_Nonnull capture);
 uint64_t jk_capture_frame_count(const JKCapture *_Nonnull capture);
 uint64_t jk_capture_overrun_count(const JKCapture *_Nonnull capture);
 
+// MARK: Effects
+
+/// An ordered effect chain for a fixed number of channels: built and given its stages off the audio thread, then
+/// handed to a renderer (`jk_renderer_swap_chain`), which processes it in place every IO cycle. Bypass and the
+/// built-in effects' parameters change through atomics while it runs; anything else means building a new chain and
+/// swapping it in.
+typedef struct JKChain JKChain;
+/// An Audio Unit prepared for a chain: its input callback, buffers and time stamps (the unit itself isn't owned).
+typedef struct JKUnit JKUnit;
+
+/// Effects built into the kernel. Parameters:
+/// - gain: 0 = linear gain (glides over one buffer).
+/// - pan: 0 = position, -1 (left) … 1 (right); even channels count as left, odd ones as right (a balance).
+/// - mono: none; every channel gets the average of all of them.
+/// - gate: 0 = threshold (linear peak level), 1 = release in seconds. Opens in 1 ms and holds for 50 ms.
+typedef enum {
+    JK_EFFECT_CUSTOM = 0,
+    JK_EFFECT_GAIN = 1,
+    JK_EFFECT_PAN = 2,
+    JK_EFFECT_MONO = 3,
+    JK_EFFECT_GATE = 4,
+} JKEffectKind;
+
+#define JK_EFFECT_MAX_PARAMETERS 4
+/// Which chain `jk_renderer_swap_chain` replaces: a source slot's (0…), or the one after the mix.
+#define JK_OUTPUT_CHAIN UINT32_MAX
+
+/// Processes `frames` frames (at most JK_MAX_FRAMES) of `channelCount` non-interleaved channels in place. Runs on the
+/// audio thread: no locks, no allocation.
+typedef void (*JKEffectProcess)(void *_Nullable context, float *_Nonnull const *_Nonnull channels, uint32_t channelCount,
+                                uint32_t frames);
+
+/// Creates an empty chain for `channels` channels at `sampleRate`, with room for `capacity` stages.
+JKChain *_Nullable jk_chain_create(uint32_t channels, double sampleRate, uint32_t capacity);
+/// Frees the chain (not the units in it). Only once no renderer can still be processing it.
+void jk_chain_destroy(JKChain *_Nonnull chain);
+uint32_t jk_chain_channels(const JKChain *_Nonnull chain);
+uint32_t jk_chain_count(const JKChain *_Nonnull chain);
+/// Appends a built-in effect, a callback or a unit; returns its stage index, or -1 when the chain is full or the kind
+/// unknown. Only before the chain is handed to a renderer.
+int jk_chain_add(JKChain *_Nonnull chain, JKEffectKind kind);
+int jk_chain_add_custom(JKChain *_Nonnull chain, JKEffectProcess _Nonnull process, void *_Nullable context);
+int jk_chain_add_unit(JKChain *_Nonnull chain, JKUnit *_Nonnull unit);
+/// A bypassed stage leaves the audio as it is. Any thread.
+void jk_chain_set_bypass(JKChain *_Nonnull chain, uint32_t stage, int bypass);
+int jk_chain_bypassed(const JKChain *_Nonnull chain, uint32_t stage);
+/// A built-in effect's parameter (see JKEffectKind). Any thread.
+void jk_chain_set_parameter(JKChain *_Nonnull chain, uint32_t stage, uint32_t parameter, float value);
+float jk_chain_parameter(const JKChain *_Nonnull chain, uint32_t stage, uint32_t parameter);
+/// Runs every stage that isn't bypassed, in order, on `channelCount` channels (at most the chain's). Audio thread.
+void jk_chain_process(JKChain *_Nonnull chain, float *_Nonnull const *_Nonnull channels, uint32_t channelCount,
+                      uint32_t frames);
+
+/// Prepares `unit` (an initialised effect whose input and output stream formats are `channels` non-interleaved float
+/// channels, and whose MaximumFramesPerSlice is at least JK_MAX_FRAMES) for chains: sets its input callback and makes
+/// its buffers. Off the audio thread. Returns NULL if the callback can't be set or memory runs out.
+JKUnit *_Nullable jk_unit_create(AudioUnit _Nonnull unit, uint32_t channels);
+/// Removes the input callback and frees the buffers (the unit stays). Only once no chain can still render it.
+void jk_unit_destroy(JKUnit *_Nonnull unit);
+/// Renders `frames` frames of `channels` through the unit (AudioUnitRender) in place. A unit another thread is
+/// rendering at that moment (two sinks overlap while one replaces the other), a channel count other than the unit's,
+/// or a render error leaves the audio as it is. Audio thread; also the JKEffectProcess of a unit stage.
+void jk_unit_process(void *_Nullable unit, float *_Nonnull const *_Nonnull channels, uint32_t channelCount,
+                     uint32_t frames);
+/// Renders that failed (the audio passed through unchanged).
+uint64_t jk_unit_error_count(const JKUnit *_Nonnull unit);
+
 // MARK: Renderer
 
 /// Creates a renderer. `inputChannels` is how many channels the aggregate's input buffers should hold in total,
@@ -122,6 +192,28 @@ JKRenderer *_Nullable jk_renderer_create_converting(uint32_t inputChannels, uint
                                                     const float *_Nullable gains,
                                                     JKConverter *_Nonnull const *_Nullable converters,
                                                     uint32_t converterCount);
+
+/// Like `jk_renderer_create_converting`, with effect slots for sources: slot s has `slotChannels[s]` lanes, and lane
+/// l (counting through all slots) carries input channel `laneSources[l]` (the aggregate's and the converters' channels
+/// as above). Lanes are numbered after those channels, so route sources from there on read lanes. A lane passes its
+/// channel through untouched while its slot has no chain (or an empty one); otherwise the slot's chain processes a
+/// copy of its channels before the mix. Input peaks are taken on the lanes (after the effects) when there are any.
+JKRenderer *_Nullable jk_renderer_create_slots(uint32_t inputChannels, uint32_t outputChannels, uint32_t routeCount,
+                                               const uint32_t *_Nullable sources, const uint32_t *_Nullable destinations,
+                                               const float *_Nullable gains,
+                                               JKConverter *_Nonnull const *_Nullable converters, uint32_t converterCount,
+                                               uint32_t slotCount, const uint32_t *_Nullable slotChannels,
+                                               const uint32_t *_Nullable laneSources);
+
+/// Puts `chain` (or NULL for none) in a source slot, or after the mix with JK_OUTPUT_CHAIN, with one atomic swap, and
+/// returns the chain it replaces (NULL if none). The audio thread may still be processing that one: free it once
+/// `jk_renderer_is_done_with(renderer, *ticket)` says so, or once the IOProc is gone. The chain after the mix runs
+/// after the routes' gains and before the cross-fade, on the sink's channels. Any thread but the audio thread.
+JKChain *_Nullable jk_renderer_swap_chain(JKRenderer *_Nonnull renderer, uint32_t slot, JKChain *_Nullable chain,
+                                          uint64_t *_Nonnull ticket);
+/// Whether every IO cycle that could have seen the chain swapped out with `ticket` has finished.
+int jk_renderer_is_done_with(const JKRenderer *_Nonnull renderer, uint64_t ticket);
+uint32_t jk_renderer_slot_count(const JKRenderer *_Nonnull renderer);
 
 /// Has the renderer pump these captures (not owned) at the start of every IO cycle, before it reads the converters
 /// they feed. Only call before the IOProc starts. Returns 0 if memory runs out.

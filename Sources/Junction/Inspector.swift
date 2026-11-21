@@ -127,6 +127,8 @@ private struct NodeInspector: View {
             .padding(6)
         }
 
+        EffectsSection(node: node)
+
         if case .systemAudio(let excluded) = node.kind {
             ExcludedApps(node: node, excluded: excluded)
         }
@@ -404,6 +406,169 @@ private struct SinkTiming: View {
         var text = "About \(formatDelay(latency)) from its sources to here"
         if let frames = status.bufferFrames { text += " (buffer: \(frames) frames)" }
         return text + "."
+    }
+}
+
+/// A node's effect chain: add, reorder, bypass and adjust effects, with the levels after the chain and the delay it
+/// adds.
+private struct EffectsSection: View {
+    @Environment(AppModel.self) private var model
+    let node: Node
+
+    var body: some View {
+        let ports = model.info.ports(node)
+        // Sources are metered on their way out (after their effects); the device and outputs on their way in.
+        let metersOutput = !model.isDeviceNode(node) && ports.inputs == 0
+        let channels = metersOutput ? ports.outputs : ports.inputs
+        GroupBox("Effects") {
+            VStack(alignment: .leading, spacing: 10) {
+                if node.effects.isEmpty {
+                    Text(explanation)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                ForEach(Array(node.effects.enumerated()), id: \.element.id) { index, effect in
+                    if index > 0 { Divider() }
+                    EffectRow(node: node, effect: effect, isFirst: index == 0, isLast: index == node.effects.count - 1)
+                }
+                HStack {
+                    Menu("Add Effect") {
+                        Section("Built in") {
+                            ForEach([EffectKind.gain, .pan, .mono, .gate], id: \.self) { kind in
+                                Button(kind.title, systemImage: kind.symbol) { model.addEffect(kind, to: node.id) }
+                            }
+                        }
+                        Section("Audio Units") {
+                            ForEach([EffectKind.highPass, .equalizer, .dynamics, .limiter], id: \.self) { kind in
+                                Button(kind.title, systemImage: kind.symbol) { model.addEffect(kind, to: node.id) }
+                            }
+                        }
+                    }
+                    .fixedSize()
+                    Spacer()
+                    if !node.effects.isEmpty, let latency = model.effectLatency(node.id) {
+                        Text(latency > 0.0005 ? "Adds \(formatDelay(latency))" : "No added delay")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .help("Included in the delay shown for the destination")
+                    }
+                }
+                if !node.effects.isEmpty, channels > 0 {
+                    HStack(spacing: 6) {
+                        Text("After effects").font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        ForEach(0..<min(channels, 8), id: \.self) { channel in
+                            LevelBar(level: model.level(node.id, output: metersOutput, channel: channel), tint: .green,
+                                     label: "Level after effects, channel \(channel + 1)")
+                        }
+                    }
+                }
+            }
+            .padding(6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var explanation: String {
+        if model.isDeviceNode(node) { return "Effects here process the mix before it goes into the device, so apps recording it hear them." }
+        if model.info.ports(node).inputs > 0 { return "Effects here process what this output receives." }
+        return "Effects here process this source before it is mixed into the device, for example a noise gate on a microphone."
+    }
+}
+
+private struct EffectRow: View {
+    @Environment(AppModel.self) private var model
+    let node: Node
+    let effect: Effect
+    let isFirst: Bool
+    let isLast: Bool
+
+    var body: some View {
+        let kind = effect.kind
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: kind?.symbol ?? "questionmark.square.dashed").frame(width: 18).foregroundStyle(.secondary)
+                Text(kind?.title ?? "Unknown Effect").lineLimit(1)
+                Spacer()
+                Toggle("On", isOn: Binding(get: { !effect.bypass },
+                                           set: { model.setEffectBypass(effect.id, in: node.id, !$0) }))
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .labelsHidden()
+                    .help(effect.bypass ? "Bypassed: turn on" : "On: bypass")
+                Button { model.moveEffect(effect.id, in: node.id, by: -1) } label: { Image(systemName: "chevron.up") }
+                    .disabled(isFirst)
+                    .help("Move earlier in the chain")
+                Button { model.moveEffect(effect.id, in: node.id, by: 1) } label: { Image(systemName: "chevron.down") }
+                    .disabled(isLast)
+                    .help("Move later in the chain")
+                Button { model.removeEffect(effect.id, from: node.id) } label: { Image(systemName: "minus.circle") }
+                    .help("Remove")
+            }
+            .buttonStyle(.borderless)
+            if let problem = model.effectProblem(effect.id) {
+                Label(problem, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let kind, !effect.bypass {
+                ForEach(kind.parameters) { parameter in
+                    EffectSlider(parameter: parameter, value: effect.value(parameter)) { value in
+                        model.setEffectParameter(effect.id, in: node.id, parameter, value)
+                    }
+                }
+            }
+        }
+        .opacity(effect.bypass ? 0.6 : 1)
+    }
+}
+
+/// One effect parameter. Frequencies and times move along a logarithmic scale.
+private struct EffectSlider: View {
+    @Environment(AppModel.self) private var model
+    let parameter: EffectParameter
+    let value: Double
+    let onChange: (Double) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(parameter.name).font(.callout)
+                Spacer()
+                Text(parameter.text(value)).monospacedDigit().foregroundStyle(.secondary).font(.callout)
+            }
+            Slider(value: Binding(get: { position(value) }, set: { onChange(parameterValue(at: $0)) }), in: 0...1,
+                   onEditingChanged: { if !$0 { model.endEditing() } })
+                .controlSize(.small)
+                .onTapGesture(count: 2) { onChange(parameter.defaultValue) }
+                .accessibilityLabel(parameter.name)
+                .accessibilityValue(parameter.text(value))
+                .help("Double-click to reset to \(parameter.text(parameter.defaultValue))")
+        }
+    }
+
+    private func position(_ value: Double) -> Double {
+        let range = parameter.range
+        if parameter.isLogarithmic {
+            return log(value / range.lowerBound) / log(range.upperBound / range.lowerBound)
+        }
+        return (value - range.lowerBound) / (range.upperBound - range.lowerBound)
+    }
+
+    private func parameterValue(at position: Double) -> Double {
+        let range = parameter.range, position = min(max(position, 0), 1)
+        let raw = parameter.isLogarithmic
+            ? range.lowerBound * pow(range.upperBound / range.lowerBound, position)
+            : range.lowerBound + position * (range.upperBound - range.lowerBound)
+        // Round to what the label shows.
+        switch parameter.unit {
+        case .decibels: return (raw * 2).rounded() / 2
+        case .hertz: return raw >= 1000 ? (raw / 100).rounded() * 100 : raw.rounded()
+        case .seconds: return raw < 0.01 ? (raw * 10_000).rounded() / 10_000 : (raw * 1000).rounded() / 1000
+        case .balance: return (raw * 100).rounded() / 100
+        }
     }
 }
 

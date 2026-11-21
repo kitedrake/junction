@@ -15,7 +15,7 @@ tmp="$(mktemp -d "${TMPDIR:-/tmp}/junction-harness.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
 sanitize="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
 # The render kernel's sample-rate converter under the same sanitizers: random buffer sizes, stalls and rates.
-xcrun clang $sanitize -mmacosx-version-min=26.0 -O1 -Wall -Wextra -Werror -ISources/JunctionKernel/include -framework CoreAudio \
+xcrun clang $sanitize -mmacosx-version-min=26.0 -O1 -Wall -Wextra -Werror -ISources/JunctionKernel/include -framework CoreAudio -framework AudioToolbox \
   Sources/JunctionKernel/*.c Tests/KernelHarness/stress.c -o "$tmp/kernel-stress"
 "$tmp/kernel-stress"
 mkdir -p "$tmp/JunctionDriver.driver/Contents/MacOS" "$tmp/JunctionDriver.driver/Contents/Resources"
