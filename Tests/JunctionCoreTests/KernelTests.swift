@@ -93,6 +93,43 @@ final class KernelTests: XCTestCase {
         XCTAssertEqual(output.get(stream: 0, channel: 0, frame: 10), 0.5, accuracy: 1e-6)
     }
 
+    func testFadesInAndOutForCrossFades() throws {
+        let frames = 100
+        let input = Buffers(streams: [1], frames: frames)
+        let output = Buffers(streams: [1], frames: frames)
+        for f in 0..<frames { input.set(stream: 0, channel: 0, frame: f, 1) }
+        let renderer = try XCTUnwrap(jk_renderer_create(1, 1, 1, [0], [0], [1]))
+        defer { jk_renderer_destroy(renderer) }
+        XCTAssertEqual(jk_renderer_fade_level(renderer), 1, "a new renderer plays at full level")
+
+        // A replacement sink starts silent and fades in over 200 frames: two buffers.
+        jk_renderer_set_fade_now(renderer, 0)
+        jk_renderer_fade(renderer, 1, 200)
+        render(renderer, input, output)
+        XCTAssertEqual(output.get(stream: 0, channel: 0, frame: 0), 0.005, accuracy: 1e-6)
+        XCTAssertEqual(output.get(stream: 0, channel: 0, frame: 99), 0.5, accuracy: 1e-5)
+        XCTAssertEqual(jk_renderer_fade_level(renderer), 0.5, accuracy: 1e-5)
+        render(renderer, input, output)
+        XCTAssertEqual(output.get(stream: 0, channel: 0, frame: 99), 1, accuracy: 1e-5)
+        XCTAssertEqual(jk_renderer_fade_level(renderer), 1)
+        render(renderer, input, output)
+        XCTAssertEqual(output.get(stream: 0, channel: 0, frame: 0), 1, "settled at full level")
+
+        // The sink it replaces fades out and then stays silent.
+        jk_renderer_fade(renderer, 0, 50)
+        _ = jk_renderer_take_output_peak(renderer, 0)
+        render(renderer, input, output)
+        XCTAssertEqual(output.get(stream: 0, channel: 0, frame: 0), 0.98, accuracy: 1e-5)
+        XCTAssertEqual(output.get(stream: 0, channel: 0, frame: 49), 0, accuracy: 1e-5)
+        XCTAssertEqual(output.get(stream: 0, channel: 0, frame: 99), 0)
+        XCTAssertEqual(jk_renderer_fade_level(renderer), 0)
+        XCTAssertEqual(jk_renderer_take_output_peak(renderer, 0), 0.98, accuracy: 1e-5, "meters show the faded level")
+        render(renderer, input, output)
+        XCTAssertEqual(output.get(stream: 0, channel: 0, frame: 10), 0)
+        XCTAssertEqual(jk_renderer_take_output_peak(renderer, 0), 0)
+        XCTAssertEqual(jk_renderer_take_input_peak(renderer, 0), 1, "inputs are still metered while silent")
+    }
+
     func testUnexpectedLayoutIsCountedAndStaysInBounds() throws {
         let frames = 32
         let input = Buffers(streams: [1], frames: frames)  // expected 4 channels

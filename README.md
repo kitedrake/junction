@@ -103,7 +103,8 @@ Three parts:
    runs one IOProc per sink. The IOProc is plain C (no Swift reference counting, locks or allocation on the audio
    thread): it copies aggregate input channels to sink output channels with gains that glide over one buffer, and
    keeps peak meters. Gain and mute changes don't rebuild anything; adding or removing cables rebuilds only the sinks
-   they touch. When apps start or quit, taps are updated in place.
+   they touch. A rebuilt sink is built next to the running one, then the two cross-fade over 25 ms, so edits don't
+   leave a gap or click. When apps start or quit, taps are updated in place.
 
 The graph is saved to `~/Library/Application Support/Junction/graph.json` (schema 2: nodes belong to a device's
 canvas). A schema 1 file from the shared-canvas versions is converted on load: each node moves to the canvas of the
@@ -169,7 +170,7 @@ system-audio permissions and **Install Driver…** with the first one.
   are flagged on the node; set them to the same rate for the best quality.
 - Safari and other WebKit apps play through one shared process ("Safari & Web Views"), so they can only be captured
   or left out together.
-- Each rebuilt sink restarts its audio (a short gap) when cables are added or removed.
+- Cross-fading a rebuilt sink (when cables are added or removed) hasn't been tried with real audio yet.
 - Routing stops when Junction quits; it keeps running from the menu bar when the window is closed.
 - Virtual devices have no volume control yet, so the keyboard volume keys don't change them.
 - Virtual devices can't feed each other; to use the same source in two devices, add it to both canvases.

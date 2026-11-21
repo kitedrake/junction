@@ -30,6 +30,16 @@ void jk_renderer_set_route_gain(JKRenderer *_Nonnull renderer, uint32_t route, f
 /// Gain applied to everything the sink receives (the sink node's fader and mute).
 void jk_renderer_set_master_gain(JKRenderer *_Nonnull renderer, float gain);
 
+/// Fades everything the sink receives to `target` (0…1) at a rate of one full 0 → 1 ramp per `frames` frames, on top
+/// of the route and master gains. Used to cross-fade a rebuilt sink with its replacement.
+void jk_renderer_fade(JKRenderer *_Nonnull renderer, float target, uint32_t frames);
+
+/// Sets the fade at once (e.g. 0 so a new sink can fade in). Only call before the IOProc starts.
+void jk_renderer_set_fade_now(JKRenderer *_Nonnull renderer, float level);
+
+/// Where the fade stood after the last IO cycle (0 = silent, 1 = full).
+float jk_renderer_fade_level(const JKRenderer *_Nonnull renderer);
+
 /// Highest absolute sample value on an input / output channel since the last call (then resets it).
 float jk_renderer_take_input_peak(JKRenderer *_Nonnull renderer, uint32_t channel);
 float jk_renderer_take_output_peak(JKRenderer *_Nonnull renderer, uint32_t channel);

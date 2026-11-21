@@ -19,6 +19,11 @@ struct JKRenderer {
     _Atomic uint32_t *outputPeaks;
     _Atomic uint64_t cycles;
     _Atomic uint64_t mismatches;
+    // Fade applied to everything the sink receives, for cross-fading a rebuilt sink with its replacement.
+    _Atomic uint32_t fadeTarget;     // float bits, 0…1
+    _Atomic uint32_t fadeFrames;     // frames for a full 0 → 1 ramp
+    _Atomic uint32_t fadeLevel;      // float bits: where the fade stood after the last cycle
+    float fade;                      // audio thread only
     // Per-cycle channel tables (audio thread only), sized for the expected layout.
     const float **inputs;
     uint32_t *inputStrides;
@@ -71,6 +76,10 @@ JKRenderer *jk_renderer_create(uint32_t inputChannels, uint32_t outputChannels, 
     }
     atomic_init(&r->targetMaster, Bits(1.0f));
     r->currentMaster = 1.0f;
+    atomic_init(&r->fadeTarget, Bits(1.0f));
+    atomic_init(&r->fadeFrames, 1);
+    atomic_init(&r->fadeLevel, Bits(1.0f));
+    r->fade = 1.0f;
     return r;
 }
 
@@ -95,6 +104,28 @@ void jk_renderer_set_route_gain(JKRenderer *r, uint32_t route, float gain) {
 
 void jk_renderer_set_master_gain(JKRenderer *r, float gain) {
     if (isfinite(gain)) atomic_store_explicit(&r->targetMaster, Bits(gain), memory_order_relaxed);
+}
+
+static inline float Clamp01(float value) {
+    return value < 0 ? 0 : (value > 1 ? 1 : value);
+}
+
+void jk_renderer_fade(JKRenderer *r, float target, uint32_t frames) {
+    if (!isfinite(target)) return;
+    atomic_store_explicit(&r->fadeFrames, frames ? frames : 1, memory_order_relaxed);
+    atomic_store_explicit(&r->fadeTarget, Bits(Clamp01(target)), memory_order_release);
+}
+
+void jk_renderer_set_fade_now(JKRenderer *r, float level) {
+    if (!isfinite(level)) return;
+    float value = Clamp01(level);
+    r->fade = value;
+    atomic_store_explicit(&r->fadeLevel, Bits(value), memory_order_relaxed);
+    atomic_store_explicit(&r->fadeTarget, Bits(value), memory_order_release);
+}
+
+float jk_renderer_fade_level(const JKRenderer *r) {
+    return Float(atomic_load_explicit((_Atomic uint32_t *)&r->fadeLevel, memory_order_relaxed));
 }
 
 float jk_renderer_take_input_peak(JKRenderer *r, uint32_t channel) {
@@ -183,6 +214,10 @@ OSStatus jk_renderer_ioproc(AudioObjectID device, const AudioTimeStamp *now, con
         if (peak > 0 && isfinite(peak)) RaisePeak(&r->inputPeaks[c], peak);
     }
 
+    float fadeTarget = Float(atomic_load_explicit(&r->fadeTarget, memory_order_acquire));
+    float fadeStart = r->fade;
+    int silent = fadeStart == 0 && fadeTarget == 0;  // faded out: outputs stay zeroed
+
     float masterStart = r->currentMaster;
     float masterEnd = Float(atomic_load_explicit(&r->targetMaster, memory_order_relaxed));
     float step = 1.0f / (float)frames;
@@ -192,7 +227,7 @@ OSStatus jk_renderer_ioproc(AudioObjectID device, const AudioTimeStamp *now, con
         float start = r->currentGains[i] * masterStart;
         float end = target * masterEnd;
         r->currentGains[i] = target;
-        if (s >= availableInputs || d >= availableOutputs || !r->inputs[s]) continue;
+        if (silent || s >= availableInputs || d >= availableOutputs || !r->inputs[s]) continue;
         if (start == 0 && end == 0) continue;
         const float *in = r->inputs[s];
         float *out = r->outputs[d];
@@ -209,6 +244,29 @@ OSStatus jk_renderer_ioproc(AudioObjectID device, const AudioTimeStamp *now, con
         }
     }
     r->currentMaster = masterEnd;
+
+    if (!silent && !(fadeStart == 1 && fadeTarget == 1)) {
+        float rampFrames = (float)atomic_load_explicit(&r->fadeFrames, memory_order_relaxed);
+        float fadeStep = 1.0f / (rampFrames > 0 ? rampFrames : 1.0f);
+        for (uint32_t c = 0; c < availableOutputs; c++) {
+            float *samples = r->outputs[c];
+            uint32_t stride = r->outputStrides[c];
+            float gain = fadeStart;
+            for (uint32_t f = 0; f < frames; f++) {
+                if (gain < fadeTarget) {
+                    gain += fadeStep;
+                    if (gain > fadeTarget) gain = fadeTarget;
+                } else if (gain > fadeTarget) {
+                    gain -= fadeStep;
+                    if (gain < fadeTarget) gain = fadeTarget;
+                }
+                samples[(size_t)f * stride] *= gain;
+            }
+        }
+        float travel = fadeStep * (float)frames, distance = fadeTarget - fadeStart;
+        r->fade = fabsf(distance) <= travel ? fadeTarget : fadeStart + (distance > 0 ? travel : -travel);
+        atomic_store_explicit(&r->fadeLevel, Bits(r->fade), memory_order_relaxed);
+    }
 
     for (uint32_t c = 0; c < availableOutputs; c++) {
         const float *samples = r->outputs[c];

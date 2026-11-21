@@ -42,7 +42,11 @@ public final class Router: @unchecked Sendable {
         self.onStatus = onStatus
     }
 
-    /// Brings the running sinks in line with the plan: unchanged sinks only get new gains, changed ones are rebuilt.
+    /// How long a rebuilt sink and its replacement overlap, fading out and in.
+    static let crossFadeSeconds = 0.025
+
+    /// Brings the running sinks in line with the plan: unchanged sinks only get new gains; changed ones are rebuilt
+    /// next to the running one and cross-faded with it, so edits don't leave a gap or click.
     public func apply(_ plan: RoutingPlan) {
         queue.async { self.applyNow(plan) }
     }
@@ -90,36 +94,56 @@ public final class Router: @unchecked Sendable {
 
     private func applyNow(_ plan: RoutingPlan) {
         let wanted = Dictionary(plan.sinks.map { ($0.sinkNode, $0) }, uniquingKeysWith: { first, _ in first })
-        for (id, runner) in runners where wanted[id]?.structureKey != runner.plan.structureKey {
+        var retiring: [SinkRunner] = []
+        func retire(_ id: UUID) {
             lock.lock()
-            runners[id] = nil
+            let runner = runners.removeValue(forKey: id)
             lock.unlock()
-            runner.stop()
+            guard let runner else { return }
+            runner.fadeOut()
+            retiring.append(runner)
         }
+        for id in runners.keys where wanted[id] == nil { retire(id) }
         statuses = statuses.filter { wanted[$0.key] != nil }
         var processes: [HAL.AudioProcess]?
         for sink in plan.sinks {
-            if let runner = runners[sink.sinkNode] {
+            if let runner = runners[sink.sinkNode], runner.plan.structureKey == sink.structureKey {
                 runner.update(gains: sink)
                 continue
             }
+            // Build the replacement while the old sink keeps playing, then swap them over with a cross-fade.
             if processes == nil, !sink.taps.isEmpty { processes = HAL.audioProcesses() }
             guard let runner = SinkRunner(plan: sink) else {
+                retire(sink.sinkNode)
                 statuses[sink.sinkNode] = SinkStatus(state: .failed, message: "Out of memory.")
                 continue
             }
             do {
-                try runner.start(processes: processes ?? [])
+                try runner.start(processes: processes ?? [], fadingIn: true)
+                retire(sink.sinkNode)
                 lock.lock()
                 runners[sink.sinkNode] = runner
                 lock.unlock()
                 statuses[sink.sinkNode] = SinkStatus(state: .running, message: runner.layoutWarning)
             } catch {
                 runner.stop()
+                retire(sink.sinkNode)
                 statuses[sink.sinkNode] = SinkStatus(state: .failed, message: error.localizedDescription)
             }
         }
         onStatus(statuses)
+        Self.stopAfterFading(retiring)
+    }
+
+    /// Waits until the retiring sinks have faded out (or a short deadline passes, e.g. when a device stopped
+    /// calling its IOProc), then tears them down.
+    static func stopAfterFading(_ retiring: [SinkRunner]) {
+        guard !retiring.isEmpty else { return }
+        let deadline = Date().addingTimeInterval(crossFadeSeconds + 0.2)
+        while Date() < deadline, retiring.contains(where: { !$0.isSilent }) {
+            Thread.sleep(forTimeInterval: 0.005)
+        }
+        for runner in retiring { runner.stop() }
     }
 }
 
@@ -149,6 +173,8 @@ final class SinkRunner: @unchecked Sendable {
     private var procID: AudioDeviceIOProcID?
     private var taps: [(plan: TapPlan, id: AudioObjectID, uuid: UUID, processes: [AudioObjectID])] = []
     private(set) var layoutWarning: String?
+    /// Frames in one cross-fade at the aggregate's sample rate.
+    private var fadeFrames = UInt32(Router.crossFadeSeconds * 48_000)
 
     init?(plan: SinkPlan) {
         self.plan = plan
@@ -166,7 +192,8 @@ final class SinkRunner: @unchecked Sendable {
         jk_renderer_destroy(renderer)
     }
 
-    func start(processes: [HAL.AudioProcess]) throws {
+    /// Builds and starts the sink. With `fadingIn` it starts silent and fades in over one cross-fade.
+    func start(processes: [HAL.AudioProcess], fadingIn: Bool = false) throws {
         for tap in plan.taps {
             let (description, members) = Self.describe(tap, processes: processes, uuid: UUID())
             var id = AudioObjectID(kAudioObjectUnknown)
@@ -210,13 +237,25 @@ final class SinkRunner: @unchecked Sendable {
             layoutWarning = "Expected \(plan.inputChannels) input and \(plan.outputChannels) output channels, macOS made \(inputs) and \(outputs); some cables may carry the wrong channel."
         }
 
+        let rate = HAL.value(aggregate, kAudioDevicePropertyNominalSampleRate, default: Float64(48_000))
+        if rate > 0 { fadeFrames = UInt32(max(1, (Router.crossFadeSeconds * rate).rounded())) }
+        if fadingIn { jk_renderer_set_fade_now(renderer, 0) }
+
         var proc: AudioDeviceIOProcID?
         status = AudioDeviceCreateIOProcID(aggregate, jk_renderer_ioproc, UnsafeMutableRawPointer(renderer), &proc)
         guard status == noErr, let proc else { throw RouterError.start(status) }
         procID = proc
         status = AudioDeviceStart(aggregate, proc)
         guard status == noErr else { throw RouterError.start(status) }
+        if fadingIn { jk_renderer_fade(renderer, 1, fadeFrames) }
     }
+
+    /// Starts fading the sink out; `isSilent` turns true once the fade has been rendered.
+    func fadeOut() {
+        jk_renderer_fade(renderer, 0, fadeFrames)
+    }
+
+    var isSilent: Bool { procID == nil || jk_renderer_fade_level(renderer) == 0 }
 
     func stop() {
         if let procID {
