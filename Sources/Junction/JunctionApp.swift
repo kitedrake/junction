@@ -7,7 +7,7 @@ import SwiftUI
 enum Main {
     static func main() {
         let arguments = Array(CommandLine.arguments.dropFirst())
-        if ["--list", "--self-test", "--loopback-test", "--device-test", "--help"].contains(arguments.first ?? "") {
+        if ["--list", "--diagnose", "--self-test", "--loopback-test", "--device-test", "--help"].contains(arguments.first ?? "") {
             exit(CommandLineTool.run(arguments))
         }
         JunctionApp.main()
@@ -65,6 +65,9 @@ struct JunctionApp: App {
                     }
                 }
                 .disabled(model.isInstallingDriver || model.isDemo)
+                Divider()
+                ShowLogButton()
+                    .keyboardShortcut("l", modifiers: [.command, .option])
             }
             CommandGroup(after: .sidebar) {
                 Button(model.showInspector ? "Hide Inspector" : "Show Inspector") { model.showInspector.toggle() }
@@ -77,6 +80,12 @@ struct JunctionApp: App {
             MenuBarContent()
                 .environment(model)
         }
+
+        Window("Routing Log", id: "log") {
+            LogView()
+                .environment(model)
+        }
+        .defaultSize(width: 680, height: 420)
 
         Settings {
             SettingsView()
@@ -122,6 +131,7 @@ struct MenuBarContent: View {
         if model.failingSinkCount > 0 {
             Divider()
             Text("\(model.failingSinkCount) destination\(model.failingSinkCount == 1 ? "" : "s") with problems")
+            ShowLogButton()
         }
         switch model.driverUpdate {
         case .notInstalled:

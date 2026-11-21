@@ -94,6 +94,10 @@ public enum DriverClient {
 
     /// Version of the bundled driver, to offer an update when the installed one differs.
     public static var bundledVersion: String? {
-        bundledDriverURL.flatMap { Bundle(url: $0)?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String }
+        // Read the Info.plist directly: once Core Audio has looked at the installed driver (same bundle identifier),
+        // `Bundle(url:)` for the bundled copy can come back without its version.
+        bundledDriverURL.flatMap {
+            NSDictionary(contentsOf: $0.appendingPathComponent("Contents/Info.plist"))?["CFBundleShortVersionString"] as? String
+        }
     }
 }

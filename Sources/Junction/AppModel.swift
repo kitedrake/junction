@@ -43,6 +43,8 @@ final class AppModel {
     /// App and System Audio nodes that have heard nothing for a while although apps they capture are playing: most
     /// likely Junction may not record system audio.
     private(set) var silentTaps: Set<UUID> = []
+    /// The routing log (newest last), for the Routing Log window.
+    private(set) var events: [RoutingEvent] = []
     private(set) var isInstallingDriver = false
     /// The known chat apps (`Templates.chatApps`) installed on this Mac.
     private(set) var installedChatApps: [AppRef] = []
@@ -80,6 +82,10 @@ final class AppModel {
     func start() {
         guard !started else { return }
         started = true
+        if isDemo { EventLog.shared.keepInMemoryOnly() }
+        EventLog.shared.observe {
+            Task { @MainActor in AppModel.shared.events = EventLog.shared.recent }
+        }
         refreshInstalledChatApps()
         if isDemo {
             Demo.load(into: self)
@@ -115,7 +121,7 @@ final class AppModel {
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
         ) { _ in
             MainActor.assumeIsolated {
-                Self.log.notice("Woke from sleep; checking routing")
+                AppModel.shared.note("Woke from sleep; checking routing")
                 AppModel.shared.router?.resetHealth()  // the router rebuilds any sink whose audio doesn't resume
                 AppModel.shared.scheduleRefresh()
             }
@@ -168,6 +174,7 @@ final class AppModel {
                 guard !Task.isCancelled else { return }
                 self?.saveNow()
             }
+            if old.isRoutingOn != graph.isRoutingOn { note(graph.isRoutingOn ? "Routing turned on" : "Routing turned off") }
             if old.virtualDevices != graph.virtualDevices {
                 let changed = graph.virtualDevices.filter { device in
                     guard let before = old.virtualDevice(device.id) else { return true }
@@ -294,7 +301,7 @@ final class AppModel {
     private func coreAudioRestarted() {
         guard !isDemo else { return }
         lastCoreAudioRestart = Date()
-        Self.log.notice("Core Audio restarted; rebuilding routing")
+        note("Core Audio restarted; rebuilding routing", .warning)
         router?.forgetAfterRestart()  // at once, so no refresh in between tries to stop the dead sinks
         watchedUIDs = []  // device IDs change: listen again on the next plan
         restartTask?.cancel()
@@ -355,10 +362,39 @@ final class AppModel {
         if status != microphoneAccess {
             let granted = status == .authorized
             microphoneAccess = status
-            Self.log.notice("Microphone permission: \(String(describing: status.rawValue), privacy: .public)")
+            note("Microphone permission: \(Self.describe(status))", status == .authorized ? .info : .warning)
             if granted { router?.rebuildAll() }
         }
         if status == .notDetermined, needsMicrophone, graph.isRoutingOn, !askedForMicrophone { requestMicrophone() }
+    }
+
+    static func describe(_ status: AVAuthorizationStatus) -> String {
+        switch status {
+        case .authorized: "allowed"
+        case .denied: "denied"
+        case .restricted: "restricted"
+        case .notDetermined: "not asked yet"
+        @unknown default: "unknown"
+        }
+    }
+
+    /// Writes to the system log and the routing log.
+    func note(_ message: String, _ kind: RoutingEvent.Kind = .info) {
+        Self.log.notice("\(message, privacy: .public)")
+        EventLog.shared.add(kind, message)
+    }
+
+    /// The text of `Junction --diagnose`, with what only the running app knows (statuses, the log in memory).
+    func diagnosticReport() -> String {
+        Diagnostics.report(graph: graph, inventory: inventory, plan: plan, statuses: statuses,
+                           events: EventLog.shared.recent.map(\.line), appVersion: Self.appVersion,
+                           bundledDriver: DriverClient.bundledVersion)
+    }
+
+    nonisolated static var appVersion: String? {
+        guard let info = Bundle.main.infoDictionary, let version = info["CFBundleShortVersionString"] as? String else { return nil }
+        guard let build = info["CFBundleVersion"] as? String, build != version else { return version }
+        return "\(version) (build \(build))"
     }
 
     func requestMicrophone() {
@@ -467,7 +503,7 @@ final class AppModel {
                 // The script restarts Core Audio; rebuild routing even if the restart notice didn't arrive.
                 let noticed = model.lastCoreAudioRestart.map { Date().timeIntervalSince($0) < 15 } ?? false
                 if message == nil, !noticed {
-                    AppModel.log.notice("No restart notice after the driver script; rebuilding routing anyway")
+                    AppModel.shared.note("No restart notice after the driver script; rebuilding routing anyway", .warning)
                     model.coreAudioRestarted()
                 }
             }

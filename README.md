@@ -26,6 +26,9 @@ without your voice chat, step by step.
 - **Routing** (toolbar power button, menu bar, ⇧⌘R) starts and stops everything. Junction keeps routing from the menu
   bar when the window is closed. **Settings** (⌘,) can open Junction at login (`SMAppService`) and hide its Dock icon
   so it lives in the menu bar only.
+- **Routing Log** (Routing › Show Routing Log, ⌥⌘L): what the router did and why (started, rebuilt, failed, trying
+  again, tap membership). Events are also appended to `events.log` next to `graph.json`. **Copy Report** (or
+  `Junction --diagnose`) makes a plain-text report for bug reports; it names your devices and apps.
 
 | Node | Left side (receives) | Right side (provides) |
 | --- | --- | --- |
@@ -126,6 +129,7 @@ between devices are dropped. Schema 2 files load unchanged, with automatic buffe
 ./test.sh                                        # engine tests + driver harness (sanitizers), installs nothing
 build/Junction.app/Contents/MacOS/Junction --self-test   # bundled driver loads, planning, kernel, saving
 build/Junction.app/Contents/MacOS/Junction --list        # driver status, devices, apps using audio
+build/Junction.app/Contents/MacOS/Junction --diagnose [file]   # bug report: versions, devices, plan, events, setup
 build/Junction.app/Contents/MacOS/Junction --loopback-test   # with the driver installed: tone in, tone out
 build/Junction.app/Contents/MacOS/Junction --device-test     # with the driver installed: add, rename, reshape, remove
 JUNCTION_SNAPSHOT=/tmp/shots build/Junction.app/Contents/MacOS/Junction   # demo screenshots, light and dark

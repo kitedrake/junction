@@ -3,11 +3,12 @@ import Foundation
 import JunctionCore
 import JunctionKernel
 
-/// `Junction --list | --self-test [folder] | --loopback-test | --device-test | --help`
+/// `Junction --list | --diagnose [file] | --self-test [folder] | --loopback-test | --device-test | --help`
 enum CommandLineTool {
     static func run(_ arguments: [String]) -> Int32 {
         switch arguments.first {
         case "--list": return list()
+        case "--diagnose": return diagnose(to: arguments.dropFirst().first)
         case "--self-test": return selfTest(folder: arguments.dropFirst().first)
         case "--loopback-test": return loopbackTest()
         case "--device-test": return deviceTest()
@@ -15,6 +16,8 @@ enum CommandLineTool {
             print("""
             Junction: virtual audio devices and an audio router.
               --list            Driver status, audio devices, default devices and apps using audio.
+              --diagnose [file] A report for bug reports: versions, devices, apps, the routing plan, recent routing
+                                events and the saved setup (it names your devices and apps). No audio is opened.
               --self-test [dir] Checks the bundled driver, the planner, the mixing kernel and saving (no audio).
               --loopback-test   With the driver installed: plays a tone into a temporary virtual device and checks
                                 it comes back out. Needs microphone permission for the calling app (e.g. Terminal).
@@ -22,6 +25,31 @@ enum CommandLineTool {
                                 channels and sample rate, turns it off and on, and checks Core Audio follows each step.
             """)
             return 0
+        }
+    }
+
+    // MARK: --diagnose
+
+    static func diagnose(to path: String?) -> Int32 {
+        let store = Store()
+        var graph = store.load() ?? Graph()
+        graph.upgrade()
+        let inventory = HAL.readInventory()
+        let report = Diagnostics.report(
+            graph: graph, inventory: inventory, plan: Planner.plan(graph, inventory: inventory), statuses: nil,
+            events: EventLog.savedLines(at: store.folder.appendingPathComponent("events.log"), count: 200),
+            appVersion: AppModel.appVersion, bundledDriver: DriverClient.bundledVersion)
+        guard let path else {
+            print(report, terminator: "")
+            return 0
+        }
+        do {
+            try Data(report.utf8).write(to: URL(fileURLWithPath: path))
+            print("Wrote \(path)")
+            return 0
+        } catch {
+            print("Couldn't write \(path): \(error.localizedDescription)")
+            return 1
         }
     }
 

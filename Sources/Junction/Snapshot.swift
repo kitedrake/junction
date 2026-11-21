@@ -68,6 +68,10 @@ enum Demo {
         model.setDemoState(inventory: inventory, statuses: [streamNode.id: running, recordingNode.id: running, phones.id: running],
                            meters: meters)
         model.selection = .node(system.id)
+        EventLog.shared.add(.info, "Stream Mix: started. 4 cables, System Audio leaves out 3 processes, buffer 512 frames, about 12 ms")
+        EventLog.shared.add(.error, "AirPods Pro: Couldn't combine the devices (the device went away). Attempt 1; trying again in 2 s.")
+        EventLog.shared.add(.info, "AirPods Pro: started. 2 cables, buffer 512 frames, about 9 ms")
+        EventLog.shared.add(.info, "Recording: started. 4 cables, Discord captures 4 processes, buffer 512 frames, about 12 ms")
     }
 }
 
@@ -149,6 +153,23 @@ enum Snapshot {
             } else {
                 let windows = NSApp.windows.map { "\($0.title)|\($0.identifier?.rawValue ?? "-")|\($0.isVisible)" }
                 FileHandle.standardError.write(Data("Couldn't open the Settings window for a screenshot: \(windows)\n".utf8))
+            }
+            NSApp.windows.first { $0.isVisible && $0.contentView != nil }?.makeKeyAndOrderFront(nil)
+
+            if let routing = NSApp.mainMenu?.items.first(where: { $0.title == "Routing" })?.submenu,
+               let index = routing.items.firstIndex(where: { $0.title == "Show Routing Log" }) {
+                routing.performActionForItem(at: index)
+                try? await Task.sleep(for: .milliseconds(800))
+            }
+            if let log = NSApp.windows.first(where: { $0.isVisible && $0.title == "Routing Log" }) {
+                for (appearance, suffix) in [(NSAppearance.Name.aqua, "light"), (.darkAqua, "dark")] {
+                    NSApp.appearance = NSAppearance(named: appearance)
+                    try? await Task.sleep(for: .milliseconds(600))
+                    screencapture(["-x", "-o", "-l", "\(log.windowNumber)"], folder, "log-\(suffix)")
+                }
+                log.close()
+            } else {
+                FileHandle.standardError.write(Data("Couldn't open the Routing Log for a screenshot.\n".utf8))
             }
             NSApp.windows.first { $0.isVisible && $0.contentView != nil }?.makeKeyAndOrderFront(nil)
             resize(980, 560)

@@ -53,6 +53,7 @@ public final class Router: @unchecked Sendable {
     private var progress: [UUID: (cycles: UInt64, still: Int)] = [:]
     private var healthTimer: DispatchSourceTimer?
     static let log = Logger(subsystem: "local.junction", category: "routing")
+    private let events: EventLog
 
     struct Failure {
         var key: String
@@ -72,7 +73,8 @@ public final class Router: @unchecked Sendable {
     /// A sink that has run this long since its last failure starts again from the shortest retry delay.
     static let healthyAfter: TimeInterval = 30
 
-    public init(onStatus: @escaping StatusHandler) {
+    public init(events: EventLog = .shared, onStatus: @escaping StatusHandler) {
+        self.events = events
         self.onStatus = onStatus
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + 2, repeating: 2, leeway: .milliseconds(200))
@@ -121,6 +123,7 @@ public final class Router: @unchecked Sendable {
     public func rebuildAll() {
         queue.async {
             self.failures = [:]
+            if !self.lastPlan.sinks.isEmpty { self.events.add(.info, "Rebuilding every destination") }
             self.applyNow(self.lastPlan, rebuildingAll: true)
         }
     }
@@ -137,7 +140,9 @@ public final class Router: @unchecked Sendable {
             self.lock.lock()
             let current = Array(self.runners.values)
             self.lock.unlock()
-            for runner in current { runner.refreshTaps(processes: processes) }
+            for runner in current {
+            for change in runner.refreshTaps(processes: processes) { self.events.add(.info, change) }
+        }
         }
     }
 
@@ -164,7 +169,10 @@ public final class Router: @unchecked Sendable {
             runner.fadeOut()
             retiring.append(runner)
         }
-        for id in runners.keys where wanted[id] == nil { retire(id) }
+        for (id, runner) in runners where wanted[id] == nil {
+            events.add(.info, "\(runner.plan.name): stopped")
+            retire(id)
+        }
         statuses = statuses.filter { wanted[$0.key] != nil }
         failures = failures.filter { wanted[$0.key]?.structureKey == $0.value.key }
         let now = Date()
@@ -185,6 +193,7 @@ public final class Router: @unchecked Sendable {
             }
             do {
                 try runner.start(processes: processes ?? [], fadingIn: true)
+                let replacing = runners[sink.sinkNode] != nil
                 retire(sink.sinkNode)
                 lock.lock()
                 runners[sink.sinkNode] = runner
@@ -192,6 +201,8 @@ public final class Router: @unchecked Sendable {
                 progress[sink.sinkNode] = nil
                 statuses[sink.sinkNode] = SinkStatus(state: .running, message: runner.layoutWarning,
                                                      latency: runner.latency, bufferFrames: runner.bufferFrames)
+                events.add(.info, "\(sink.name): \(replacing ? "rebuilt" : "started"). \(runner.summary)")
+                if let warning = runner.layoutWarning { events.add(.warning, "\(sink.name): \(warning)") }
             } catch {
                 runner.stop()
                 retire(sink.sinkNode)
@@ -211,6 +222,7 @@ public final class Router: @unchecked Sendable {
         let reason = reason.hasSuffix(".") ? reason : reason + "."
         statuses[sink.sinkNode] = SinkStatus(state: .failed, message: "\(reason) Trying again in \(Int(delay)) s.")
         Self.log.error("\(sink.name, privacy: .public): \(reason, privacy: .public) Attempt \(count), next in \(Int(delay)) s")
+        events.add(.error, "\(sink.name): \(reason) Attempt \(count); trying again in \(Int(delay)) s.")
     }
 
     private func scheduleRetry() {
@@ -255,6 +267,7 @@ public final class Router: @unchecked Sendable {
             runner.stop()  // no fade: it isn't rendering
             progress[id] = nil
             Self.log.error("\(runner.plan.name, privacy: .public): audio stopped; rebuilding")
+            events.add(.error, "\(runner.plan.name): audio stopped moving (no IO for \(Self.stalledChecks * 2) s); rebuilding")
             recordFailure(runner.plan, "Audio stopped")
             if failures[id]?.count == 1 {  // the first rebuild happens straight away
                 failures[id]?.next = Date()
@@ -449,7 +462,9 @@ final class SinkRunner: @unchecked Sendable {
         self.plan = plan
     }
 
-    func refreshTaps(processes: [HAL.AudioProcess]) {
+    /// Updates each tap's process list; returns a line per tap that changed, for the event log.
+    func refreshTaps(processes: [HAL.AudioProcess]) -> [String] {
+        var changes: [String] = []
         for index in taps.indices {
             let tap = taps[index]
             let (description, members) = Self.describe(tap.plan, processes: processes, uuid: tap.uuid)
@@ -457,10 +472,29 @@ final class SinkRunner: @unchecked Sendable {
             do {
                 try AudioHardwareTap(id: tap.id).setDescription(description)
                 taps[index].processes = members
+                changes.append("\(plan.name): \(tap.plan.name) \(Self.membership(tap.plan, members.count))")
             } catch {
                 // Keep the old description; the next change tries again.
+                changes.append("\(plan.name): couldn't update \(tap.plan.name) (\(error.localizedDescription))")
             }
         }
+        return changes
+    }
+
+    static func membership(_ tap: TapPlan, _ count: Int) -> String {
+        switch tap.mode {
+        case .only: "captures \(count) process\(count == 1 ? "" : "es")"
+        case .allExcept: "leaves out \(count) process\(count == 1 ? "" : "es")"
+        }
+    }
+
+    /// What was built, for the event log.
+    var summary: String {
+        var parts = ["\(plan.routes.count) cable\(plan.routes.count == 1 ? "" : "s")"]
+        for tap in taps { parts.append("\(tap.plan.name) \(Self.membership(tap.plan, tap.processes.count))") }
+        if let bufferFrames { parts.append("buffer \(bufferFrames) frames") }
+        if let latency { parts.append(String(format: "about %.0f ms", latency * 1000)) }
+        return parts.joined(separator: ", ")
     }
 
     func takeMeters() -> [PortKey: Float] {

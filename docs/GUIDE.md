@@ -265,6 +265,11 @@ there is one, is offered as above.
 | The volume keys don't change a virtual device | Virtual devices have no volume control yet; use the level faders in Junction. |
 | A device or interface shows "Not connected" | It's unplugged or off. Its cables come back to life when it returns. |
 | A virtual device switched sample rate on its own | Other apps (Audio MIDI Setup, a DAW) can set it, and macOS restores the last rate it remembers. Junction follows such changes; set the rate you want in the inspector. |
+| Something stops or comes back on its own | Open **Routing › Show Routing Log** (⌥⌘L). It lists what Junction started, rebuilt or retried, and why. |
+
+To report a problem, open the Routing Log and click **Copy Report**, then paste it into your report. It lists your
+Junction and macOS versions, your audio devices and apps, your setup and recent routing events. It names your
+devices and apps, so read it before sharing it.
 
 ## 15. Shortcuts
 
@@ -273,6 +278,8 @@ there is one, is offered as above.
 | New virtual device | ⌘N |
 | Routing on/off | ⇧⌘R |
 | Show or hide the inspector | ⌥⌘I |
+| Routing Log | ⌥⌘L |
+| Settings | ⌘, |
 | Delete the selected cable or item | Delete (on the canvas) or ⌘⌫ |
 | Reset a fader to 0 dB | Option-click, Command-click or double-click |
 | Add something where you click | Right-click the canvas |
