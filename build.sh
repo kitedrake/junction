@@ -19,14 +19,14 @@
 #
 # Every build carries Junction Helper (Contents/Library/LoginItems/JunctionHelper.app), which can run routing in the
 # background, and its launch agent (Contents/Library/LaunchAgents/local.junction.helper.plist). Whether the app
-# registers and uses it is ROUTING_HELPER: 1 routes in the helper, 0 inside the app. It defaults to 1 for release
-# builds (UPDATE_FEED_URL set) and 0 otherwise, so plain and omso Builder builds route inside the app as before.
+# registers and uses it is ROUTING_HELPER: 1 routes in the helper, 0 (the default, release builds included) inside the
+# app. It stays off by default until the helper has been tried on a real Mac.
 #
 # Every build also carries Junction Driver Installer (Contents/Library/HelperTools/JunctionDriverDaemon), a launch
 # daemon that installs and removes the driver without a password once the user approves it, and its plist
 # (Contents/Library/LaunchDaemons/local.junction.driverd.plist). DRIVER_DAEMON decides whether the app registers and
-# uses it: 1 or 0, defaulting like ROUTING_HELPER (1 for release builds). It only works when signed by a developer
-# team: an ad-hoc signed daemon accepts no connections.
+# uses it: 1 or 0, defaulting to 0 like ROUTING_HELPER. It only works when signed by a developer team: an ad-hoc
+# signed daemon accepts no connections.
 #
 # Crash reports are opt-in (Settings). Release builds can also set
 #   CRASH_REPORT_URL   an https:// address the app POSTs a crash report to, as plain text, after the user has read
@@ -43,20 +43,14 @@ build_number="$(date +%Y%m%d%H%M)"
 identity="${SIGN_IDENTITY:-${JUNCTION_SIGN_IDENTITY:--}}"
 feed="${UPDATE_FEED_URL:-}"
 key="${UPDATE_PUBLIC_KEY:-}"
-routing_helper="${ROUTING_HELPER:-}"
-driver_daemon="${DRIVER_DAEMON:-}"
+routing_helper="${ROUTING_HELPER:-0}"
+driver_daemon="${DRIVER_DAEMON:-0}"
 crash_url="${CRASH_REPORT_URL:-}"
-if [ -z "$routing_helper" ]; then
-  if [ -n "$feed" ]; then routing_helper=1; else routing_helper=0; fi
-fi
 case "$routing_helper" in
   1) uses_helper="<true/>" ;;
   0) uses_helper="<false/>" ;;
   *) echo "ROUTING_HELPER must be 1 or 0." >&2; exit 1 ;;
 esac
-if [ -z "$driver_daemon" ]; then
-  if [ -n "$feed" ]; then driver_daemon=1; else driver_daemon=0; fi
-fi
 case "$driver_daemon" in
   1) uses_daemon="<true/>" ;;
   0) uses_daemon="<false/>" ;;

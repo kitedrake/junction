@@ -58,17 +58,18 @@ without your voice chat, step by step.
 - **Routing** (toolbar power button, menu bar, ⇧⌘R) starts and stops everything. Junction keeps routing from the menu
   bar when the window is closed. **Settings** (⌘,) can open Junction at login (`SMAppService`; it then starts in the
   menu bar without its window) and hide its Dock icon so it lives in the menu bar only.
-- **Routing in the background**: in release builds, routing runs in **Junction Helper**, a small helper without a Dock
-  icon inside Junction.app. Settings says "Routing runs in the background" and has **Keep routing after quitting
-  Junction**: with it on, routing goes on after Junction quits and starts again at login; with it off (the default)
-  the helper stops with Junction. To turn the helper off altogether, switch Junction off in System Settings › General ›
-  Login Items & Extensions; Junction then routes by itself, as plain builds always do.
+- **Routing in the background** (builds made with `ROUTING_HELPER=1`; off by default, release builds included, until
+  it has been tried on a real Mac): routing runs in **Junction Helper**, a small helper without a Dock icon inside
+  Junction.app. Settings says "Routing runs in the background" and has **Keep routing after quitting Junction**: with
+  it on, routing goes on after Junction quits and starts again at login; with it off (the default) the helper stops
+  with Junction. To turn the helper off altogether, switch Junction off in System Settings › General › Login Items &
+  Extensions; Junction then routes by itself, as plain builds always do.
 - **Routing Log** (Routing › Show Routing Log, ⌥⌘L): what the router did and why (started, rebuilt, failed, trying
   again, tap membership). Events are also appended to `events.log` next to `graph.json`. **Copy Report** (or
   `Junction --diagnose`) makes a plain-text report for bug reports; it names your devices and apps.
-- **Driver installs without a password** (release builds): once Junction is allowed in Login Items, its driver
-  installer installs, updates and removes the driver with no password prompt, and only the copy inside Junction,
-  signed like it. **Settings** shows whether it's allowed.
+- **Driver installs without a password** (builds made with `DRIVER_DAEMON=1`; off by default, like the helper): once
+  Junction is allowed in Login Items, its driver installer installs, updates and removes the driver with no password
+  prompt, and only the copy inside Junction, signed like it. **Settings** shows whether it's allowed.
 - **Crash reports** (opt-in in Settings): after a crash, the next launch shows the whole report (the diagnostic
   report and macOS's crash log) and offers **Send Report** in release builds, or **Copy Report**.
 - **Uninstall Junction…** (Settings): removes the driver, both helpers and the login item, and on request the saved
@@ -89,7 +90,7 @@ Junction**), so it is heard only where you route it.
 **Per-app capture through a virtual device**: when an app plays into one of Junction's virtual devices, the sidebar's
 Apps section and the + menu offer "*app* through *device*" on the other devices' canvases: just that app's sound
 from that device, taken in the driver before the device mixes its apps together. It counts as the device's own audio
-for the feedback rules.
+for the feedback rules. It needs Junction Driver Installer, so only builds made with `DRIVER_DAEMON=1` can hear it.
 
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/canvas-light.png">
@@ -181,9 +182,10 @@ open build/Junction.app
 The first time, the sidebar and canvas offer **Install Driver…**: macOS asks for an administrator password, the driver
 is copied to `/Library/Audio/Plug-Ins/HAL/JunctionDriver.driver` and Core Audio restarts (all sound stops for a
 moment). By hand: `sudo sh scripts/install-driver.sh build/JunctionDriver.driver`; remove it with **Routing ›
-Uninstall Driver…** or `sudo sh scripts/uninstall-driver.sh`. Release builds install, update and remove it without a
-password through **Junction Driver Installer** once the user allows Junction in System Settings › General › Login
-Items & Extensions (see "How it works"); until then, and in plain builds, they ask for the password as above.
+Uninstall Driver…** or `sudo sh scripts/uninstall-driver.sh`. Builds made with `DRIVER_DAEMON=1` install, update and
+remove it without a password through **Junction Driver Installer** once the user allows Junction in System Settings ›
+General › Login Items & Extensions (see "How it works"); until then, and in every other build, they ask for the
+password as above.
 
 **Junction › Settings… › Uninstall Junction…** removes the driver, Junction Helper, the driver installer and the login
 item, and on request the saved setup (`~/Library/Application Support/Junction`) and both apps' preferences, then
@@ -385,20 +387,20 @@ and rate, reports a rate set from outside, disappears and returns); it opens no 
 
 `build.sh` always puts Junction Helper and its launch agent into Junction.app; `ROUTING_HELPER` decides whether the
 app registers and uses it (`JunctionRoutingHelper` in its Info.plist): `1` routes in the helper, `0` inside the app.
-It defaults to `1` for release builds (`UPDATE_FEED_URL` set) and `0` for plain and omso Builder builds, which route
-inside the app as before. `ROUTING_HELPER=1 SIGN_IDENTITY="Apple Development: …" ./build.sh` makes a development
-build with the helper. The tests drive the helper's XPC protocol through an in-process listener with a stand-in
-router; `--self-test` checks the helper bundle, its signature and launch agent, and the same XPC round trip.
+It defaults to `0` in every build, release builds included, until the helper has been tried on a real Mac.
+`ROUTING_HELPER=1 SIGN_IDENTITY="Apple Development: …" ./build.sh` makes a development build with the helper. The
+tests drive the helper's XPC protocol through an in-process listener with a stand-in router; `--self-test` checks the
+helper bundle, its signature and launch agent, and the same XPC round trip.
 
 `build.sh` likewise always puts Junction Driver Installer and its launch daemon plist into Junction.app (signed with
 the identifier `local.junction.driverd`); `DRIVER_DAEMON` (`1` or `0`, written to `JunctionDriverDaemon` in
-Info.plist) decides whether the app registers and uses it, and defaults like `ROUTING_HELPER`: on for release builds,
-off for plain and omso Builder builds, which keep the administrator prompt and register nothing. The tests put the
-daemon's root actions (stage, check a signature, install, remove, restart Core Audio) behind the
-`PrivilegedActions` protocol and check which copy it installs, the version decisions, every signature verdict, that
-a copy failing the check is discarded, and the XPC exchange, including refused callers. `--self-test` checks the
-daemon's bundle, plist and signature, the verdict it would reach on the bundled driver (refusal in ad-hoc builds),
-and an install over XPC with stand-in actions. Nothing is installed or registered by either.
+Info.plist) decides whether the app registers and uses it, and defaults to `0` like `ROUTING_HELPER`: builds without
+it keep the administrator prompt and register nothing. The tests put the daemon's root actions (stage, check a
+signature, install, remove, restart Core Audio) behind the `PrivilegedActions` protocol and check which copy it
+installs, the version decisions, every signature verdict, that a copy failing the check is discarded, and the XPC
+exchange, including refused callers. `--self-test` checks the daemon's bundle, plist and signature, the verdict it
+would reach on the bundled driver (refusal in ad-hoc builds), and an install over XPC with stand-in actions. Nothing
+is installed or registered by either.
 
 Crash reports are opt-in (**Settings › Offer to send crash reports**). After Junction or Junction Helper crashes,
 macOS writes `Junction-<date>.ips` or `JunctionHelper-<date>.ips` to `~/Library/Logs/DiagnosticReports`; the next
@@ -488,16 +490,16 @@ system-audio permissions and **Install Driver…** with the first one.
   Junction Helper with **Keep routing after quitting Junction** on.
 - Junction Helper hasn't been tried on a real Mac yet: registering it with `SMAppService`, launchd starting it at
   login and on demand, the code-signature checks between app and helper with a Developer ID, the permission prompts
-  naming it, and routing real audio from it are all unverified. Only its XPC protocol (in one process), the
-  fallback to routing inside the app, and the bundle's layout and signature are tested. Release builds use it by
-  default; build with `ROUTING_HELPER=0` to leave it out of use. Starting without the window at login relies on
-  macOS marking the launch as a login item, also unverified.
+  naming it, and routing real audio from it are all unverified. Only its XPC protocol (in one process), the fallback
+  to routing inside the app, and the bundle's layout and signature are tested. No build uses it by default, release
+  builds included; build with `ROUTING_HELPER=1` to use it. Starting without the window at login relies on macOS
+  marking the launch as a login item, also unverified.
 - Junction Driver Installer hasn't been tried on a real Mac yet: registering it with `SMAppService.daemon`, the user
   approving it, launchd starting it as root, the code-signature checks on both sides of its XPC connection with a
   Developer ID, and installing, updating and removing the driver through it are all unverified. Its decisions, its
   XPC exchange (in one process, with stand-in actions) and its file steps (in a temporary folder) are tested, and
-  the bundle's layout and signature are checked. Release builds use it by default; build with `DRIVER_DAEMON=0` to
-  keep the administrator prompt only. **Uninstall Junction…** hasn't been run end to end either.
+  the bundle's layout and signature are checked. No build uses it by default, release builds included; build with
+  `DRIVER_DAEMON=1` to use it. **Uninstall Junction…** hasn't been run end to end either.
 - Crash reports cover Junction and Junction Helper; the driver installer runs as root, so its crash logs land where
   the app can't read them. Sending to a real `CRASH_REPORT_URL` hasn't been tried, and a report is offered only once
   the main window is open (a launch at login shows it when the window is opened).
@@ -506,13 +508,13 @@ system-audio permissions and **Install Driver…** with the first one.
   hasn't been checked on a real Mac yet.
 - Virtual devices can't feed each other; to use the same source in two devices, add it to both canvases.
 - Per-app capture through a virtual device works end to end only with the driver installed and Junction Driver
-  Installer installed and allowed (release builds): the daemon is the only way the region reaches Junction, and an
-  ad-hoc signed daemon accepts nobody. It hasn't been tried on a real Mac yet: the driver reaching the daemon from
-  coreaudiod's sandbox, the daemon recognising coreaudiod's processes (identifiers `com.apple.audio.coreaudiod` and
-  `com.apple.audio.Core-Audio-Driver-Service`, user `_coreaudiod`), the HAL calling `ProcessOutput` for every client
-  and the audio itself are unverified. While it holds a region the daemon stays running. At most 32 clients and 8
-  channels per client are captured; the device's own volume isn't applied to it. Junction Helper notices apps
-  starting or stopping on a device within 3 s (the app at once).
+  Installer installed and allowed (builds made with `DRIVER_DAEMON=1`): the daemon is the only way the region reaches
+  Junction, and an ad-hoc signed daemon accepts nobody. It hasn't been tried on a real Mac yet: the driver reaching
+  the daemon from coreaudiod's sandbox, the daemon recognising coreaudiod's processes (identifiers
+  `com.apple.audio.coreaudiod` and `com.apple.audio.Core-Audio-Driver-Service`, user `_coreaudiod`), the HAL calling
+  `ProcessOutput` for every client and the audio itself are unverified. While it holds a region the daemon stays
+  running. At most 32 clients and 8 channels per client are captured; the device's own volume isn't applied to it.
+  Junction Helper notices apps starting or stopping on a device within 3 s (the app at once).
 - A virtual device's sample rate can also be set by other apps (Audio MIDI Setup, a DAW), and macOS puts back the rate
   it remembers for a device when it appears. Junction insists on its own rate for a few seconds after you create, turn
   on or change a device, and otherwise adopts the outside change rather than fighting it.

@@ -49,12 +49,12 @@ the sidebar and the canvas offer **Install Driver…**.
 
 - macOS asks for your administrator password.
 - All sound on the Mac stops for a moment while macOS's audio system restarts. That is normal.
-- In the released Junction you can skip the password from then on: macOS lists **Junction** under System Settings ›
-  General › **Login Items & Extensions** (Allow in the Background). Allow it there, and Junction's driver installer
-  installs, updates and removes the driver without asking for your password. **Junction › Settings…** shows
-  **Driver installs: Without a password** once it's allowed, or **Waiting for your approval** with an **Open Login
-  Items** button. It only ever installs the driver inside your copy of Junction, and only when that driver is signed
-  like Junction itself.
+- In a Junction built with its driver installer (not yet the standard Junction) you can skip the password from then
+  on: macOS lists **Junction** under System Settings › General › **Login Items & Extensions** (Allow in the
+  Background). Allow it there, and Junction's driver installer installs, updates and removes the driver without asking
+  for your password. **Junction › Settings…** shows **Driver installs: Without a password** once it's allowed, or
+  **Waiting for your approval** with an **Open Login Items** button. It only ever installs the driver inside your copy
+  of Junction, and only when that driver is signed like Junction itself.
 - After that, your virtual devices exist for every app, even when Junction isn't running (they're silent until
   Junction routes something into them or an app plays into them).
 
@@ -161,7 +161,7 @@ DJ Deck" and its cables turn dashed until it plays again.
 
 This needs the Junction driver and **Junction Driver Installer** (allowed in System Settings › General › Login Items &
 Extensions; see section 16): the driver keeps each app's sound in a buffer of its own and the installer hands it to
-Junction only. Without the installer the node shows why it hears nothing.
+Junction only. The standard Junction doesn't use the installer yet, so there the node shows why it hears nothing.
 
 You don't need an output for a device that another app records (like OBS): add one only when you want to listen
 to it yourself. If apps already play on those headphones, you may hear some sounds twice.
@@ -530,9 +530,10 @@ is.
 
 ### Routing in the background
 
-In the released Junction, routing runs in **Junction Helper**, a small helper inside Junction with no Dock icon or
-window. Settings shows **Routing runs in the background**. You don't need to do anything: Junction starts the helper
-when it needs it and sends it every change you make.
+The standard Junction routes by itself: Settings shows **Routing runs inside Junction**, and routing stops when it
+quits. A Junction built for it (not yet the standard one) routes in **Junction Helper** instead, a small helper inside
+Junction with no Dock icon or window. Settings then shows **Routing runs in the background**. You don't need to do
+anything: Junction starts the helper when it needs it and sends it every change you make.
 
 - **Keep routing after quitting Junction** (Settings): with it on, your devices keep their sound after you quit
   Junction, and routing starts again when you log in, even before you open Junction. With it off (the standard
@@ -544,7 +545,8 @@ when it needs it and sends it every change you make.
 - Permissions belong to the helper: macOS asks for **Junction Helper**, and lists it under Microphone and Screen &
   System Audio Recording. The banners and hints name it too.
 
-If you build Junction yourself, routing runs inside Junction unless you build with `ROUTING_HELPER=1`.
+If you build Junction yourself, routing runs inside Junction unless you build with `ROUTING_HELPER=1`, and the driver
+installs with your password unless you build with `DRIVER_DAEMON=1`.
 
 ## 14. Permissions
 
