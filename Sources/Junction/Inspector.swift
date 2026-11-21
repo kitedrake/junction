@@ -124,6 +124,10 @@ private struct NodeInspector: View {
             ExcludedApps(node: node, excluded: excluded)
         }
 
+        if ports.inputs > 0 || info.sampleRate(node) != nil {
+            SampleRateSettings(node: node, receives: ports.inputs > 0)
+        }
+
         if ports.inputs > 0 {
             SinkTiming(node: node)
         }
@@ -183,6 +187,39 @@ private struct VirtualDeviceSettings: View {
     private func commitName() {
         guard name != device.name else { return }
         model.updateVirtualDevice(device.id) { $0.name = name }
+    }
+}
+
+/// A device node's effective rate and, for a receiving node, whether devices at other rates are converted.
+private struct SampleRateSettings: View {
+    @Environment(AppModel.self) private var model
+    let node: Node
+    let receives: Bool
+
+    var body: some View {
+        GroupBox("Sample rate") {
+            VStack(alignment: .leading, spacing: 8) {
+                if let text = model.info.rateText(node, plan: model.plan) {
+                    Text(text).font(.callout)
+                }
+                if receives {
+                    Picker("Conversion", selection: Binding(
+                        get: { node.rateConversion },
+                        set: { value in model.updateNode(node.id) { $0.rateConversion = value } })) {
+                        Text("Automatic").tag(RateConversion.automatic)
+                        Text("Off").tag(RateConversion.off)
+                    }
+                    Text(node.rateConversion == .automatic
+                         ? "Devices at another rate than this one are converted, so they can stay at the rate they run best at. Conversion adds about one buffer of each device to the delay below, and a little work for the Mac."
+                         : "Devices at another rate are combined as they are and can sound off; set both to the same rate in Audio MIDI Setup.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 }
 

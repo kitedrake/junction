@@ -208,7 +208,7 @@ final class AppModel {
     /// next periodic refresh. Changed sinks are rebuilt (cross-faded); the others keep running.
     private func watchDevices(in plan: RoutingPlan) {
         guard !isDemo else { return }
-        let uids = Set(plan.sinks.flatMap { $0.subDevices.map(\.uid) })
+        let uids = Set(plan.sinks.flatMap { ($0.subDevices + $0.converted).map(\.uid) })
         guard uids != watchedUIDs else { return }
         watchedUIDs = uids
         deviceWatcher = uids.isEmpty ? nil : HAL.DeviceWatcher(uids: uids, queue: .main) {
@@ -349,9 +349,10 @@ final class AppModel {
         NSWorkspace.shared.open(url)
     }
 
-    /// Whether routing reads any audio input: a sink's aggregate reads its device's own inputs and every source device.
+    /// Whether routing reads any audio input: a sink's aggregate reads its device's own inputs and every source device,
+    /// and a converted device is read on its own.
     var needsMicrophone: Bool {
-        plan.sinks.contains { $0.subDevices.contains { $0.inputChannels > 0 } }
+        plan.sinks.contains { !$0.converted.isEmpty || $0.subDevices.contains { $0.inputChannels > 0 } }
     }
 
     /// Follows the Microphone permission. When it is granted, every sink is built again (one that started without it

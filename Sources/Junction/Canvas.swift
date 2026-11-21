@@ -403,10 +403,26 @@ struct NodeCard: View {
                     Text(info.title(node))
                         .font(.system(size: 13, weight: .semibold))
                         .lineLimit(1)
-                    Text(info.subtitle(node))
+                    // The device's rate goes after the subtitle where it fits; a conversion gets a line of its own.
+                    ViewThatFits(in: .horizontal) {
+                        if model.plan.conversions[node.id] == nil, let rate = info.sampleRate(node) {
+                            Text(info.subtitle(node) + " · " + formatSampleRate(rate))
+                        }
+                        Text(info.subtitle(node))
+                    }
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    if let conversion = model.plan.conversions[node.id] {
+                        ViewThatFits(in: .horizontal) {
+                            Text(conversion.text)
+                            Text(conversion.shortText)
+                        }
                         .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.teal)
                         .lineLimit(1)
+                        .help(conversion.text)
+                    }
                 }
                 Spacer(minLength: 0)
                 if failing || !issues.isEmpty {

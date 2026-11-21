@@ -178,5 +178,5 @@ struct DriverNotice: View {
 
 func formatRate(_ rate: Double) -> String {
     let value = rate / 1000
-    return value == value.rounded() ? "\(Int(value)) kHz" : String(format: "%.1f kHz", value)
+    return formatSampleRate(rate)
 }

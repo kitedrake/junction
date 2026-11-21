@@ -85,8 +85,8 @@ Click the device on the canvas to see its settings in the inspector:
 - **Name**: what apps call it. Pick something you'll recognise in OBS or Discord, like "Stream Mix".
 - **Channels**: 2 is stereo. Use more to keep things apart, for example 4 channels with your mic on 1–2 and a call
   on 3–4.
-- **Sample rate**: 48 kHz suits streaming and video. Matching the rate of your other devices gives the cleanest
-  sound.
+- **Sample rate**: 48 kHz suits streaming and video. Devices running at another rate are converted (see
+  "Sample rates" in section 7), so you don't have to match them.
 
 In other apps the device appears under its name, both as a microphone (what Junction sends into it) and as a
 speaker. Anything an app plays into it comes back out of it too.
@@ -172,6 +172,18 @@ What the canvas shows:
 A selected cable shows roughly how long sound takes to travel through it. Select the virtual device or an output to
 change its **Buffer size** under **Delay**. Smaller buffers mean less delay but more work for the Mac. If you hear
 crackles, choose a bigger buffer. **Automatic** leaves the choice to macOS.
+
+### Sample rates
+
+Device nodes show the rate they run at, for example "Scarlett 2i2 USB · 48 kHz". When a device runs at another rate
+than the virtual device it feeds or plays, Junction converts between the two and the node says so on a line of its own: a
+source shows "44.1 kHz, converted to 48 kHz", an output "44.1 kHz, converted from 48 kHz". Conversion keeps the
+pitch right and follows the small differences between two devices' clocks. It adds a little delay (under 1 ms for
+the filter, plus about one buffer of each device), which the delay shown in the inspector includes.
+
+Select the virtual device or an output to change **Conversion** under **Sample rate**. **Automatic** (the usual
+choice) converts any device at another rate. **Off** combines them as they are, as Junction did before conversion
+existed: the node then shows a yellow triangle, and you should set both to the same rate in Audio MIDI Setup.
 
 ## 8. Leave apps out
 
@@ -261,7 +273,9 @@ there is one, is offered as above.
 | OBS hears nothing from the device | Is routing on (power button)? Is the device switched on in the sidebar? Are its cables solid, not dashed? Check both permissions (section 11). |
 | My voice chat is still on stream | Select System Audio and check that the chat app is in its **Leave out** list. Safari and other apps built on Safari share one process, so they can only be left out together. |
 | I hear things twice | An output on the device's canvas plays the device on top of what apps already play there. Remove the output, or use headphones that apps don't play on. |
-| Crackles or odd pitch | Select the nodes with a yellow triangle: devices running at different sample rates. Set them to the same rate in Audio MIDI Setup. Crackles can also mean the buffer is too small: select the device or output and choose a bigger **Buffer size**. |
+| Crackles or odd pitch | Crackles usually mean the buffer is too small: select the device or output and choose a bigger **Buffer size**. A node with a yellow triangle about sample rates is combined without conversion: select the virtual device or output it is wired to and set **Conversion** to **Automatic**, or set both devices to the same rate in Audio MIDI Setup. |
+| A node says "converted to 48 kHz" | That device runs at another rate than its virtual device, and Junction converts it. Nothing to do; to avoid the small extra delay, set both to the same rate in Audio MIDI Setup. |
+| Converted sound drops out for a moment | The device stopped delivering sound in time (a busy Mac, or a device that paused), so Junction faded it out and back in rather than click. A bigger **Buffer size** helps; the Routing Log shows rebuilds if the device stopped altogether. |
 | The volume keys don't change a virtual device | Virtual devices have no volume control yet; use the level faders in Junction. |
 | A device or interface shows "Not connected" | It's unplugged or off. Its cables come back to life when it returns. |
 | A virtual device switched sample rate on its own | Other apps (Audio MIDI Setup, a DAW) can set it, and macOS restores the last rate it remembers. Junction follows such changes; set the rate you want in the inspector. |

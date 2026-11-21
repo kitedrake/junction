@@ -12,7 +12,9 @@ enum Demo {
     @MainActor static func load(into model: AppModel) {
         let stream = VirtualDevice(name: "Stream Mix")
         let recording = VirtualDevice(name: "Recording", channels: 4)
-        let headphones = DeviceInfo(uid: "demo.headphones", name: "AirPods Pro", inputChannels: 1, outputChannels: 2)
+        // At 44.1 kHz, so the canvas shows Stream Mix's 48 kHz being converted for them.
+        let headphones = DeviceInfo(uid: "demo.headphones", name: "AirPods Pro", inputChannels: 1, outputChannels: 2,
+                                    sampleRate: 44100)
         // Stream Mix: system audio without Discord, plus the mic, monitored on headphones.
         let system = Node(kind: .systemAudio(excluding: [discord]), x: 40, y: 50, canvas: stream.id)
         let mic = Node(kind: .defaultInput, x: 40, y: 250, canvas: stream.id)

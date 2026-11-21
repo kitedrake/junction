@@ -132,6 +132,10 @@ public enum Diagnostics {
             var line = "  \(sink.name): \(sink.routes.count) route(s), \(sink.taps.count) tap(s), devices "
                 + sink.subDevices.map { "\($0.uid)@\(Int($0.sampleRate))" }.joined(separator: ", ")
                 + ", aggregate \(sink.inputChannels) in / \(sink.outputChannels) out"
+            if !sink.converted.isEmpty {
+                line += ", converted to \(Int(sink.sampleRate)): "
+                    + sink.converted.map { "\($0.uid)@\(Int($0.sampleRate))" }.joined(separator: ", ")
+            }
             if let frames = sink.bufferFrames { line += ", buffer \(frames)" }
             if let status = statuses?[sink.sinkNode] {
                 line += status.state == .running ? ", running" : ", failed"

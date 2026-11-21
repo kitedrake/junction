@@ -1,6 +1,7 @@
 #!/bin/sh
-# Runs the engine tests, then the driver harness: the driver is built with address and undefined-behaviour
-# sanitizers and loaded into a test process with a stand-in host. Nothing is installed.
+# Runs the engine tests, a stress test of the render kernel, then the driver harness: the kernel and the driver are
+# built with address and undefined-behaviour sanitizers, and the driver is loaded into a test process with a
+# stand-in host. Nothing is installed.
 set -eu
 cd "$(dirname "$0")"
 if [ -d /Applications/Xcode.app/Contents/Developer ]; then
@@ -13,6 +14,10 @@ xcrun swift test $spm_flags "$@"
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/junction-harness.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
 sanitize="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+# The render kernel's sample-rate converter under the same sanitizers: random buffer sizes, stalls and rates.
+xcrun clang $sanitize -mmacosx-version-min=26.0 -O1 -Wall -Wextra -Werror -ISources/JunctionKernel/include -framework CoreAudio \
+  Sources/JunctionKernel/*.c Tests/KernelHarness/stress.c -o "$tmp/kernel-stress"
+"$tmp/kernel-stress"
 mkdir -p "$tmp/JunctionDriver.driver/Contents/MacOS"
 xcrun clang $sanitize -mmacosx-version-min=26.0 -bundle -O1 -Wall -Wextra -Werror -Wno-four-char-constants -fvisibility=hidden \
   -framework CoreAudio -framework CoreFoundation Driver/JunctionDriver.c -o "$tmp/JunctionDriver.driver/Contents/MacOS/JunctionDriver"

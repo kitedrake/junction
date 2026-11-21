@@ -190,6 +190,18 @@ public struct NodeInfo {
         }
     }
 
+    /// The nominal sample rate of the device a node stands for right now (nil for app audio or a missing device).
+    public func sampleRate(_ node: Node) -> Double? {
+        guard let rate = inventory.device(deviceUID(node))?.sampleRate, rate > 0 else { return nil }
+        return rate
+    }
+
+    /// A device node's effective rate: "44.1 kHz, converted to 48 kHz" when Junction converts it, else "48 kHz".
+    public func rateText(_ node: Node, plan: RoutingPlan) -> String? {
+        if let note = plan.conversions[node.id] { return note.text }
+        return sampleRate(node).map { formatSampleRate($0) }
+    }
+
     /// The device UID a node stands for right now, if it is a device and available.
     public func deviceUID(_ node: Node) -> String? {
         switch node.kind {

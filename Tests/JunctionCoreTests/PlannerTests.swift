@@ -64,7 +64,8 @@ final class PlannerTests: XCTestCase {
 
     func testLayoutWithSeveralDevicesAndTaps() throws {
         var graph = Graph(virtualDevices: [Demo.streamMix])
-        let sink = Node(kind: .virtualDevice(Demo.streamMix.id))
+        // Conversion off: the 44.1 kHz interface joins the aggregate as it is (see testConvertsDevicesAtOtherRates).
+        let sink = Node(kind: .virtualDevice(Demo.streamMix.id), rateConversion: .off)
         let mic = Node(kind: .defaultInput)
         let interface = Node(kind: .device(Demo.interface.ref))
         let discord = Node(kind: .application(Demo.discord))
@@ -85,6 +86,138 @@ final class PlannerTests: XCTestCase {
         XCTAssertEqual(s.routes[3].gain, Float(pow(10, -6.0 / 20)), accuracy: 1e-6)
         // The interface runs at 44.1 kHz, the virtual device at 48 kHz.
         XCTAssertTrue(plan.issues[interface.id]?.first?.contains("44.1 kHz") ?? false)
+        XCTAssertTrue(plan.issues[interface.id]?.first?.contains("Set both to the same rate") ?? false)
+        XCTAssertTrue(s.converted.isEmpty)
+        XCTAssertTrue(plan.conversions.isEmpty)
+    }
+
+    func testConvertsDevicesAtOtherRates() throws {
+        // The same graph with conversion on (the default): the 44.1 kHz interface leaves the aggregate.
+        var graph = Graph(virtualDevices: [Demo.streamMix])
+        let sink = Node(kind: .virtualDevice(Demo.streamMix.id))
+        let mic = Node(kind: .defaultInput)
+        let interface = Node(kind: .device(Demo.interface.ref))
+        let discord = Node(kind: .application(Demo.discord))
+        graph.nodes = [sink, mic, interface, discord]
+        graph.cables = [
+            Cable(from: PortRef(node: mic.id, channel: 0), to: PortRef(node: sink.id, channel: 0)),
+            Cable(from: PortRef(node: interface.id, channel: 1), to: PortRef(node: sink.id, channel: 1)),
+            Cable(from: PortRef(node: interface.id, channel: 0), to: PortRef(node: sink.id, channel: 0)),
+            Cable(from: PortRef(node: discord.id, channel: 0), to: PortRef(node: sink.id, channel: 0)),
+        ]
+        XCTAssertEqual(sink.rateConversion, .automatic, "conversion is on by default")
+        let plan = Planner.plan(graph, inventory: Demo.inventory)
+        let s = try XCTUnwrap(plan.sinks.first)
+        XCTAssertEqual(s.subDevices.map(\.uid), [Demo.streamMix.uid, Demo.mic.uid], "the 48 kHz devices share the aggregate")
+        XCTAssertEqual(s.converted.map(\.uid), [Demo.interface.uid])
+        XCTAssertEqual(s.converted.first?.sampleRate, 44100)
+        XCTAssertEqual(s.sampleRate, 48000)
+        // Stream Mix (2) + mic (1) = 3, the Discord tap at 3–4, then the converted interface at 5–6.
+        XCTAssertEqual(s.inputChannels, 5)
+        XCTAssertEqual(s.outputChannels, 2)
+        XCTAssertEqual(s.routes.map(\.input), [2, 6, 5, 3])
+        XCTAssertNil(plan.issues[interface.id], "no warning: the rates are converted")
+        XCTAssertEqual(plan.conversions[interface.id]?.text, "44.1 kHz, converted to 48 kHz")
+        XCTAssertEqual(plan.conversions[interface.id]?.shortText, "44.1 → 48 kHz")
+        XCTAssertNil(plan.conversions[mic.id])
+        let info = NodeInfo(graph: graph, inventory: Demo.inventory)
+        XCTAssertEqual(info.rateText(interface, plan: plan), "44.1 kHz, converted to 48 kHz")
+        XCTAssertEqual(info.rateText(mic, plan: plan), "48 kHz")
+        XCTAssertNil(info.rateText(discord, plan: plan))
+
+        // Turning conversion off, or the interface switching to 48 kHz, changes which devices are converted: the
+        // sink is rebuilt.
+        var off = graph
+        off.nodes[0].rateConversion = .off
+        let offPlan = try XCTUnwrap(Planner.plan(off, inventory: Demo.inventory).sinks.first)
+        XCTAssertTrue(offPlan.converted.isEmpty)
+        XCTAssertNotEqual(offPlan.structureKey, s.structureKey)
+        var matching = Demo.inventory
+        let index = try XCTUnwrap(matching.devices.firstIndex { $0.uid == Demo.interface.uid })
+        matching.devices[index].sampleRate = 48000
+        let matchingPlan = Planner.plan(graph, inventory: matching)
+        let m = try XCTUnwrap(matchingPlan.sinks.first)
+        XCTAssertTrue(m.converted.isEmpty)
+        XCTAssertEqual(m.subDevices.map(\.uid), [Demo.streamMix.uid, Demo.mic.uid, Demo.interface.uid])
+        XCTAssertNotEqual(m.structureKey, s.structureKey)
+        XCTAssertTrue(matchingPlan.conversions.isEmpty)
+        // Gains alone still don't rebuild a converting sink.
+        var louder = graph
+        louder.cables[1].gainDB = -6
+        XCTAssertEqual(try XCTUnwrap(Planner.plan(louder, inventory: Demo.inventory).sinks.first).structureKey, s.structureKey)
+    }
+
+    func testOutputsAtAnotherRateReceiveConvertedAudio() throws {
+        // Stream Mix (48 kHz) plays on the interface, which runs at 44.1 kHz.
+        let canvas = Demo.streamMix.id
+        var graph = Graph(virtualDevices: [Demo.streamMix])
+        let mix = Node(kind: .virtualDevice(canvas), canvas: canvas)
+        let interface = Node(kind: .device(Demo.interface.ref), canvas: canvas)
+        let speakers = Node(kind: .defaultOutput, canvas: canvas)
+        graph.nodes = [mix, interface, speakers]
+        graph.cables = Rules.busCables(from: mix.id, to: interface.id, graph: graph, inventory: Demo.inventory)
+            + Rules.busCables(from: mix.id, to: speakers.id, graph: graph, inventory: Demo.inventory)
+        let plan = Planner.plan(graph, inventory: Demo.inventory)
+        XCTAssertEqual(plan.sinks.count, 2)
+        let toInterface = try XCTUnwrap(plan.sinks.first { $0.sinkNode == interface.id })
+        XCTAssertEqual(toInterface.subDevices.map(\.uid), [Demo.interface.uid], "the interface is the clock")
+        XCTAssertEqual(toInterface.converted.map(\.uid), [Demo.streamMix.uid], "Stream Mix runs on its own IOProc")
+        XCTAssertEqual(toInterface.sampleRate, 44100)
+        // The interface's own inputs (2) are the aggregate's; Stream Mix's channels follow them.
+        XCTAssertEqual(toInterface.routes.map(\.input), [2, 3])
+        XCTAssertEqual(plan.conversions[interface.id]?.text, "44.1 kHz, converted from 48 kHz")
+        XCTAssertNil(plan.conversions[mix.id], "Stream Mix feeds other outputs at its own rate")
+        let toSpeakers = try XCTUnwrap(plan.sinks.first { $0.sinkNode == speakers.id })
+        XCTAssertTrue(toSpeakers.converted.isEmpty, "the speakers run at 48 kHz like Stream Mix")
+        XCTAssertEqual(toSpeakers.subDevices.map(\.uid), [Demo.speakers.uid, Demo.streamMix.uid])
+        XCTAssertNil(plan.conversions[speakers.id])
+
+        // With conversion off on the interface, Stream Mix joins its aggregate and the old note comes back.
+        let index = try XCTUnwrap(graph.nodes.firstIndex { $0.id == interface.id })
+        graph.nodes[index].rateConversion = .off
+        let off = Planner.plan(graph, inventory: Demo.inventory)
+        let offSink = try XCTUnwrap(off.sinks.first { $0.sinkNode == interface.id })
+        XCTAssertEqual(offSink.subDevices.map(\.uid), [Demo.interface.uid, Demo.streamMix.uid])
+        XCTAssertNil(off.conversions[interface.id])
+        XCTAssertTrue(off.issues[mix.id]?.first?.contains("conversion is off") ?? false)
+    }
+
+    func testSchema3FilesTurnOnConversion() throws {
+        // A schema 3 file has no rateConversion: it loads as Automatic and is saved as schema 4.
+        var graph = Graph()
+        let device = Templates.streamWithoutChat(&graph, excluding: [])
+        let sinkIndex = try XCTUnwrap(graph.nodes.firstIndex { $0.kind == .virtualDevice(device.id) })
+        graph.nodes[sinkIndex].bufferFrames = 256
+        graph.schema = 3
+        let data = try JSONEncoder().encode(graph)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        object["nodes"] = (object["nodes"] as? [[String: Any]])?.map { node in
+            var node = node
+            node["rateConversion"] = nil
+            return node
+        }
+        let old = try JSONSerialization.data(withJSONObject: object)
+        XCTAssertFalse(String(decoding: old, as: UTF8.self).contains("rateConversion"))
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("junction-schema4-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let store = Store(folder: folder)
+        try old.write(to: store.graphURL)
+        let loaded = try XCTUnwrap(store.load())
+        XCTAssertEqual(loaded.schema, 4)
+        XCTAssertTrue(loaded.nodes.allSatisfy { $0.rateConversion == .automatic })
+        XCTAssertEqual(loaded.nodes[sinkIndex].bufferFrames, 256, "schema 3 settings are kept")
+        XCTAssertEqual(loaded.cables, graph.cables)
+
+        // Schema 4 keeps the choice.
+        var changed = loaded
+        changed.nodes[sinkIndex].rateConversion = .off
+        try store.save(changed)
+        XCTAssertTrue(try String(contentsOf: store.graphURL, encoding: .utf8).contains("\"rateConversion\" : \"off\""))
+        XCTAssertEqual(store.load()?.nodes[sinkIndex].rateConversion, .off)
+        var again = changed
+        again.upgrade()
+        XCTAssertEqual(again, changed, "a schema 4 graph isn't converted again")
     }
 
     func testGainsDoNotChangeStructure() throws {
@@ -140,7 +273,7 @@ final class PlannerTests: XCTestCase {
         XCTAssertEqual(after.bufferFrames, 128)
         XCTAssertNotEqual(before.structureKey, after.structureKey)
 
-        // Schema 2 files have no buffer sizes: they load as macOS's default and are saved as schema 3.
+        // Schema 2 files have no buffer sizes: they load as macOS's default and are saved as the current schema.
         graph.nodes[index].bufferFrames = nil
         graph.schema = 2
         let json = try XCTUnwrap(String(data: JSONEncoder().encode(graph), encoding: .utf8))
@@ -151,7 +284,7 @@ final class PlannerTests: XCTestCase {
         let store = Store(folder: folder)
         try Data(json.utf8).write(to: store.graphURL)
         let loaded = try XCTUnwrap(store.load())
-        XCTAssertEqual(loaded.schema, 3)
+        XCTAssertEqual(loaded.schema, Graph.currentSchema)
         XCTAssertTrue(loaded.nodes.allSatisfy { $0.bufferFrames == nil })
         XCTAssertEqual(loaded.cables, graph.cables)
     }

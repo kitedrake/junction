@@ -49,8 +49,9 @@ public final class Router: @unchecked Sendable {
     /// Sinks that failed to build or stopped running, and when to try again.
     private var failures: [UUID: Failure] = [:]
     private var retry: DispatchWorkItem?
-    /// IO cycles per running sink at the last health check, and how many checks in a row they didn't move.
-    private var progress: [UUID: (cycles: UInt64, still: Int)] = [:]
+    /// IO cycles per running sink (and per converted device feeding it) at the last health check, and how many checks
+    /// in a row one of them didn't move.
+    private var progress: [UUID: (cycles: [UInt64], still: Int)] = [:]
     private var healthTimer: DispatchSourceTimer?
     static let log = Logger(subsystem: "local.junction", category: "routing")
     private let events: EventLog
@@ -247,8 +248,8 @@ public final class Router: @unchecked Sendable {
         progress = progress.filter { current[$0.key] != nil }
         var stalled: [UUID] = []
         for (id, runner) in current {
-            let cycles = runner.cycles
-            if let last = progress[id], last.cycles == cycles {
+            let cycles = runner.activity
+            if let last = progress[id], zip(last.cycles, cycles).contains(where: { $0 == $1 }) {
                 progress[id] = (cycles, last.still + 1)
                 if last.still + 1 >= Self.stalledChecks { stalled.append(id) }
             } else {
@@ -294,12 +295,14 @@ enum RouterError: Error, LocalizedError {
     case tap(String, OSStatus)
     case aggregate(OSStatus)
     case start(OSStatus)
+    case missingDevice(String)
 
     var errorDescription: String? {
         switch self {
         case .tap(let name, let status):
             "Couldn't capture \(name) (\(HAL.describe(status))). Check System Settings › Privacy & Security › Screen & System Audio Recording."
         case .aggregate(let status): "Couldn't combine the devices (\(HAL.describe(status)))."
+        case .missingDevice(let uid): "A device to convert to this rate went away (\(uid))."
         case .start(let status):
             status == kAudioDevicePermissionsError
                 ? "macOS didn't allow audio input. Check System Settings › Privacy & Security › Microphone."
@@ -308,10 +311,13 @@ enum RouterError: Error, LocalizedError {
     }
 }
 
-/// One sink: its taps, aggregate device, renderer and IOProc.
+/// One sink: its taps, aggregate device, renderer and IOProc, and an IOProc and converter per device it converts.
 final class SinkRunner: @unchecked Sendable {
     private(set) var plan: SinkPlan
     private let renderer: OpaquePointer
+    /// One per `plan.converted`, in order; the renderer reads them, each converted device's IOProc writes one.
+    private let converters: [OpaquePointer]
+    private var converterProcs: [(device: AudioObjectID, proc: AudioDeviceIOProcID)] = []
     private var aggregate = AudioObjectID(kAudioObjectUnknown)
     private var procID: AudioDeviceIOProcID?
     private var taps: [(plan: TapPlan, id: AudioObjectID, uuid: UUID, processes: [AudioObjectID])] = []
@@ -328,15 +334,29 @@ final class SinkRunner: @unchecked Sendable {
         let sources = plan.routes.map { UInt32($0.input) }
         let destinations = plan.routes.map { UInt32($0.output) }
         let gains = plan.routes.map(\.gain)
-        guard let renderer = jk_renderer_create(UInt32(plan.inputChannels), UInt32(plan.sinkOutputChannels),
-                                                UInt32(plan.routes.count), sources, destinations, gains)
-        else { return nil }
+        var converters: [OpaquePointer] = []
+        for device in plan.converted {
+            guard let converter = jk_converter_create(UInt32(device.inputChannels), device.sampleRate, plan.sampleRate) else {
+                converters.forEach { jk_converter_destroy($0) }
+                return nil
+            }
+            converters.append(converter)
+        }
+        guard let renderer = jk_renderer_create_converting(UInt32(plan.inputChannels), UInt32(plan.sinkOutputChannels),
+                                                           UInt32(plan.routes.count), sources, destinations, gains,
+                                                           converters, UInt32(converters.count))
+        else {
+            converters.forEach { jk_converter_destroy($0) }
+            return nil
+        }
         self.renderer = renderer
+        self.converters = converters
         jk_renderer_set_master_gain(renderer, plan.masterGain)
     }
 
     deinit {
         jk_renderer_destroy(renderer)
+        converters.forEach { jk_converter_destroy($0) }
     }
 
     /// Builds and starts the sink. With `fadingIn` it starts silent and fades in over one cross-fade.
@@ -387,7 +407,20 @@ final class SinkRunner: @unchecked Sendable {
         if let frames = plan.bufferFrames { Self.setBufferSize(aggregate, frames) }
         let rate = HAL.value(aggregate, kAudioDevicePropertyNominalSampleRate, default: Float64(48_000))
         if rate > 0 { fadeFrames = UInt32(max(1, (Router.crossFadeSeconds * rate).rounded())) }
-        measureTiming(rate: rate)
+
+        // Devices at another rate run on their own IOProc, outside the aggregate, and feed their converters.
+        var convertedIDs: [AudioObjectID] = []
+        for (device, converter) in zip(plan.converted, converters) {
+            guard let id = HAL.deviceID(forUID: device.uid) else { throw RouterError.missingDevice(device.uid) }
+            var proc: AudioDeviceIOProcID?
+            status = AudioDeviceCreateIOProcID(id, jk_converter_ioproc, UnsafeMutableRawPointer(converter), &proc)
+            guard status == noErr, let proc else { throw RouterError.start(status) }
+            converterProcs.append((id, proc))
+            status = AudioDeviceStart(id, proc)
+            guard status == noErr else { throw RouterError.start(status) }
+            convertedIDs.append(id)
+        }
+        measureTiming(rate: rate, converted: convertedIDs)
         if fadingIn { jk_renderer_set_fade_now(renderer, 0) }
 
         var proc: AudioDeviceIOProcID?
@@ -411,18 +444,28 @@ final class SinkRunner: @unchecked Sendable {
     }
 
     /// Roughly how long audio takes from a source to the sink: the input side's latency and safety offset, the
-    /// output side's, and one buffer each way (taps and drift compensation can add a little).
-    private func measureTiming(rate: Float64) {
+    /// output side's, and one buffer each way (taps and drift compensation can add a little). A converted device
+    /// counts its own input side and buffer, and the converter's ring and filter delay, instead of the aggregate's
+    /// input side; the slowest path is reported.
+    private func measureTiming(rate: Float64, converted: [AudioObjectID]) {
         let buffer = HAL.value(aggregate, kAudioDevicePropertyBufferFrameSize, default: UInt32(0))
-        func side(_ scope: AudioObjectPropertyScope) -> UInt32 {
-            let streams = HAL.array(aggregate, kAudioDevicePropertyStreams, scope, of: AudioStreamID.self)
+        func side(_ device: AudioObjectID, _ scope: AudioObjectPropertyScope) -> UInt32 {
+            let streams = HAL.array(device, kAudioDevicePropertyStreams, scope, of: AudioStreamID.self)
             let streamLatency = streams.map { HAL.value($0, kAudioStreamPropertyLatency, default: UInt32(0)) }.max() ?? 0
-            return HAL.value(aggregate, kAudioDevicePropertyLatency, scope, default: UInt32(0))
-                + HAL.value(aggregate, kAudioDevicePropertySafetyOffset, scope, default: UInt32(0)) + streamLatency
+            return HAL.value(device, kAudioDevicePropertyLatency, scope, default: UInt32(0))
+                + HAL.value(device, kAudioDevicePropertySafetyOffset, scope, default: UInt32(0)) + streamLatency
         }
         guard buffer > 0, rate > 0 else { return }
         bufferFrames = Int(buffer)
-        latency = Double(side(kAudioObjectPropertyScopeInput) + side(kAudioObjectPropertyScopeOutput) + 2 * buffer) / rate
+        let outputSide = Double(side(aggregate, kAudioObjectPropertyScopeOutput) + buffer) / rate
+        var slowest = Double(side(aggregate, kAudioObjectPropertyScopeInput) + buffer) / rate
+        for (index, device) in converted.enumerated() where index < converters.count {
+            let deviceRate = plan.converted[index].sampleRate
+            let deviceBuffer = HAL.value(device, kAudioDevicePropertyBufferFrameSize, default: UInt32(512))
+            let input = Double(side(device, kAudioObjectPropertyScopeInput) + deviceBuffer) / deviceRate
+            slowest = max(slowest, input + jk_converter_expected_delay(converters[index], buffer, deviceBuffer))
+        }
+        latency = slowest + outputSide
     }
 
     /// Starts fading the sink out; `isSilent` turns true once the fade has been rendered.
@@ -434,6 +477,9 @@ final class SinkRunner: @unchecked Sendable {
 
     var cycles: UInt64 { jk_renderer_cycle_count(renderer) }
 
+    /// IO cycles of the sink, then of each converted device: the health check rebuilds the sink when one stops.
+    var activity: [UInt64] { [cycles] + converters.map { jk_converter_write_count($0) } }
+
     /// Waits (up to 0.1 s) until the IOProc has run once.
     func waitForFirstCycle() {
         let deadline = Date().addingTimeInterval(0.1)
@@ -441,6 +487,11 @@ final class SinkRunner: @unchecked Sendable {
     }
 
     func stop() {
+        for converted in converterProcs {
+            AudioDeviceStop(converted.device, converted.proc)
+            AudioDeviceDestroyIOProcID(converted.device, converted.proc)
+        }
+        converterProcs.removeAll()
         if let procID {
             AudioDeviceStop(aggregate, procID)
             AudioDeviceDestroyIOProcID(aggregate, procID)
@@ -456,6 +507,7 @@ final class SinkRunner: @unchecked Sendable {
 
     /// Drops what `start` built without calling Core Audio: after a restart those objects no longer exist.
     func forget() {
+        converterProcs.removeAll()
         procID = nil
         aggregate = AudioObjectID(kAudioObjectUnknown)
         taps.removeAll()
@@ -498,6 +550,9 @@ final class SinkRunner: @unchecked Sendable {
     /// What was built, for the event log.
     var summary: String {
         var parts = ["\(plan.routes.count) cable\(plan.routes.count == 1 ? "" : "s")"]
+        for device in plan.converted {
+            parts.append("converts \(device.uid) from \(formatSampleRate(device.sampleRate)) to \(formatSampleRate(plan.sampleRate))")
+        }
         for tap in taps { parts.append("\(tap.plan.name) \(Self.membership(tap.plan, tap.processes.count))") }
         if let bufferFrames { parts.append("buffer \(bufferFrames) frames") }
         if let latency { parts.append(String(format: "about %.0f ms", latency * 1000)) }

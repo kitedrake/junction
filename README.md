@@ -22,7 +22,11 @@ without your voice chat, step by step.
   settings play through that same device, and Default Input into the device it stands for.
 - **Inspector**: level and mute per node and per cable (Option- or Command-click a fader to put it back to 0 dB), the
   virtual device's settings, the apps a System Audio node leaves out, and any problem a node has. A cable shows its
-  approximate delay; a receiving node (virtual device or output) has a buffer size (64–1024 frames, or automatic).
+  approximate delay; a receiving node (virtual device or output) has a buffer size (64–1024 frames, or automatic) and
+  a sample-rate conversion setting.
+- **Sample-rate conversion**: a device running at another rate than the virtual device it feeds or plays is
+  converted, and its node shows it ("44.1 kHz, converted to 48 kHz"). **Automatic** is the default; **Off** combines
+  the devices as they are, which needs them set to the same rate.
 - **Routing** (toolbar power button, menu bar, ⇧⌘R) starts and stops everything. Junction keeps routing from the menu
   bar when the window is closed. **Settings** (⌘,) can open Junction at login (`SMAppService`) and hide its Dock icon
   so it lives in the menu bar only.
@@ -108,25 +112,33 @@ Three parts:
    buffer indexed by sample time and is read back by its input.
 2. **Planner** (`Sources/JunctionCore/Planner.swift`): turns the graph into one plan per destination ("sink"): a
    private aggregate device whose first sub-device is the sink (the clock), followed by every source device (with
-   drift compensation) and one process tap per App/System Audio node. It drops cables that would feed a virtual
-   device back into itself (for example via Default Output set to that device), and notes sample-rate mismatches and
-   missing devices.
+   drift compensation) and one process tap per App/System Audio node. A source device at another nominal sample rate
+   stays out of the aggregate when the sink's conversion is Automatic and is listed as converted instead; the set of
+   converted devices is part of the sink's structure, so a change rebuilds it. It drops cables that would feed a
+   virtual device back into itself (for example via Default Output set to that device), and notes missing devices
+   and, with conversion off, sample-rate mismatches.
 3. **Router** (`Router.swift` + the C kernel in `Sources/JunctionKernel`): builds the taps and aggregate devices and
    runs one IOProc per sink. The IOProc is plain C (no Swift reference counting, locks or allocation on the audio
    thread): it copies aggregate input channels to sink output channels with gains that glide over one buffer, and
-   keeps peak meters. Gain and mute changes don't rebuild anything; adding or removing cables rebuilds only the sinks
-   they touch. A rebuilt sink is built next to the running one, then the two cross-fade over 25 ms, so edits don't
+   keeps peak meters. Each converted device runs its own IOProc outside the aggregate, writing into a lock-free
+   single-producer, single-consumer ring; the sink's IOProc reads it through a 64-tap polyphase windowed-sinc
+   resampler (Kaiser window, 256 interpolated phases, passband to 91 % of the lower Nyquist frequency). The ratio
+   follows both clocks' rates, measured from their IO time stamps, and is nudged by at most 0.25 % to hold the ring
+   at its target fill; underruns and overruns fade out and back in over 64 frames instead of clicking. The
+   converter's buffering and filter delay (32 input frames) count in the sink's delay estimate. Gain and mute changes
+   don't rebuild anything; adding or removing cables rebuilds only the sinks they touch. A rebuilt sink is built next to the running one, then the two cross-fade over 25 ms, so edits don't
    leave a gap or click. When apps start or quit, taps are updated in place.
 
-The graph is saved to `~/Library/Application Support/Junction/graph.json` (schema 3: nodes belong to a device's
-canvas, and receiving nodes can set a buffer size). A schema 1 file from the shared-canvas versions is converted on
-load: each node moves to the canvas of the device it was wired to (unwired ones to the first device), and cables
-between devices are dropped. Schema 2 files load unchanged, with automatic buffer sizes.
+The graph is saved to `~/Library/Application Support/Junction/graph.json` (schema 4: nodes belong to a device's
+canvas, and receiving nodes can set a buffer size and sample-rate conversion). A schema 1 file from the
+shared-canvas versions is converted on load: each node moves to the canvas of the device it was wired to (unwired
+ones to the first device), and cables between devices are dropped. Schema 2 files load with automatic buffer sizes;
+schema 2 and 3 files get sample-rate conversion set to Automatic.
 
 ## Development
 
 ```sh
-./test.sh                                        # engine tests + driver harness (sanitizers), installs nothing
+./test.sh                                        # engine tests, kernel stress test + driver harness (sanitizers), installs nothing
 build/Junction.app/Contents/MacOS/Junction --self-test   # bundled driver loads, planning, kernel, saving
 build/Junction.app/Contents/MacOS/Junction --list        # driver status, devices, apps using audio
 build/Junction.app/Contents/MacOS/Junction --diagnose [file]   # bug report: versions, devices, plan, events, setup
@@ -135,7 +147,9 @@ build/Junction.app/Contents/MacOS/Junction --device-test     # with the driver i
 JUNCTION_SNAPSHOT=/tmp/shots build/Junction.app/Contents/MacOS/Junction   # demo screenshots, light and dark
 ```
 
-The driver harness (`Tests/DriverHarness/harness.c`) loads the driver into a test process with a stand-in Core Audio
+The kernel stress test (`Tests/KernelHarness/stress.c`) runs the sample-rate converter and the renderer under
+address and undefined-behaviour sanitizers with random buffer sizes, stalls on either side and every pair of common
+rates. The driver harness (`Tests/DriverHarness/harness.c`) loads the driver into a test process with a stand-in Core Audio
 host and checks the device list, properties, configuration changes, saved state across a simulated restart and
 bit-exact loopback. `--loopback-test` is the real-system check: it adds a temporary device, plays 997 Hz into it,
 records its input, and restores the device list. It needs microphone permission for the app running it (Terminal).
@@ -180,8 +194,12 @@ system-audio permissions and **Install Driver…** with the first one.
 
 - Not yet run end to end: the driver installs and passes its device and loopback tests, but the permission prompts
   and audio through real taps and aggregate devices haven't been tried with real hardware yet.
-- Sources and the sink are kept in step by Core Audio's drift compensation. Devices at different nominal sample rates
-  are flagged on the node; set them to the same rate for the best quality.
+- Sources at the sink's rate are kept in step by Core Audio's drift compensation. Sample-rate conversion has only
+  been tested with simulated clocks (tones, 0.1 % drift, underruns and overruns), not yet with real devices. It
+  converts device sources and outputs only: app and system audio taps follow the sink's rate as before. A converted
+  device adds under 1 ms of filter delay plus about one buffer of each device, and a device whose buffer is larger
+  than 4096 frames (or whose sink's is) can't be converted. With conversion off, devices at different rates are
+  flagged on the node; set them to the same rate.
 - Safari and other WebKit apps play through one shared process ("Safari & Web Views"), so they can only be captured
   or left out together.
 - Cross-fading a rebuilt sink (when cables are added or removed) hasn't been tried with real audio yet.

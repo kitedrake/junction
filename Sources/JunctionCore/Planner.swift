@@ -3,7 +3,8 @@ import Foundation
 // Turns the graph into what the router builds. Every node that receives cables (a "sink") becomes one private
 // aggregate device: the sink's device first (it is the clock), then every source device, then one process tap per
 // app/system-audio source. Core Audio keeps the clocks in step (drift compensation), so the render callback only
-// copies channels with gains.
+// copies channels with gains. A source device at another nominal sample rate stays out of the aggregate when the
+// sink's conversion is Automatic: it runs on its own IOProc and the kernel converts it to the sink's rate.
 
 public struct RoutingPlan: Equatable, Sendable {
     public var sinks: [SinkPlan] = []
@@ -11,6 +12,8 @@ public struct RoutingPlan: Equatable, Sendable {
     public var issues: [UUID: [String]] = [:]
     /// Cables that exist but carry nothing right now.
     public var idleCables: Set<UUID> = []
+    /// Device nodes whose audio is converted to or from another sample rate.
+    public var conversions: [UUID: ConversionNote] = [:]
 
     public init() {}
 
@@ -34,17 +37,58 @@ public struct SinkPlan: Equatable, Sendable, Identifiable {
     public var inputChannels: Int
     /// Output channels the aggregate should have: the sink's first, then other sub-devices' outputs.
     public var outputChannels: Int
+    /// Source devices running at another rate, converted to the sink's: they stay out of the aggregate and their
+    /// channels follow its inputs (route inputs from `inputChannels` on), one device after another.
+    public var converted: [SubDevice] = []
 
     public var id: UUID { sinkNode }
 
-    /// Everything that needs a rebuild when it changes (gains don't).
+    /// The sink's nominal sample rate: the aggregate's, and what converted devices are converted to.
+    public var sampleRate: Double { subDevices.first?.sampleRate ?? 0 }
+
+    /// Everything that needs a rebuild when it changes (gains don't), including which devices are converted.
     public var structureKey: String {
-        let devices = subDevices.map { "\($0.uid):\($0.inputChannels):\($0.outputChannels)@\($0.sampleRate)" }
-            .joined(separator: ",")
+        func key(_ devices: [SubDevice]) -> String {
+            devices.map { "\($0.uid):\($0.inputChannels):\($0.outputChannels)@\($0.sampleRate)" }.joined(separator: ",")
+        }
         let tapKeys = taps.map { "\($0.node.uuidString):\($0.mode):\($0.mutesOriginal)" }.joined(separator: ",")
         let routeKeys = routes.map { "\($0.input)>\($0.output)" }.joined(separator: ",")
-        return "\(sinkUID)|\(devices)|\(tapKeys)|\(routeKeys)|\(bufferFrames ?? 0)"
+        return "\(sinkUID)|\(key(subDevices))|\(tapKeys)|\(routeKeys)|\(bufferFrames ?? 0)|converted:\(key(converted))"
     }
+}
+
+/// A device node whose audio Junction converts between sample rates, for the canvas and the inspector.
+public struct ConversionNote: Equatable, Sendable {
+    /// The rate of the device the node stands for.
+    public var deviceRate: Double
+    /// The rate it is converted to (a source) or from (an output fed by its virtual device).
+    public var otherRate: Double
+    /// A source converted to its sink's rate; otherwise an output that receives converted audio.
+    public var isSource: Bool
+
+    public init(deviceRate: Double, otherRate: Double, isSource: Bool) {
+        self.deviceRate = deviceRate
+        self.otherRate = otherRate
+        self.isSource = isSource
+    }
+
+    /// "44.1 kHz, converted to 48 kHz".
+    public var text: String {
+        "\(formatSampleRate(deviceRate)), converted \(isSource ? "to" : "from") \(formatSampleRate(otherRate))"
+    }
+
+    /// "44.1 → 48 kHz", where the longer text doesn't fit.
+    public var shortText: String {
+        let (from, to) = isSource ? (deviceRate, otherRate) : (otherRate, deviceRate)
+        return "\(formatSampleRate(from, unit: false)) → \(formatSampleRate(to))"
+    }
+}
+
+/// "48 kHz", "44.1 kHz" (or without the unit).
+public func formatSampleRate(_ rate: Double, unit: Bool = true) -> String {
+    let value = rate / 1000
+    let number = value == value.rounded() ? "\(Int(value))" : String(format: "%.1f", value)
+    return unit ? number + " kHz" : number
 }
 
 public struct SubDevice: Equatable, Sendable {
@@ -119,7 +163,8 @@ public enum Planner {
             var subDevices = [SubDevice(uid: sinkUID, inputChannels: sinkDevice.inputChannels,
                                         outputChannels: sinkDevice.outputChannels, sampleRate: sinkDevice.sampleRate)]
             var taps: [TapPlan] = []
-            enum Origin { case device(String), tap(Int) }
+            var converted: [SubDevice] = []
+            enum Origin { case device(String), tap(Int), converted(String) }
             var pending: [(cable: Cable, origin: Origin, gain: Float)] = []
 
             for cable in cables {
@@ -153,12 +198,30 @@ public enum Planner {
                         }
                         feeds[uid, default: []].insert(sinkUID)
                     }
+                    let mismatched = device.sampleRate != sinkDevice.sampleRate && device.sampleRate > 0 && sinkDevice.sampleRate > 0
+                    if mismatched, sink.rateConversion == .automatic {
+                        if !converted.contains(where: { $0.uid == uid }) {
+                            converted.append(SubDevice(uid: uid, inputChannels: device.inputChannels,
+                                                       outputChannels: device.outputChannels, sampleRate: device.sampleRate))
+                        }
+                        // A source is converted to its sink's rate; an output fed by its virtual device shows the
+                        // conversion on itself (the virtual device has more than one output).
+                        if case .virtualDevice = source.kind, !isVirtualDevice(sink) {
+                            plan.conversions[sink.id] = ConversionNote(deviceRate: sinkDevice.sampleRate,
+                                                                       otherRate: device.sampleRate, isSource: false)
+                        } else {
+                            plan.conversions[source.id] = ConversionNote(deviceRate: device.sampleRate,
+                                                                         otherRate: sinkDevice.sampleRate, isSource: true)
+                        }
+                        pending.append((cable, .converted(uid), gain))
+                        continue
+                    }
                     if !subDevices.contains(where: { $0.uid == uid }) {
                         subDevices.append(SubDevice(uid: uid, inputChannels: device.inputChannels,
                                                     outputChannels: device.outputChannels, sampleRate: device.sampleRate))
                     }
-                    if device.sampleRate != sinkDevice.sampleRate {
-                        plan.note(source.id, "Runs at \(kHz(device.sampleRate)) while \(info.title(sink)) runs at \(kHz(sinkDevice.sampleRate)). Set both to the same rate in Audio MIDI Setup for the best quality.")
+                    if mismatched {
+                        plan.note(source.id, "Runs at \(formatSampleRate(device.sampleRate)) while \(info.title(sink)) runs at \(formatSampleRate(sinkDevice.sampleRate)), and sample-rate conversion is off. Set both to the same rate in Audio MIDI Setup, or turn conversion back to Automatic in \(info.title(sink))'s inspector.")
                     }
                     pending.append((cable, .device(uid), gain))
                 }
@@ -171,10 +234,18 @@ public enum Planner {
                 total += device.inputChannels
             }
             let tapBase = total
+            let inputChannels = tapBase + taps.count * 2
+            var convertedOffsets: [String: Int] = [:]
+            total = inputChannels
+            for device in converted {
+                convertedOffsets[device.uid] = total
+                total += device.inputChannels
+            }
             let routes = pending.map { item -> Route in
                 let input = switch item.origin {
                 case .device(let uid): offsets[uid]! + item.cable.from.channel
                 case .tap(let index): tapBase + index * 2 + item.cable.from.channel
+                case .converted(let uid): convertedOffsets[uid]! + item.cable.from.channel
                 }
                 return Route(cable: item.cable.id, source: item.cable.from, input: input, output: item.cable.to.channel, gain: item.gain)
             }
@@ -183,8 +254,8 @@ public enum Planner {
                 sinkNode: sink.id, name: info.title(sink), sinkUID: sinkUID, sinkOutputChannels: sinkDevice.outputChannels,
                 subDevices: subDevices, taps: taps, routes: routes,
                 masterGain: sink.isMuted ? 0 : Gain.linear(sink.gainDB), bufferFrames: sink.bufferFrames,
-                inputChannels: tapBase + taps.count * 2,
-                outputChannels: subDevices.reduce(0) { $0 + $1.outputChannels }))
+                inputChannels: inputChannels,
+                outputChannels: subDevices.reduce(0) { $0 + $1.outputChannels }, converted: converted))
         }
         return plan
     }
@@ -209,9 +280,9 @@ public enum Planner {
         }
     }
 
-    private static func kHz(_ rate: Double) -> String {
-        let value = rate / 1000
-        return value == value.rounded() ? "\(Int(value)) kHz" : String(format: "%.1f kHz", value)
+    private static func isVirtualDevice(_ node: Node) -> Bool {
+        if case .virtualDevice = node.kind { return true }
+        return false
     }
 }
 

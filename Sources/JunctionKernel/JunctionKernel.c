@@ -6,7 +6,8 @@
 #include <string.h>
 
 struct JKRenderer {
-    uint32_t inputChannels;
+    uint32_t inputChannels;          // the aggregate's
+    uint32_t totalInputs;            // the aggregate's, then every converter's
     uint32_t outputChannels;
     uint32_t routeCount;
     uint32_t *sources;
@@ -24,6 +25,10 @@ struct JKRenderer {
     _Atomic uint32_t fadeFrames;     // frames for a full 0 → 1 ramp
     _Atomic uint32_t fadeLevel;      // float bits: where the fade stood after the last cycle
     float fade;                      // audio thread only
+    // Converted sources (not owned) and the audio read from them each cycle: JK_MAX_FRAMES per channel.
+    JKConverter **converters;
+    uint32_t converterCount;
+    float *converted;
     // Per-cycle channel tables (audio thread only), sized for the expected layout.
     const float **inputs;
     uint32_t *inputStrides;
@@ -45,13 +50,32 @@ static inline float Float(uint32_t bits) {
 
 JKRenderer *jk_renderer_create(uint32_t inputChannels, uint32_t outputChannels, uint32_t routeCount,
                                const uint32_t *sources, const uint32_t *destinations, const float *gains) {
+    return jk_renderer_create_converting(inputChannels, outputChannels, routeCount, sources, destinations, gains, NULL, 0);
+}
+
+JKRenderer *jk_renderer_create_converting(uint32_t inputChannels, uint32_t outputChannels, uint32_t routeCount,
+                                          const uint32_t *sources, const uint32_t *destinations, const float *gains,
+                                          JKConverter *const *converters, uint32_t converterCount) {
     JKRenderer *r = calloc(1, sizeof *r);
     if (!r) return NULL;
+    uint32_t convertedChannels = 0;
+    for (uint32_t i = 0; converters && i < converterCount; i++) convertedChannels += jk_converter_channels(converters[i]);
     r->inputChannels = inputChannels;
+    r->totalInputs = inputChannels + convertedChannels;
     r->outputChannels = outputChannels;
     r->routeCount = routeCount;
-    size_t routes = routeCount ? routeCount : 1, ins = inputChannels ? inputChannels : 1,
+    size_t routes = routeCount ? routeCount : 1, ins = r->totalInputs ? r->totalInputs : 1,
            outs = outputChannels ? outputChannels : 1;
+    if (converters && converterCount) {
+        r->converters = calloc(converterCount, sizeof *r->converters);
+        r->converted = calloc((size_t)convertedChannels * JK_MAX_FRAMES, sizeof *r->converted);
+        if (!r->converters || !r->converted) {
+            jk_renderer_destroy(r);
+            return NULL;
+        }
+        memcpy(r->converters, converters, converterCount * sizeof *converters);
+        r->converterCount = converterCount;
+    }
     r->sources = calloc(routes, sizeof *r->sources);
     r->destinations = calloc(routes, sizeof *r->destinations);
     r->targetGains = calloc(routes, sizeof *r->targetGains);
@@ -95,6 +119,8 @@ void jk_renderer_destroy(JKRenderer *r) {
     free(r->inputStrides);
     free(r->outputs);
     free(r->outputStrides);
+    free(r->converters);
+    free(r->converted);
     free(r);
 }
 
@@ -129,7 +155,7 @@ float jk_renderer_fade_level(const JKRenderer *r) {
 }
 
 float jk_renderer_take_input_peak(JKRenderer *r, uint32_t channel) {
-    if (channel >= r->inputChannels) return 0;
+    if (channel >= r->totalInputs) return 0;
     return Float(atomic_exchange_explicit(&r->inputPeaks[channel], 0, memory_order_relaxed));
 }
 
@@ -157,7 +183,7 @@ static inline void RaisePeak(_Atomic uint32_t *slot, float peak) {
 OSStatus jk_renderer_ioproc(AudioObjectID device, const AudioTimeStamp *now, const AudioBufferList *input,
                             const AudioTimeStamp *inputTime, AudioBufferList *output, const AudioTimeStamp *outputTime,
                             void *clientData) {
-    (void)device; (void)now; (void)inputTime; (void)outputTime;
+    (void)device; (void)now; (void)inputTime;
     JKRenderer *r = clientData;
     if (!r) return noErr;
     atomic_fetch_add_explicit(&r->cycles, 1, memory_order_relaxed);
@@ -199,7 +225,20 @@ OSStatus jk_renderer_ioproc(AudioObjectID device, const AudioTimeStamp *now, con
     if (inputCount != r->inputChannels || outputCount < r->outputChannels)
         atomic_fetch_add_explicit(&r->mismatches, 1, memory_order_relaxed);
     if (frames == UINT32_MAX || frames == 0) return noErr;
-    uint32_t availableInputs = inputCount < r->inputChannels ? inputCount : r->inputChannels;
+    for (uint32_t c = inputCount; c < r->inputChannels; c++) r->inputs[c] = NULL;  // missing from the aggregate
+    // Converted sources follow the aggregate's channels, read at this cycle's length.
+    int convertible = frames <= JK_MAX_FRAMES;
+    if (!convertible && r->converterCount) atomic_fetch_add_explicit(&r->mismatches, 1, memory_order_relaxed);
+    for (uint32_t i = 0, channel = r->inputChannels; i < r->converterCount; i++) {
+        JKConverter *converter = r->converters[i];
+        float *audio = r->converted + (size_t)(channel - r->inputChannels) * JK_MAX_FRAMES;
+        if (convertible) jk_converter_read(converter, audio, JK_MAX_FRAMES, frames, outputTime);
+        for (uint32_t c = 0; c < jk_converter_channels(converter); c++, channel++) {
+            r->inputs[channel] = convertible ? audio + (size_t)c * JK_MAX_FRAMES : NULL;
+            r->inputStrides[channel] = 1;
+        }
+    }
+    uint32_t availableInputs = r->totalInputs;
     uint32_t availableOutputs = outputCount < r->outputChannels ? outputCount : r->outputChannels;
 
     for (uint32_t c = 0; c < availableInputs; c++) {

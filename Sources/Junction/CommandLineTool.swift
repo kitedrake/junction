@@ -165,6 +165,30 @@ enum CommandLineTool {
             check(false, "kernel renderer created")
         }
 
+        // Sample-rate conversion: a 44.1 kHz source into a 48 kHz sink stays out of the aggregate and is converted.
+        var converting = inventory
+        converting.devices[0].sampleRate = 44100
+        let convertingPlan = Planner.plan(graph, inventory: converting)
+        check(convertingPlan.sinks.first?.converted.map(\.uid) == ["mic"]
+              && convertingPlan.sinks.first?.subDevices.map(\.uid) == [device.uid],
+              "a 44.1 kHz mic into a 48 kHz device is converted")
+        if let converter = jk_converter_create(1, 44100, 48000) {
+            let block = UnsafeMutablePointer<Float>.allocate(capacity: 441), converted = UnsafeMutablePointer<Float>.allocate(capacity: 480)
+            defer { block.deallocate(); converted.deallocate() }
+            block.initialize(repeating: 0.5, count: 441)
+            let list = AudioBufferList.allocate(maximumBuffers: 1)
+            defer { free(list.unsafeMutablePointer) }
+            list[0] = AudioBuffer(mNumberChannels: 1, mDataByteSize: 441 * 4, mData: block)
+            for _ in 0..<20 {
+                jk_converter_write(converter, list.unsafePointer, nil)
+                jk_converter_read(converter, converted, 480, 480, nil)
+            }
+            check(abs(converted[479] - 0.5) < 1e-3 && jk_converter_underrun_count(converter) == 0, "kernel converts 44.1 to 48 kHz")
+            jk_converter_destroy(converter)
+        } else {
+            check(false, "kernel converter created")
+        }
+
         // Saving.
         let base = folder.map { URL(fileURLWithPath: $0) } ?? FileManager.default.temporaryDirectory
         let store = Store(folder: base.appendingPathComponent("junction-self-test-\(UUID().uuidString)"))

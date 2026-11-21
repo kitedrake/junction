@@ -100,11 +100,14 @@ public struct Node: Codable, Identifiable, Hashable, Sendable {
     public var canvas: UUID?
     /// For nodes that receive cables: the IO buffer size of their routing, in frames (nil: macOS's default).
     public var bufferFrames: Int?
+    /// For nodes that receive cables: whether devices running at another sample rate are converted.
+    public var rateConversion: RateConversion
 
     public static let bufferChoices = [64, 128, 256, 512, 1024]
 
     public init(id: UUID = UUID(), kind: NodeKind, x: Double = 0, y: Double = 0, gainDB: Double = 0, isMuted: Bool = false,
-                mutesOriginal: Bool = false, canvas: UUID? = nil, bufferFrames: Int? = nil) {
+                mutesOriginal: Bool = false, canvas: UUID? = nil, bufferFrames: Int? = nil,
+                rateConversion: RateConversion = .automatic) {
         self.id = id
         self.kind = kind
         self.x = x
@@ -114,7 +117,32 @@ public struct Node: Codable, Identifiable, Hashable, Sendable {
         self.mutesOriginal = mutesOriginal
         self.canvas = canvas
         self.bufferFrames = bufferFrames
+        self.rateConversion = rateConversion
     }
+
+    /// Files before schema 4 have no `rateConversion`; `Graph.upgrade` decides what it becomes.
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        kind = try values.decode(NodeKind.self, forKey: .kind)
+        x = try values.decode(Double.self, forKey: .x)
+        y = try values.decode(Double.self, forKey: .y)
+        gainDB = try values.decode(Double.self, forKey: .gainDB)
+        isMuted = try values.decode(Bool.self, forKey: .isMuted)
+        mutesOriginal = try values.decode(Bool.self, forKey: .mutesOriginal)
+        canvas = try values.decodeIfPresent(UUID.self, forKey: .canvas)
+        bufferFrames = try values.decodeIfPresent(Int.self, forKey: .bufferFrames)
+        rateConversion = try values.decodeIfPresent(RateConversion.self, forKey: .rateConversion) ?? .automatic
+    }
+}
+
+/// What a receiving node does with a device that runs at another sample rate than the one it receives from.
+public enum RateConversion: String, Codable, CaseIterable, Sendable {
+    /// Junction converts it: the device runs on its own, outside the sink's aggregate device.
+    case automatic
+    /// The device joins the aggregate as it is and Core Audio's drift compensation keeps it in step (the behaviour
+    /// before schema 4: best when both are set to the same rate).
+    case off
 }
 
 /// Where nodes go on a canvas: sources, the virtual device, outputs.
@@ -153,8 +181,9 @@ public struct Cable: Codable, Identifiable, Hashable, Sendable {
 
 public struct Graph: Codable, Equatable, Sendable {
     /// 1: one shared canvas. 2: a canvas per virtual device. 3: nodes can set a buffer size (`Node.bufferFrames`;
-    /// absent in older files, which means macOS's default).
-    public static let currentSchema = 3
+    /// absent in older files, which means macOS's default). 4: receiving nodes choose sample-rate conversion
+    /// (`Node.rateConversion`).
+    public static let currentSchema = 4
     public var schema = Graph.currentSchema
     public var virtualDevices: [VirtualDevice] = []
     public var nodes: [Node] = []
@@ -197,9 +226,11 @@ public struct Graph: Codable, Equatable, Sendable {
         virtualDevices.removeAll { $0.id == id }
     }
 
-    /// Brings a loaded graph up to date: converts the shared canvas of schema 1, then tidies the canvases.
+    /// Brings a loaded graph up to date: converts the shared canvas of schema 1, turns on sample-rate conversion for
+    /// files from before it existed, then tidies the canvases.
     public mutating func upgrade() {
         if schema < 2 { moveToCanvases() }
+        if schema < 4 { convertRates() }
         schema = Graph.currentSchema
         tidyCanvases()
     }
@@ -240,6 +271,12 @@ public struct Graph: Codable, Equatable, Sendable {
         }
         nodes = moved
         cables = kept
+    }
+
+    /// Schema 3 and older had no sample-rate conversion: a device at another rate joined the aggregate as it was.
+    /// Their nodes get the new default, Automatic, so those devices are converted from now on.
+    mutating func convertRates() {
+        for index in nodes.indices { nodes[index].rateConversion = .automatic }
     }
 
     /// Keeps the canvases consistent: every virtual device has exactly one device node on its own canvas; nodes on no
