@@ -1,7 +1,9 @@
 // Effect chains for the renderer: the built-in effects (gain, pan, mono, noise gate) and Audio Units, processed in
 // place on non-interleaved channels. Everything a chain needs on the audio thread is made when it is built; while it
-// runs only atomics change (bypass, parameters).
+// runs only atomics change (bypass, parameters). Each stage's rendering is timed, so an effect that holds up the audio
+// thread can be found (see jk_chain_stage_timing).
 #include "JunctionKernel.h"
+#include "JunctionTiming.h"
 
 #include <math.h>
 #include <stdatomic.h>
@@ -20,11 +22,17 @@ typedef struct {
     float current;
     float envelope;                  // the gate's gain, 0…1
     uint32_t hold;                   // frames the gate stays open after the level drops
+    // Timing, written by the audio thread, read by any.
+    _Atomic uint64_t busyTicks;
+    _Atomic uint64_t frames;
+    _Atomic uint64_t stalls;         // renders that took more than JK_STALL_LOAD of their buffer's duration
+    _Atomic uint32_t peakLoad;       // float bits
 } Stage;
 
 struct JKChain {
     uint32_t channels;
     double sampleRate;
+    double secondsPerTick;
     uint32_t count;
     uint32_t capacity;
     Stage *stages;
@@ -68,6 +76,7 @@ JKChain *jk_chain_create(uint32_t channels, double sampleRate, uint32_t capacity
     }
     chain->channels = channels;
     chain->sampleRate = sampleRate;
+    chain->secondsPerTick = jk_seconds_per_tick();
     chain->capacity = capacity;
     return chain;
 }
@@ -89,6 +98,10 @@ static int Append(JKChain *chain, JKEffectKind kind, JKEffectProcess process, vo
     stage->process = process;
     stage->context = context;
     atomic_init(&stage->bypass, 0);
+    atomic_init(&stage->busyTicks, 0);
+    atomic_init(&stage->frames, 0);
+    atomic_init(&stage->stalls, 0);
+    atomic_init(&stage->peakLoad, 0);
     for (int p = 0; p < JK_EFFECT_MAX_PARAMETERS; p++) atomic_init(&stage->parameters[p], Bits(0));
     switch (kind) {
     case JK_EFFECT_GAIN: atomic_store(&stage->parameters[0], Bits(1)); break;
@@ -241,6 +254,7 @@ void jk_chain_process(JKChain *chain, float *const *channels, uint32_t channelCo
             stage->primed = 0;  // after a bypass, gain and pan start where they are set rather than gliding back
             continue;
         }
+        uint64_t start = mach_absolute_time();
         switch (stage->kind) {
         case JK_EFFECT_GAIN: Gain(stage, channels, count, frames); break;
         case JK_EFFECT_PAN: Pan(stage, channels, count, frames); break;
@@ -248,7 +262,25 @@ void jk_chain_process(JKChain *chain, float *const *channels, uint32_t channelCo
         case JK_EFFECT_GATE: Gate(stage, chain->sampleRate, channels, count, frames); break;
         case JK_EFFECT_CUSTOM: stage->process(stage->context, channels, count, frames); break;
         }
+        uint64_t ticks = mach_absolute_time() - start;
+        float load = jk_load(ticks, chain->secondsPerTick, frames, chain->sampleRate);
+        atomic_fetch_add_explicit(&stage->busyTicks, ticks, memory_order_relaxed);
+        atomic_fetch_add_explicit(&stage->frames, frames, memory_order_relaxed);
+        if (load > JK_STALL_LOAD) atomic_fetch_add_explicit(&stage->stalls, 1, memory_order_relaxed);
+        jk_raise_load(&stage->peakLoad, load);
     }
+}
+
+void jk_chain_stage_timing(JKChain *chain, uint32_t stage, JKTiming *timing, int takePeak) {
+    memset(timing, 0, sizeof *timing);
+    if (stage >= chain->count) return;
+    Stage *s = &chain->stages[stage];
+    timing->frames = atomic_load_explicit(&s->frames, memory_order_relaxed);
+    timing->seconds = (double)atomic_load_explicit(&s->busyTicks, memory_order_relaxed) * chain->secondsPerTick;
+    timing->late = atomic_load_explicit(&s->stalls, memory_order_relaxed);
+    uint32_t bits = takePeak ? atomic_exchange_explicit(&s->peakLoad, 0, memory_order_relaxed)
+                             : atomic_load_explicit(&s->peakLoad, memory_order_relaxed);
+    timing->peakLoad = Float(bits);
 }
 
 // MARK: Audio Units

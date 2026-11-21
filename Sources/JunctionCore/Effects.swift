@@ -5,11 +5,14 @@ import JunctionKernel
 // Effects on nodes. A source's chain processes its channels before they are mixed into the virtual device; the
 // virtual device's chain processes the mix before it goes into the device; an output's chain processes what it
 // receives. Gain, pan, mono and the noise gate are built into the render kernel; high-pass, EQ, dynamics and the
-// limiter are Apple's Audio Units, rendered by the kernel through AudioUnitRender. Everything here that creates or
-// configures a unit runs off the audio thread (the router's queue, or the app for saving a unit's state).
+// limiter are Apple's Audio Units, rendered by the kernel through AudioUnitRender. Any other installed effect Audio Unit
+// can be added as a plugin (see Plugins.swift); plugins load out of process where macOS allows it. Everything here
+// that creates or configures a unit runs off the audio thread (the router's queue, or the app for saving a unit's
+// state).
 
 /// One effect in a node's chain, as saved: the Audio Unit component it is (built-in effects have codes of their own),
-/// its bypass, the parameters set in Junction and, for Audio Units, the unit's whole state.
+/// its bypass, the parameters set in Junction and, for Audio Units, the unit's whole state. A plugin also keeps its name
+/// and maker, so it can be named while it isn't installed.
 public struct Effect: Codable, Identifiable, Hashable, Sendable {
     public var id: UUID
     /// Four-character component codes: type, subtype, manufacturer.
@@ -22,9 +25,12 @@ public struct Effect: Codable, Identifiable, Hashable, Sendable {
     public var parameters: [String: Double]
     /// An Audio Unit's state (kAudioUnitProperty_ClassInfo) as a binary property list; restored when its unit is made.
     public var state: Data?
+    /// A plugin's name and maker, as the system listed them when it was added (absent for Junction's own effects).
+    public var name: String?
+    public var vendor: String?
 
     public init(id: UUID = UUID(), type: String, subtype: String, manufacturer: String, bypass: Bool = false,
-                parameters: [String: Double] = [:], state: Data? = nil) {
+                parameters: [String: Double] = [:], state: Data? = nil, name: String? = nil, vendor: String? = nil) {
         self.id = id
         self.type = type
         self.subtype = subtype
@@ -32,6 +38,14 @@ public struct Effect: Codable, Identifiable, Hashable, Sendable {
         self.bypass = bypass
         self.parameters = parameters
         self.state = state
+        self.name = name
+        self.vendor = vendor
+    }
+
+    /// A plugin as the picker lists it.
+    public init(plugin: PluginInfo) {
+        self.init(type: plugin.type, subtype: plugin.subtype, manufacturer: plugin.manufacturer, name: plugin.name,
+                  vendor: plugin.vendor)
     }
 
     /// A new effect of a kind, with its starting settings.
@@ -41,6 +55,23 @@ public struct Effect: Codable, Identifiable, Hashable, Sendable {
     }
 
     public var kind: EffectKind? { EffectKind(type: type, subtype: subtype, manufacturer: manufacturer) }
+
+    /// An Audio Unit that isn't one of the effects Junction offers itself: a plugin added from the picker.
+    public var isPlugin: Bool { kind == nil && manufacturer != EffectKind.builtInManufacturer }
+
+    /// The Audio Unit to make: the kind's, or the plugin's (nil for built-in effects and ones from a newer Junction).
+    public var component: AudioComponentDescription? {
+        if let kind { return kind.component }
+        guard isPlugin else { return nil }
+        return AudioComponentDescription(componentType: fourCC(type), componentSubType: fourCC(subtype),
+                                         componentManufacturer: fourCC(manufacturer), componentFlags: 0, componentFlagsMask: 0)
+    }
+
+    /// The component codes, to tell whether two effects are the same unit.
+    var codes: [String] { [type, subtype, manufacturer] }
+
+    /// "Noise Gate", "Space Reverb".
+    public var title: String { kind?.title ?? name ?? (isPlugin ? "\(manufacturer) \(subtype)" : "Unknown Effect") }
 
     /// A parameter's value: as set, or the effect's default.
     public func value(_ parameter: EffectParameter) -> Double {
@@ -217,8 +248,18 @@ public struct EffectParameter: Sendable, Identifiable, Hashable {
     public var isLogarithmic: Bool { (unit == .hertz || unit == .seconds) && range.lowerBound > 0 }
 }
 
+/// A four-character code from its text: four printable characters, or "0x" and eight hex digits for codes that have
+/// other bytes (see `fourCCText`).
 func fourCC(_ text: String) -> OSType {
-    text.utf8.prefix(4).reduce(0) { ($0 << 8) | OSType($1) }
+    if text.hasPrefix("0x"), text.count == 10, let value = OSType(text.dropFirst(2), radix: 16) { return value }
+    return text.utf8.prefix(4).reduce(0) { ($0 << 8) | OSType($1) }
+}
+
+/// A four-character code as text: "aufx", or "0x00000001" when a byte isn't printable ASCII.
+func fourCCText(_ code: OSType) -> String {
+    let bytes = (0..<4).map { UInt8((code >> (24 - 8 * $0)) & 0xFF) }
+    guard bytes.allSatisfy({ (0x20...0x7E).contains($0) }) else { return String(format: "0x%08x", code) }
+    return String(decoding: bytes, as: UTF8.self)
 }
 
 // MARK: Audio Units
@@ -226,40 +267,53 @@ func fourCC(_ text: String) -> OSType {
 public enum EffectError: Error, LocalizedError, Equatable {
     case notInstalled(String)
     case failed(String, OSStatus)
+    case timedOut(String)
 
     public var errorDescription: String? {
         switch self {
-        case .notInstalled(let name): "\(name) isn't available on this Mac."
+        case .notInstalled(let name): "\(name) isn't installed on this Mac, so it passes the audio through. Its settings are kept."
         case .failed(let name, let status): "\(name) couldn't start (\(HAL.describe(status)))."
+        case .timedOut(let name): "\(name) took too long to load."
         }
     }
 }
 
-/// An Apple effect unit, set up for the kernel's chains: non-interleaved float channels at a fixed rate, room for
-/// JK_MAX_FRAMES per render, its input callback and buffers made (`kernel`). Freed when the last chain using it is.
+/// An effect unit (Apple's, or a plugin), set up for the kernel's chains: non-interleaved float channels at a fixed
+/// rate, room for JK_MAX_FRAMES per render, its input callback and buffers made (`kernel`). Freed when the last chain
+/// (or plugin window) using it is.
 public final class EffectUnit: @unchecked Sendable {
+    /// Where a unit runs. Plugins load out of process when macOS allows it, so one that crashes takes down only its
+    /// own process (the audio then passes through); Apple's units Junction offers itself load in process.
+    public enum Loading: Sendable { case automatic, inProcess, outOfProcess }
+
     public let unit: AudioUnit
     /// The kernel's side (a JKUnit).
     let kernel: OpaquePointer
-    public let kind: EffectKind
+    public let kind: EffectKind?
+    let codes: [String]
+    public let title: String
     public let channels: Int
     public let sampleRate: Double
+    /// Whether macOS loaded the unit into a process of its own.
+    public let isOutOfProcess: Bool
     /// Parameter values applied so far, so only changes are sent.
     private var applied: [AudioUnitParameterID: Float] = [:]
 
+    /// How long a plugin may take to load before it is given up on.
+    static let loadTimeout: TimeInterval = 10
+
     /// Makes, configures and initialises the unit, restores `effect.state` and applies its parameters.
-    public init(_ effect: Effect, channels: Int, sampleRate: Double) throws {
-        guard let kind = effect.kind, let description = kind.component else {
-            throw EffectError.notInstalled(effect.kind?.title ?? "\(effect.manufacturer) \(effect.subtype)")
-        }
-        var unit: AudioUnit?
-        var componentDescription = description
-        guard let component = AudioComponentFindNext(nil, &componentDescription) else { throw EffectError.notInstalled(kind.title) }
-        var status = AudioComponentInstanceNew(component, &unit)
-        guard status == noErr, let unit else { throw EffectError.failed(kind.title, status) }
+    public init(_ effect: Effect, channels: Int, sampleRate: Double, loading: Loading = .automatic) throws {
+        let title = effect.title
+        guard var componentDescription = effect.component else { throw EffectError.notInstalled(title) }
+        guard let component = AudioComponentFindNext(nil, &componentDescription) else { throw EffectError.notInstalled(title) }
+        let outOfProcess = loading == .outOfProcess || (loading == .automatic && effect.isPlugin)
+        let (made, loadedOutOfProcess) = try Self.instantiate(component, title: title, outOfProcess: outOfProcess)
+        let unit = made
+        var status = noErr
         func fail(_ status: OSStatus) -> EffectError {
             AudioComponentInstanceDispose(unit)
-            return EffectError.failed(kind.title, status)
+            return EffectError.failed(title, status)
         }
         var format = AudioStreamBasicDescription(
             mSampleRate: sampleRate, mFormatID: kAudioFormatLinearPCM,
@@ -275,7 +329,7 @@ public final class EffectUnit: @unchecked Sendable {
         status = AudioUnitSetProperty(unit, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0,
                                       &maximumFrames, UInt32(MemoryLayout<UInt32>.size))
         guard status == noErr else { throw fail(status) }
-        if kind == .equalizer {
+        if effect.kind == .equalizer {
             var bands = UInt32(EffectKind.equalizerBands)
             AudioUnitSetProperty(unit, kAUNBandEQProperty_NumberOfBands, kAudioUnitScope_Global, 0, &bands,
                                  UInt32(MemoryLayout<UInt32>.size))
@@ -289,10 +343,55 @@ public final class EffectUnit: @unchecked Sendable {
         }
         self.unit = unit
         self.kernel = kernel
-        self.kind = kind
+        self.kind = effect.kind
+        self.codes = effect.codes
+        self.title = title
         self.channels = channels
         self.sampleRate = sampleRate
+        self.isOutOfProcess = loadedOutOfProcess
         apply(effect)
+    }
+
+    /// Makes an instance: out of process when asked and macOS allows it (AudioComponentInstantiate, waited for here,
+    /// off the audio thread), otherwise in this process. Returns the unit and whether it runs out of process.
+    private static func instantiate(_ component: AudioComponent, title: String,
+                                    outOfProcess: Bool) throws -> (AudioUnit, Bool) {
+        if outOfProcess {
+            final class Result: @unchecked Sendable {
+                let lock = NSLock()
+                var unit: AudioUnit?
+                var status: OSStatus = noErr
+                var abandoned = false
+            }
+            let result = Result()
+            let done = DispatchSemaphore(value: 0)
+            AudioComponentInstantiate(component, .loadOutOfProcess) { unit, status in
+                let keep = result.lock.withLock { () -> Bool in
+                    guard !result.abandoned else { return false }
+                    result.unit = unit
+                    result.status = status
+                    return true
+                }
+                if !keep, let unit { AudioComponentInstanceDispose(unit) }  // arrived after it was given up on
+                done.signal()
+            }
+            if done.wait(timeout: .now() + loadTimeout) == .timedOut {
+                let unit = result.lock.withLock { () -> AudioUnit? in
+                    result.abandoned = true
+                    return result.unit
+                }
+                guard let unit else { throw EffectError.timedOut(title) }
+                AudioComponentInstanceDispose(unit)
+                throw EffectError.timedOut(title)
+            }
+            let (unit, status) = result.lock.withLock { (result.unit, result.status) }
+            if status == noErr, let unit { return (unit, true) }
+            // macOS couldn't host it in a process of its own: load it here instead.
+        }
+        var unit: AudioUnit?
+        let status = AudioComponentInstanceNew(component, &unit)
+        guard status == noErr, let unit else { throw EffectError.failed(title, status) }
+        return (unit, false)
     }
 
     deinit {
@@ -351,7 +450,8 @@ public final class EffectUnit: @unchecked Sendable {
     public var errorCount: UInt64 { jk_unit_error_count(kernel) }
 
     /// The state an effect would be saved with: a unit is made (not rendered) with its state and parameters, and its
-    /// ClassInfo read back. Nil for built-in effects, or when the unit isn't available.
+    /// ClassInfo read back. Nil for built-in effects and plugins (a plugin's state comes from its running unit, which
+    /// its window changes), or when the unit isn't available.
     public static func capturedState(_ effect: Effect) -> Data? {
         guard effect.kind?.isBuiltIn == false, let unit = try? EffectUnit(effect, channels: 2, sampleRate: 48_000) else { return nil }
         return unit.state
@@ -378,12 +478,12 @@ final class EffectPool {
     /// reconfigured: an older chain may still render it). Nil, with the reason in `problems`, when it can't be made.
     func unit(for effect: Effect, position: ChainPosition, channels: Int, sampleRate: Double) -> EffectUnit? {
         let key = Key(effect: effect.id, position: position)
-        if let unit = units[key], unit.kind == effect.kind, unit.channels == channels, unit.sampleRate == sampleRate {
+        if let unit = units[key], unit.codes == effect.codes, unit.channels == channels, unit.sampleRate == sampleRate {
             unit.apply(effect)
             return unit
         }
         var seeded = effect
-        if let old = units[key], old.kind == effect.kind, let state = old.state { seeded.state = state }  // keep its settings
+        if let old = units[key], old.codes == effect.codes, let state = old.state { seeded.state = state }  // keep its settings
         do {
             let unit = try EffectUnit(seeded, channels: channels, sampleRate: sampleRate)
             units[key] = unit
@@ -404,6 +504,16 @@ final class EffectPool {
     }
 
     var count: Int { units.count }
+
+    /// The running unit of an effect (for its plugin window), wherever it runs.
+    func unit(_ effect: UUID) -> EffectUnit? {
+        units[Key(effect: effect, position: .source)] ?? units[Key(effect: effect, position: .mix)]
+    }
+
+    /// Every unit by effect.
+    var unitsByEffect: [UUID: EffectUnit] {
+        Dictionary(units.map { ($0.key.effect, $0.value) }, uniquingKeysWith: { first, _ in first })
+    }
 }
 
 extension SinkPlan {
@@ -460,7 +570,31 @@ final class LiveChain {
 
     /// Whether `effects` can be applied to this chain without building another (the same effects in the same order).
     func fits(_ effects: [Effect]) -> Bool {
-        effects.map(\.id) == self.effects.map(\.id) && effects.map(\.kind) == self.effects.map(\.kind)
+        effects.map(\.id) == self.effects.map(\.id) && effects.map(\.codes) == self.effects.map(\.codes)
+    }
+
+    /// How long each effect in the chain took to render so far, by effect (left-out ones have none). Takes the peaks.
+    func takeTimings() -> [UUID: JKTiming] {
+        var result: [UUID: JKTiming] = [:]
+        for (effect, stage) in zip(effects, stages) {
+            guard let stage else { continue }
+            var timing = JKTiming()
+            jk_chain_stage_timing(pointer, UInt32(stage), &timing, 1)
+            result[effect.id] = timing
+        }
+        return result
+    }
+
+    /// The units in the chain, by effect.
+    var unitsByEffect: [UUID: EffectUnit] {
+        var result: [UUID: EffectUnit] = [:]
+        var unitIndex = 0
+        for (effect, stage) in zip(effects, stages) where stage != nil && effect.kind?.isBuiltIn != true {
+            guard unitIndex < units.count else { break }
+            result[effect.id] = units[unitIndex]
+            unitIndex += 1
+        }
+        return result
     }
 
     /// Bypass and parameters: atomics for built-in effects, AudioUnitSetParameter for units.

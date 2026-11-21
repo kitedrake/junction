@@ -160,6 +160,26 @@ float jk_chain_parameter(const JKChain *_Nonnull chain, uint32_t stage, uint32_t
 void jk_chain_process(JKChain *_Nonnull chain, float *_Nonnull const *_Nonnull channels, uint32_t channelCount,
                       uint32_t frames);
 
+// MARK: Timing
+
+/// A stage taking more than this share of its buffer's duration counts as a stall (see jk_chain_stage_timing).
+#define JK_STALL_LOAD 0.5f
+/// A renderer IO cycle taking more than this share of its buffer's duration counts as an overload: with Core Audio's
+/// own work on the same thread, the audio can't have been ready in time.
+#define JK_OVERLOAD_LOAD 0.9f
+
+/// How long rendering took so far. `late`: a chain stage's stalls, or a renderer's overloads. `peakLoad`: the largest
+/// share of a buffer's duration one render took (since the last time it was taken).
+typedef struct {
+    uint64_t frames;
+    double seconds;
+    uint64_t late;
+    float peakLoad;
+} JKTiming;
+
+/// A stage's timing. Bypassed renders don't count. Any thread; `takePeak` resets the peak.
+void jk_chain_stage_timing(JKChain *_Nonnull chain, uint32_t stage, JKTiming *_Nonnull timing, int takePeak);
+
 /// Prepares `unit` (an initialised effect whose input and output stream formats are `channels` non-interleaved float
 /// channels, and whose MaximumFramesPerSlice is at least JK_MAX_FRAMES) for chains: sets its input callback and makes
 /// its buffers. Off the audio thread. Returns NULL if the callback can't be set or memory runs out.
@@ -218,6 +238,12 @@ uint32_t jk_renderer_slot_count(const JKRenderer *_Nonnull renderer);
 /// Has the renderer pump these captures (not owned) at the start of every IO cycle, before it reads the converters
 /// they feed. Only call before the IOProc starts. Returns 0 if memory runs out.
 int jk_renderer_set_captures(JKRenderer *_Nonnull renderer, JKCapture *_Nonnull const *_Nullable captures, uint32_t count);
+
+/// The sink's sample rate, so the IOProc can tell how long it may take. Only call before the IOProc starts. Without
+/// one (or with 0) nothing is timed.
+void jk_renderer_set_sample_rate(JKRenderer *_Nonnull renderer, double sampleRate);
+/// How long the IOProc's rendering took so far; `late` counts its overloads. Any thread; `takePeak` resets the peak.
+void jk_renderer_timing(JKRenderer *_Nonnull renderer, JKTiming *_Nonnull timing, int takePeak);
 
 /// Frees the renderer. Only call once the IOProc using it has been destroyed.
 void jk_renderer_destroy(JKRenderer *_Nonnull renderer);

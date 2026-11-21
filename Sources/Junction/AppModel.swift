@@ -50,6 +50,12 @@ final class AppModel {
     var template: TemplateKind?
     /// The scene being named (a new one, or one being renamed).
     var sceneNaming: SceneNaming?
+    /// The node the plugin picker adds an Audio Unit to (the sheet is open while set).
+    var pluginPicker: PluginPickerRequest?
+    /// The installed effect Audio Units, read when the picker opens (made-up ones in snapshot mode).
+    private(set) var plugins: [PluginInfo] = []
+    /// Effects offered for bypass that the user chose to keep running.
+    private(set) var keptStallingEffects: Set<UUID> = []
     /// A problem to show in an alert (driver install, publishing).
     var alert: String?
     /// macOS's Microphone permission, which covers every audio input: microphones, interfaces, Junction's devices.
@@ -116,6 +122,8 @@ final class AppModel {
     @ObservationIgnored private var saveTask: Task<Void, Never>?
     /// The parameters each Audio Unit effect had when its state was last read (see `refreshEffectStates`).
     @ObservationIgnored private var capturedParameters: [UUID: [String: Double]] = [:]
+    /// Whether each plugin is installed, by component, and when that was last looked up.
+    @ObservationIgnored private var installedPlugins: [String: (installed: Bool, checked: Date)] = [:]
     @ObservationIgnored private var refreshPending = false
     @ObservationIgnored private var timers: [Timer] = []
     @ObservationIgnored private var started = false
@@ -256,6 +264,9 @@ final class AppModel {
         router = Router { statuses in
             Task { @MainActor in AppModel.shared.statuses = statuses }
         }
+        router?.observeEffectStates { effect, state in
+            Task { @MainActor in AppModel.shared.adoptEffectState(effect, state) }
+        }
     }
 
     /// Connects to Junction Helper (launchd starts it); it routes what the app sends it.
@@ -284,6 +295,8 @@ final class AppModel {
         case .notice(.permission(let permission)):
             microphoneAccess = Self.authorization(permission)
             refreshPermissions()
+        case .notice(.effectState(let effect, let state)):
+            adoptEffectState(effect, state)
         case .unavailable(let reason):
             // Route here instead, so audio keeps going.
             guard helper != nil else { return }
@@ -1194,6 +1207,71 @@ final class AppModel {
         statuses.values.lazy.compactMap { $0.effectProblems?[effect] }.first
     }
 
+    // MARK: Plugins
+
+    /// Opens the plugin picker for a node's chain, with the effect Audio Units installed right now.
+    func showPluginPicker(for node: UUID) {
+        plugins = isDemo ? Demo.plugins : PluginCatalog.installed()
+        pluginPicker = PluginPickerRequest(node: node)
+    }
+
+    func addPlugin(_ plugin: PluginInfo, to node: UUID) {
+        updateNode(node, "Add \(plugin.name)") { $0.effects.append(Effect(plugin: plugin)) }
+        endEditing()
+    }
+
+    /// Whether an effect's Audio Unit is on this Mac (looked up again after a few seconds, so installing or removing
+    /// a plugin shows soon).
+    func isInstalled(_ effect: Effect) -> Bool {
+        guard effect.isPlugin else { return true }
+        if isDemo { return Demo.plugins.contains { $0.matches(effect) } }
+        let key = "\(effect.type) \(effect.subtype) \(effect.manufacturer)"
+        if let known = installedPlugins[key], Date().timeIntervalSince(known.checked) < 5 { return known.installed }
+        let installed = PluginCatalog.isInstalled(effect)
+        installedPlugins[key] = (installed, Date())
+        return installed
+    }
+
+    /// Opens a plugin's own window in the process that runs it (Junction Helper, or Junction itself).
+    func openPluginWindow(_ effect: Effect, in node: UUID) {
+        let title = "\(effect.title) · \(self.node(node).map(info.title) ?? "Junction")"
+        if let helper {
+            helper.openPluginWindow(effect.id, title: title) { problem in
+                MainActor.assumeIsolated { if let problem { AppModel.shared.alert = problem } }
+            }
+        } else if let router {
+            if let problem = router.openPluginWindow(effect.id, title: title) { alert = problem }
+        } else {
+            alert = "\(effect.title)'s window opens while routing is on and its node is connected."
+        }
+    }
+
+    /// A plugin's window changed its state: keep it with the graph (not an undo step: the plugin changed itself).
+    func adoptEffectState(_ effect: UUID, _ state: Data) {
+        var updated = graph
+        for node in updated.nodes.indices {
+            guard let index = updated.nodes[node].effects.firstIndex(where: { $0.id == effect }),
+                  updated.nodes[node].effects[index].state != state else { continue }
+            updated.nodes[node].effects[index].state = state
+            graph = updated
+            return
+        }
+    }
+
+    /// What an effect costs where it runs (CPU, delay), as the router last measured it.
+    func effectCost(_ effect: UUID) -> EffectCost? {
+        statuses.values.lazy.compactMap { $0.effectCosts?[effect] }.first
+    }
+
+    /// Whether an effect holds up the audio thread and is offered for bypass.
+    func isStalling(_ effect: Effect) -> Bool {
+        !effect.bypass && !keptStallingEffects.contains(effect.id)
+            && statuses.values.contains { $0.stallingEffects?.contains(effect.id) == true }
+    }
+
+    /// The user keeps a stalling effect running: stop offering to bypass it.
+    func keepStallingEffect(_ effect: UUID) { keptStallingEffects.insert(effect) }
+
     func updateCable(_ id: UUID, _ name: String = "Change Level", _ change: (inout Cable) -> Void) {
         edit(name, coalescing: "cable \(id) \(name)") { graph in
             guard let index = graph.cables.firstIndex(where: { $0.id == id }) else { return }
@@ -1477,6 +1555,13 @@ final class AppModel {
     func issues(for node: UUID) -> [String] {
         var result = plan.issues[node] ?? []
         if let status = statuses[node], let message = status.message { result.insert(message, at: 0) }
+        for effect in graph.node(node)?.effects ?? [] {
+            if !isInstalled(effect) {
+                result.append("\(effect.title) isn't installed on this Mac, so it passes the audio through. Its settings are kept.")
+            } else if isStalling(effect) {
+                result.append("\(effect.title) is holding up the audio. Bypass it in the inspector if you hear dropouts.")
+            }
+        }
         if silentTaps.contains(node) {
             result.append("No sound yet, although apps it captures are playing. If you expect some, check that \(routingProcessName) may record system audio: System Settings › Privacy & Security › Screen & System Audio Recording.")
         }

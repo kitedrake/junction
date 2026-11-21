@@ -1,3 +1,4 @@
+import AudioToolbox
 import CoreAudio
 import Foundation
 import JunctionCore
@@ -19,7 +20,7 @@ enum CommandLineTool {
               --diagnose [file] A report for bug reports: versions, devices, apps, the routing plan, recent routing
                                 events and the saved setup (it names your devices and apps). No audio is opened.
               --self-test [dir] Checks the bundled driver, routing helper and driver installer, the planner, the mixing
-                                kernel and its effects, both helpers' XPC messages, crash reports and saving (no audio; nothing is
+                                kernel and its effects, the plugin list, both helpers' XPC messages, crash reports and saving (no audio; nothing is
                                 installed, registered or launched).
               --loopback-test   With the driver installed: plays a tone into a temporary virtual device and checks
                                 it comes back out. Needs microphone permission for the calling app (e.g. Terminal).
@@ -249,6 +250,16 @@ enum CommandLineTool {
         // Effects: a built-in gain on a source's lane before the mix, and Apple's peak limiter rendered by the kernel.
         check(builtInEffectRenders(), "kernel runs a source's effect chain before the mix")
         check(appleEffectRenders(), "Apple's peak limiter renders through the kernel (no permission needed)")
+        // Plugins: the picker's list, one loaded as a plugin with its state kept, and a missing one left out.
+        let plugins = PluginCatalog.installed()
+        check(plugins.contains { $0.subtype == "dely" && $0.manufacturer == "appl" },
+              "plugin picker lists the installed effect Audio Units (\(plugins.count), Apple's AUDelay among them)")
+        let (pluginLoaded, pluginDetail) = pluginLoadsWithItsState()
+        check(pluginLoaded, "an Audio Unit loads as a plugin and keeps its state (\(pluginDetail))")
+        let missing = Effect(type: "aufx", subtype: "none", manufacturer: "Nope", state: Data([1, 2, 3]), name: "Missing")
+        let missingKept = (try? JSONDecoder().decode(Effect.self, from: JSONEncoder().encode(missing))) == missing
+        check(!PluginCatalog.isInstalled(missing) && (try? EffectUnit(missing, channels: 2, sampleRate: 48_000)) == nil && missingKept,
+              "a missing plugin is left out of its chain and keeps its saved state")
 
         // Sample-rate conversion: a 44.1 kHz source into a 48 kHz sink stays out of the aggregate and is converted.
         var converting = inventory
@@ -350,6 +361,32 @@ enum CommandLineTool {
             }
         }
         return finite && peak > 0.05 && unit.errorCount == 0
+    }
+
+    /// AUDelay added as a plugin (out of process where macOS allows it): a setting made on it survives its state.
+    /// Returns where it ran and what a 512-frame render cost, for the output.
+    private static func pluginLoadsWithItsState() -> (Bool, String) {
+        let delay = PluginInfo(subtype: "dely", manufacturer: "appl", name: "AUDelay", vendor: "Apple")
+        let started = Date()
+        guard let unit = try? EffectUnit(Effect(plugin: delay), channels: 2, sampleRate: 48_000) else { return (false, "didn't load") }
+        let loading = Date().timeIntervalSince(started)
+        AudioUnitSetParameter(unit.unit, AudioUnitParameterID(kDelayParam_DelayTime), kAudioUnitScope_Global, 0, 0.25, 0)
+        let frames = 512
+        let left = UnsafeMutablePointer<Float>.allocate(capacity: frames), right = UnsafeMutablePointer<Float>.allocate(capacity: frames)
+        defer { left.deallocate(); right.deallocate() }
+        left.initialize(repeating: 0, count: frames)
+        right.initialize(repeating: 0, count: frames)
+        let renderStart = Date()
+        for _ in 0..<100 { unit.process([left, right], frames: frames) }
+        let perBuffer = Date().timeIntervalSince(renderStart) / 100
+        var restored = Effect(plugin: delay)
+        restored.state = unit.state
+        guard restored.state != nil, let again = try? EffectUnit(restored, channels: 2, sampleRate: 48_000) else { return (false, "no state") }
+        let kept = abs((again.parameter(AudioUnitParameterID(kDelayParam_DelayTime)) ?? 0) - 0.25) < 1e-4
+        let detail = String(format: "%@, loaded in %.0f ms, %.0f µs per 512-frame buffer = %.1f %% of its duration",
+                            unit.isOutOfProcess ? "out of process" : "in process", loading * 1000, perBuffer * 1e6,
+                            perBuffer / (Double(frames) / 48_000) * 100)
+        return (kept && unit.errorCount == 0, detail)
     }
 
     /// Says hello to a RoutingService on an anonymous listener, sends it the setup and waits for it to be planned.

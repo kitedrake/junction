@@ -16,15 +16,29 @@ public struct SinkStatus: Codable, Equatable, Sendable {
     public var effectLatencies: [UUID: TimeInterval]?
     /// Effects that couldn't be made (left out of their chain), by effect, with the reason.
     public var effectProblems: [UUID: String]?
+    /// While running: IO cycles whose rendering took longer than Core Audio allows (JK_OVERLOAD_LOAD of the buffer's
+    /// duration) since the sink was first built, and the share of real time its rendering took lately.
+    public var overloads: Int?
+    public var load: Double?
+    /// What each effect costs in this sink, by effect.
+    public var effectCosts: [UUID: EffectCost]?
+    /// Effects holding up the audio thread (see `StallWatch`): offered for bypass.
+    public var stallingEffects: Set<UUID>?
 
     public init(state: State, message: String? = nil, latency: TimeInterval? = nil, bufferFrames: Int? = nil,
-                effectLatencies: [UUID: TimeInterval]? = nil, effectProblems: [UUID: String]? = nil) {
+                effectLatencies: [UUID: TimeInterval]? = nil, effectProblems: [UUID: String]? = nil,
+                overloads: Int? = nil, load: Double? = nil, effectCosts: [UUID: EffectCost]? = nil,
+                stallingEffects: Set<UUID>? = nil) {
         self.state = state
         self.message = message
         self.latency = latency
         self.bufferFrames = bufferFrames
         self.effectLatencies = effectLatencies
         self.effectProblems = effectProblems
+        self.overloads = overloads
+        self.load = load
+        self.effectCosts = effectCosts
+        self.stallingEffects = stallingEffects
     }
 }
 
@@ -64,6 +78,10 @@ public final class Router: @unchecked Sendable {
     private let events: EventLog
     /// Audio Units by effect, kept across sink rebuilds (`queue` only).
     private let effects = EffectPool()
+    /// Which effects hold up the audio thread (`queue` only).
+    private var stallWatch = StallWatch()
+    /// Told (on `queue`) a plugin's state after its window changed it.
+    private var effectStateHandler: (@Sendable (UUID, Data) -> Void)?
 
     struct Failure {
         var key: String
@@ -207,6 +225,7 @@ public final class Router: @unchecked Sendable {
             do {
                 try runner.start(processes: processes ?? [], fadingIn: true)
                 let replacing = runners[sink.sinkNode] != nil
+                if let old = runners[sink.sinkNode] { runner.overloadCarry = old.overloadCount }  // counted since first built
                 if replacing { runner.waitForFirstCycle() }  // so the old one doesn't fade out before this one plays
                 retire(sink.sinkNode)
                 lock.lock()
@@ -223,6 +242,8 @@ public final class Router: @unchecked Sendable {
             }
         }
         effects.keep(Set(plan.sinks.flatMap(\.effectKeys)))
+        let live = effects.unitsByEffect
+        DispatchQueue.main.async { MainActor.assumeIsolated { PluginWindows.shared.keep(live) } }
         onStatus(statuses)
         Self.stopAfterFading(retiring)
         scheduleRetry()
@@ -260,6 +281,7 @@ public final class Router: @unchecked Sendable {
         progress = progress.filter { current[$0.key] != nil }
         var stalled: [UUID] = []
         for runner in current.values { runner.freeRetiredChains() }
+        measureLoad(current)
         for (id, runner) in current {
             let cycles = runner.activity
             if let last = progress[id], zip(last.cycles, cycles).contains(where: { $0 == $1 }) {
@@ -290,6 +312,65 @@ public final class Router: @unchecked Sendable {
             }
         }
         applyNow(lastPlan)
+    }
+
+    /// Every 2 s: what each sink and effect costs, the sinks' overloads, and which effects hold up the audio thread.
+    /// Statuses go out only when something changed.
+    private func measureLoad(_ current: [UUID: SinkRunner]) {
+        let now = Date()
+        var running = Set<UUID>()
+        for runner in current.values {
+            let (overloads, timings) = runner.measure()
+            for (effect, timing) in timings {
+                running.insert(effect)
+                stallWatch.record(effect: effect, stalls: timing.late, peak: Double(timing.peakLoad), sinkOverloads: overloads,
+                                  at: now)
+            }
+        }
+        stallWatch.keep(running)
+        let all = lastPlan.sinks.flatMap { $0.slots.flatMap(\.effects) + $0.effects }
+        let offers = stallWatch.offers(at: now, bypassed: Set(all.filter(\.bypass).map(\.id)))
+        var changed = false
+        for (id, runner) in current {
+            let stalling = offers.intersection(runner.effectIDs)
+            for effect in stalling.subtracting(runner.stalling) {
+                let title = all.first { $0.id == effect }?.title ?? "An effect"
+                Self.log.warning("\(runner.plan.name, privacy: .public): \(title, privacy: .public) is holding up the audio")
+                events.add(.warning, "\(runner.plan.name): \(title) is holding up the audio (renders taking over half a buffer); offering to bypass it")
+            }
+            runner.stalling = stalling
+            guard statuses[id]?.state == .running else { continue }
+            let fresh = runner.status(message: statuses[id]?.message)
+            if fresh != statuses[id] {
+                statuses[id] = fresh
+                changed = true
+            }
+        }
+        if changed { onStatus(statuses) }
+    }
+
+    // MARK: Plugin windows
+
+    /// Has `handler` told (on the router's queue) a plugin's state whenever its window changed it, so it is saved.
+    public func observeEffectStates(_ handler: @escaping @Sendable (UUID, Data) -> Void) {
+        queue.async { self.effectStateHandler = handler }
+    }
+
+    /// Opens the window of an effect's running unit in this process (the one that routes), on the main thread. Any
+    /// thread but the router's own. Returns why it can't, if it can't.
+    public func openPluginWindow(_ effect: UUID, title: String) -> String? {
+        let (unit, handler) = queue.sync { (effects.unit(effect), effectStateHandler) }
+        guard let unit else {
+            return "\(title) isn't running right now. Its window opens while routing is on and its node is connected."
+        }
+        let queue = queue
+        let open = { @MainActor in
+            PluginWindows.shared.open(unit, effect: effect, title: title) { state in
+                queue.async { handler?(effect, state) }
+            }
+        }
+        if Thread.isMainThread { MainActor.assumeIsolated { open() } } else { DispatchQueue.main.async { open() } }
+        return nil
     }
 
     /// Waits until the retiring sinks have faded out (or a short deadline passes, e.g. when a device stopped
@@ -357,6 +438,15 @@ final class SinkRunner: @unchecked Sendable {
     private var mixChain: LiveChain?
     private var retired: [(chain: LiveChain, ticket: UInt64)] = []
     private var effectProblems: [UUID: String] = [:]
+    /// Overloads of the sinks this one replaced, so the count goes on across rebuilds.
+    var overloadCount: UInt64 { overloadCarry + rendererTiming.late }
+    var overloadCarry: UInt64 = 0
+    /// The last measurement (see `measure`), and the effects the router offers for bypass.
+    private var rendererTiming = JKTiming()
+    private var effectTimings: [UUID: JKTiming] = [:]
+    private var load: Double?
+    private var costs: [UUID: EffectCost] = [:]
+    var stalling: Set<UUID> = []
 
     init?(plan: SinkPlan, pool: EffectPool) {
         self.plan = plan
@@ -393,6 +483,7 @@ final class SinkRunner: @unchecked Sendable {
         self.converters = converters
         slotChains = Array(repeating: nil, count: plan.slots.count)
         jk_renderer_set_master_gain(renderer, plan.masterGain)
+        jk_renderer_set_sample_rate(renderer, plan.sampleRate)  // `start` sets the aggregate's own once it knows it
         updateChains(plan, pool: pool)
     }
 
@@ -458,7 +549,40 @@ final class SinkRunner: @unchecked Sendable {
     func status(message: String?) -> SinkStatus {
         SinkStatus(state: .running, message: message, latency: latency, bufferFrames: bufferFrames,
                    effectLatencies: effectLatencies.isEmpty ? nil : effectLatencies,
-                   effectProblems: effectProblems.isEmpty ? nil : effectProblems)
+                   effectProblems: effectProblems.isEmpty ? nil : effectProblems,
+                   overloads: Int(overloadCount), load: load, effectCosts: costs.isEmpty ? nil : costs,
+                   stallingEffects: stalling.isEmpty ? nil : stalling)
+    }
+
+    /// The effects in this sink's chains.
+    var effectIDs: Set<UUID> { Set((plan.slots.flatMap(\.effects) + plan.effects).map(\.id)) }
+
+    /// Reads how long rendering took since the last call: the sink's load and overloads, and each effect's cost.
+    /// Returns the overloads so far and each effect's timing (cumulative, its peak since the last call).
+    func measure() -> (overloads: UInt64, effects: [UUID: JKTiming]) {
+        var timing = JKTiming()
+        jk_renderer_timing(renderer, &timing, 1)
+        let previous = rendererTiming
+        rendererTiming = timing
+        let sampleRate = plan.sampleRate > 0 ? plan.sampleRate : 48_000
+        if timing.frames > previous.frames {
+            let audio = Double(timing.frames - previous.frames) / sampleRate
+            load = ((timing.seconds - previous.seconds) / audio * 1000).rounded() / 1000
+        }
+        var timings: [UUID: JKTiming] = [:]
+        var fresh: [UUID: EffectCost] = [:]
+        for chain in slotChains.compactMap({ $0 }) + [mixChain].compactMap({ $0 }) {
+            let units = chain.unitsByEffect
+            for (effect, stageTiming) in chain.takeTimings() {
+                timings[effect] = stageTiming
+                fresh[effect] = EffectCost.measure(stageTiming, since: effectTimings[effect], sampleRate: sampleRate,
+                                                   latency: units[effect]?.latency ?? 0,
+                                                   outOfProcess: units[effect]?.isOutOfProcess ?? false)
+            }
+        }
+        effectTimings = timings
+        costs = fresh
+        return (overloadCount, timings)
     }
 
     /// Builds and starts the sink. With `fadingIn` it starts silent and fades in over one cross-fade.
@@ -503,6 +627,7 @@ final class SinkRunner: @unchecked Sendable {
 
         if let frames = plan.bufferFrames { Self.setBufferSize(aggregate, frames) }
         let rate = HAL.value(aggregate, kAudioDevicePropertyNominalSampleRate, default: Float64(48_000))
+        if rate > 0 { jk_renderer_set_sample_rate(renderer, rate) }
         if rate > 0 { fadeFrames = UInt32(max(1, (Router.crossFadeSeconds * rate).rounded())) }
 
         // Devices at another rate run on their own IOProc, outside the aggregate, and feed their converters.

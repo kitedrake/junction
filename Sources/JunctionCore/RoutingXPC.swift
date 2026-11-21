@@ -21,7 +21,7 @@ import Security
 
 public enum RoutingXPC {
     /// Bumped when a message changes shape; an app and a helper that disagree don't talk (the app routes itself).
-    public static let protocolVersion = 1
+    public static let protocolVersion = 2
     public static let appBundleIdentifier = "local.junction.app"
     public static let helperBundleIdentifier = "local.junction.helper"
     /// The launchd label and the Mach service the helper listens on.
@@ -89,6 +89,8 @@ public enum RoutingRequest: Codable, Equatable, Sendable {
     case keepRouting(Bool)
     /// The app is quitting: routing stops unless it should keep going.
     case goodbye
+    /// Open a plugin's own window in the helper, where its unit runs (`title` names it in the window's title bar).
+    case openPluginWindow(effect: UUID, title: String)
 }
 
 /// What the helper knows when an app says hello.
@@ -141,6 +143,8 @@ public enum RoutingNotice: Codable, Equatable, Sendable {
     case meters([PortKey: Float])
     case events([LoggedEvent])
     case permission(PermissionState)
+    /// A plugin's window changed its unit's state: the app saves it with the graph.
+    case effectState(effect: UUID, state: Data)
 }
 
 /// Whether the helper can be registered, as `SMAppService` reports it.

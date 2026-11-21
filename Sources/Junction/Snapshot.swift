@@ -9,6 +9,18 @@ enum Demo {
     /// Chat apps the made-up Mac has installed (screenshots never show the real Mac's apps).
     static let installedChatApps: Set<String> = ["com.hnc.Discord", "us.zoom.xos", "com.apple.FaceTime"]
     static let installedDAWApps: Set<String> = ["com.apple.logic10", "com.apple.garageband10"]
+    /// Effect Audio Units the made-up Mac has installed (screenshots never show the real Mac's plugins).
+    static let plugins: [PluginInfo] = [
+        PluginInfo(subtype: "dely", manufacturer: "appl", name: "AUDelay", vendor: "Apple", version: "1.7.0", hasCustomView: false),
+        PluginInfo(subtype: "mrev", manufacturer: "appl", name: "AUMatrixReverb", vendor: "Apple", version: "1.7.0"),
+        PluginInfo(subtype: "dsrs", manufacturer: "Exmp", name: "De-Esser", vendor: "Example Audio", version: "2.1.0", hasCustomView: true),
+        PluginInfo(subtype: "sprv", manufacturer: "Exmp", name: "Space Reverb", vendor: "Example Audio", version: "2.1.0", hasCustomView: true),
+        PluginInfo(subtype: "tape", manufacturer: "Nwnd", name: "Tape Warmth", vendor: "Northwind Sound", version: "1.0.4", hasCustomView: true),
+        PluginInfo(subtype: "clip", manufacturer: "Nwnd", name: "Soft Clipper", vendor: "Northwind Sound", version: "1.0.4"),
+    ]
+    /// A plugin the made-up Mac doesn't have (any more): shown as missing, with its settings kept.
+    static let missingPlugin = Effect(type: "aufx", subtype: "vrdr", manufacturer: "Exmp", state: Data([0x62, 0x70, 0x6C, 0x69]),
+                                      name: "Vocal Rider", vendor: "Example Audio")
 
     @MainActor static func load(into model: AppModel) {
         let stream = VirtualDevice(name: "Stream Mix", icon: .stream)
@@ -35,7 +47,7 @@ enum Demo {
         let musicThroughDeck = Node(kind: .appThroughDevice(music, device: deck.id), x: 40, y: 420, canvas: stream.id)
         let deckNode = Node(kind: .virtualDevice(deck.id), x: 330, y: 100, canvas: deck.id)
         // Recording: the mic and Discord on separate channel pairs.
-        let recordingMic = Node(kind: .defaultInput, x: 40, y: 50, canvas: recording.id)
+        let recordingMic = Node(kind: .defaultInput, x: 40, y: 50, canvas: recording.id, effects: [missingPlugin])
         let chat = Node(kind: .application(discord), x: 40, y: 220, canvas: recording.id)
         let recordingNode = Node(kind: .virtualDevice(recording.id), x: 330, y: 100, canvas: recording.id)
         func cable(_ a: Node, _ ac: Int, _ b: Node, _ bc: Int, _ dB: Double = 0) -> Cable {
@@ -87,6 +99,9 @@ enum Demo {
         let running = SinkStatus(state: .running, latency: 0.0117, bufferFrames: 512)
         var streaming = running
         streaming.effectLatencies = [mic.id: 0, streamNode.id: 0]
+        streaming.overloads = 0
+        streaming.effectCosts = [highPass.id: EffectCost(load: 0.002, peak: 0.01, stalls: 0),
+                                 gate.id: EffectCost(load: 0.001, peak: 0.004, stalls: 0)]
         var meters: [PortKey: Float] = [:]
         func meter(_ node: Node, _ output: Bool, _ values: [Float]) {
             for (channel, value) in values.enumerated() { meters[PortKey(node: node.id, isOutput: output, channel: channel)] = value }
@@ -161,6 +176,14 @@ enum Snapshot {
                 model.selection = .node(mic.id)
             }
             await both("effects")
+            // The plugin picker, listing the made-up Mac's effect Audio Units.
+            if let mic = model.canvasNodes.first(where: { !$0.effects.isEmpty && $0.kind == .defaultInput }) {
+                model.showPluginPicker(for: mic.id)
+                try? await Task.sleep(for: .milliseconds(600))
+                await both("plugin-picker", sheet: true)
+                model.pluginPicker = nil
+                try? await Task.sleep(for: .milliseconds(500))
+            }
             if let cable = model.canvasCables.first(where: { $0.gainDB < 0 }) { model.selection = .cable(cable.id) }
             await both("cable")
             // Several nodes picked with a drag box: the selection inspector.
@@ -179,6 +202,12 @@ enum Snapshot {
             if let first = model.canvas, let other = model.graph.virtualDevices.first(where: { $0.id != first }) {
                 model.showCanvas(other.id)
                 await both("second-canvas")
+                // A plugin that isn't installed: passed through, its settings kept.
+                if let mic = model.canvasNodes.first(where: { $0.effects.contains(Demo.missingPlugin) }) {
+                    model.selection = .node(mic.id)
+                    await both("missing-plugin")
+                    model.selection = nil
+                }
                 model.showCanvas(first)
             }
             // The Routing menu open on its scenes (the sidebar lists them too).

@@ -135,6 +135,19 @@ public final class RoutingClient: NSObject, RoutingAppXPC, @unchecked Sendable {
 
     public func rebuildAll() { send(.rebuildAll) { _ in } }
 
+    /// Asks the helper to open a plugin's window; `done` gets why it couldn't (nil once it did), on the callback queue.
+    public func openPluginWindow(_ effect: UUID, title: String, done: @escaping (String?) -> Void) {
+        let callbackQueue = callbackQueue
+        send(.openPluginWindow(effect: effect, title: title)) { reply in
+            let problem: String? = switch reply {
+            case .done: nil
+            case .refused(let reason): reason
+            default: "\(RoutingXPC.helperDisplayName) didn't answer."
+            }
+            callbackQueue.async { done(problem) }
+        }
+    }
+
     public func requestMicrophone() { send(.requestMicrophone) { _ in } }
 
     public func setKeepRouting(_ keep: Bool) {

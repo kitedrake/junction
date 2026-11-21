@@ -405,7 +405,11 @@ private struct SinkTiming: View {
         }
         var text = "About \(formatDelay(latency)) from its sources to here"
         if let frames = status.bufferFrames { text += " (buffer: \(frames) frames)" }
-        return text + "."
+        text += "."
+        if let overloads = status.overloads, overloads > 0 {
+            text += " \(overloads) overload\(overloads == 1 ? "" : "s"): buffers its routing didn't finish in time."
+        }
+        return text
     }
 }
 
@@ -443,6 +447,9 @@ private struct EffectsSection: View {
                             ForEach([EffectKind.highPass, .equalizer, .dynamics, .limiter], id: \.self) { kind in
                                 Button(kind.title, systemImage: kind.symbol) { model.addEffect(kind, to: node.id) }
                             }
+                        }
+                        Section("Plugins") {
+                            Button("Audio Unit…", systemImage: "puzzlepiece.extension") { model.showPluginPicker(for: node.id) }
                         }
                     }
                     .fixedSize()
@@ -486,10 +493,18 @@ private struct EffectRow: View {
 
     var body: some View {
         let kind = effect.kind
+        let installed = model.isInstalled(effect)
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                Image(systemName: kind?.symbol ?? "questionmark.square.dashed").frame(width: 18).foregroundStyle(.secondary)
-                Text(kind?.title ?? "Unknown Effect").lineLimit(1)
+                Image(systemName: kind?.symbol ?? (effect.isPlugin ? "puzzlepiece.extension" : "questionmark.square.dashed"))
+                    .frame(width: 18)
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(effect.title).lineLimit(1)
+                    if let vendor = effect.vendor {
+                        Text(vendor).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                }
                 Spacer()
                 Toggle("On", isOn: Binding(get: { !effect.bypass },
                                            set: { model.setEffectBypass(effect.id, in: node.id, !$0) }))
@@ -507,11 +522,45 @@ private struct EffectRow: View {
                     .help("Remove")
             }
             .buttonStyle(.borderless)
-            if let problem = model.effectProblem(effect.id) {
+            if !installed {
+                Label("Not installed on this Mac: the audio passes through it. Its settings are kept for when it's back.",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let problem = model.effectProblem(effect.id) {
                 Label(problem, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+            if installed, model.isStalling(effect) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("Holding up the audio: it often takes over half of each buffer's time. Bypass it if you hear dropouts.",
+                          systemImage: "gauge.with.dots.needle.100percent")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        Button("Bypass") { model.setEffectBypass(effect.id, in: node.id, true) }
+                        Button("Keep Running") { model.keepStallingEffect(effect.id) }
+                    }
+                    .controlSize(.small)
+                }
+            }
+            if effect.isPlugin, installed {
+                HStack {
+                    Button("Open Window", systemImage: "macwindow") { model.openPluginWindow(effect, in: node.id) }
+                        .controlSize(.small)
+                        .help("Opens the plugin's own window; its settings are saved with your setup")
+                    Spacer()
+                    if let cost = model.effectCost(effect.id) { CostText(cost: cost) }
+                }
+            } else if let cost = model.effectCost(effect.id), !effect.bypass {
+                HStack {
+                    Spacer()
+                    CostText(cost: cost)
+                }
             }
             if let kind, !effect.bypass {
                 ForEach(kind.parameters) { parameter in
@@ -522,6 +571,22 @@ private struct EffectRow: View {
             }
         }
         .opacity(effect.bypass ? 0.6 : 1)
+    }
+}
+
+/// "CPU 1.2 % · adds 3 ms · own process".
+private struct CostText: View {
+    let cost: EffectCost
+
+    var body: some View {
+        var parts = [String(format: cost.load < 0.1 ? "CPU %.1f %%" : "CPU %.0f %%", cost.load * 100)]
+        if cost.latency > 0.0005 { parts.append("adds \(formatDelay(cost.latency))") }
+        if cost.outOfProcess { parts.append("own process") }
+        return Text(parts.joined(separator: " · "))
+            .font(.caption)
+            .monospacedDigit()
+            .foregroundStyle(.secondary)
+            .help(String(format: "Share of one CPU core it used lately; its slowest buffer took %.0f %% of the buffer's time.", cost.peak * 100))
     }
 }
 

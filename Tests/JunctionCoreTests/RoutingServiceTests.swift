@@ -22,6 +22,17 @@ private final class FakeRouter: SinkRouting, @unchecked Sendable {
     func resetHealth() { record("resetHealth") }
     func processesChanged() { record("processes") }
     func takeMeters() -> [PortKey: Float] { lock.withLock { meters } }
+
+    /// Plugins it runs (their windows open), and who hears their states.
+    var runningEffects: Set<UUID> = []
+    private var stateHandler: (@Sendable (UUID, Data) -> Void)?
+    func openPluginWindow(_ effect: UUID, title: String) -> String? {
+        record("window \(title)")
+        return lock.withLock { runningEffects.contains(effect) } ? nil : "\(title) isn't running right now."
+    }
+    func observeEffectStates(_ handler: @escaping @Sendable (UUID, Data) -> Void) { lock.withLock { stateHandler = handler } }
+    /// A plugin window changed a unit's state.
+    func pluginChanged(_ effect: UUID, _ state: Data) { lock.withLock { stateHandler }?(effect, state) }
 }
 
 /// Collects what a client hears.
@@ -133,13 +144,18 @@ final class RoutingServiceTests: XCTestCase {
         let state = HelperState(processName: "Junction Helper", processID: 42, keepRouting: true, permission: .denied,
                                 statuses: statuses)
         let requests: [RoutingRequest] = [.hello(protocolVersion: RoutingXPC.protocolVersion, appVersion: "1.2", keepRouting: true),
-                                          .graph(graph), .rebuildAll, .requestMicrophone, .keepRouting(false), .goodbye]
+                                          .graph(graph), .rebuildAll, .requestMicrophone, .keepRouting(false), .goodbye,
+                                          .openPluginWindow(effect: node, title: "Space Reverb · Microphone")]
         let replies: [RoutingReply] = [.welcome(state), .done, .refused("no"), .outdated("old")]
         let notices: [RoutingNotice] = [
             .statuses(statuses),
             .meters([PortKey(node: node, isOutput: true, channel: 1): 0.5, PortKey(node: node, isOutput: false, channel: 0): 0.25]),
             .events([LoggedEvent(date: Date(timeIntervalSince1970: 1_700_000_000), kind: .warning, message: "Core Audio restarted")]),
             .permission(.allowed), .permission(.notAsked), .permission(.restricted),
+            .effectState(effect: node, state: Data([0x62, 0x70, 0x6C, 0x69, 0x73, 0x74])),
+            .statuses([sink: SinkStatus(state: .running, overloads: 3, load: 0.12,
+                                        effectCosts: [node: EffectCost(load: 0.05, peak: 0.6, stalls: 4, latency: 0.003, outOfProcess: true)],
+                                        stallingEffects: [node])]),
         ]
         for request in requests {
             XCTAssertEqual(try RoutingXPC.decode(RoutingRequest.self, from: RoutingXPC.encode(request)), request)
@@ -206,6 +222,32 @@ final class RoutingServiceTests: XCTestCase {
 
         client.rebuildAll()
         waitUntil("a second rebuild") { router.calls.filter { $0 == "rebuild" }.count == 2 }
+        client.goodbye()
+    }
+
+    func testPluginWindowsOpenInTheHelperAndTheirStateComesBack() throws {
+        makeService()
+        let (client, heard) = makeClient()
+        waitUntil("hello") { heard.welcome != nil }
+        let running = UUID(), stopped = UUID()
+        router.runningEffects = [running]
+        let answers = Box<[String?]>([])
+        client.openPluginWindow(running, title: "Space Reverb · Microphone") { answers.value.append($0) }
+        waitUntil("the first answer") { answers.value.count == 1 }
+        XCTAssertEqual(answers.value, [nil], "the helper opened it")
+        XCTAssertTrue(router.calls.contains("window Space Reverb · Microphone"))
+        client.openPluginWindow(stopped, title: "Vocal Rider") { answers.value.append($0) }
+        waitUntil("the second answer") { answers.value.count == 2 }
+        XCTAssertEqual(answers.value.last, "Vocal Rider isn't running right now.", "the app hears why not")
+
+        // The window changed the plugin: the app hears its state, to save it.
+        let state = Data([1, 2, 3, 4])
+        router.pluginChanged(running, state)
+        waitUntil("the state") { heard.notices.contains(.effectState(effect: running, state: state)) }
+
+        // Before hello, nothing opens.
+        let reply = service.queue.sync { service.handle(.openPluginWindow(effect: running, title: "x"), from: NSXPCConnection()) }
+        guard case .refused = reply else { return XCTFail("a stranger can't open windows") }
         client.goodbye()
     }
 

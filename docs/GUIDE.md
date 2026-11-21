@@ -289,6 +289,37 @@ levels after the effects (the meters on the canvas do too). Some effects, such a
 little delay: the box says how much, and the delay under **Delay** includes it. Effects are saved with the setup and
 with scenes, and they keep working when Junction routes in the background.
 
+Under each effect the box shows what it costs while it runs: how much of the Mac's processor it uses ("CPU 1.2 %"),
+the delay it adds, and "own process" for a plugin macOS runs on its own.
+
+### Audio Unit plugins
+
+Any effect Audio Unit installed on your Mac (from another maker, or one of Apple's not listed above) can join a chain.
+Choose **Add Effect › Audio Unit…**: the list shows every installed effect by maker. Type in the search field to
+narrow it down by name or maker, then pick one and click **Add** (or double-click it).
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="screenshots/plugin-picker-light.png">
+  <img src="screenshots/plugin-picker-dark.png" alt="The Add an Audio Unit window listing installed effects by maker, with a search field" width="72%">
+</picture>
+
+- **Open Window** shows the plugin's own controls (or a slider for each setting when it has no window of its own).
+  The window belongs to whatever routes: Junction itself, or **Junction Helper** when routing runs in the background,
+  so it can appear in front of Junction as another app. It opens while the plugin runs (routing on, its item
+  connected). Whatever you change there is saved with your setup.
+- Where macOS allows it, a plugin runs in a **process of its own**: if it crashes, the sound passes through it
+  unprocessed instead of stopping Junction.
+- A plugin that keeps **holding up the audio** (it takes more than half of the time each buffer lasts, three times
+  within ten seconds) is flagged in its box with **Bypass** and **Keep Running**. Bypass it if you hear dropouts.
+  The virtual device's or output's **Delay** box counts **overloads**: buffers its routing didn't finish in time.
+- If a plugin is **missing** (removed, or the setup came from another Mac), its box says so, the sound passes through
+  it, and its settings stay in the setup, so it works as before once it is installed again.
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="screenshots/missing-plugin-light.png">
+  <img src="screenshots/missing-plugin-dark.png" alt="A microphone whose Vocal Rider plugin isn't installed: the inspector says the sound passes through and its settings are kept">
+</picture>
+
 ### Delay and buffer size
 
 A selected cable shows roughly how long sound takes to travel through it. Select the virtual device or an output to
@@ -497,6 +528,8 @@ there is one, is offered as above.
 | Crackles or odd pitch | Crackles usually mean the buffer is too small: select the device or output and choose a bigger **Buffer size**. A node with a yellow triangle about sample rates is combined without conversion: select the virtual device or output it is wired to and set **Conversion** to **Automatic**, or set both devices to the same rate in Audio MIDI Setup. |
 | A node says "converted to 48 kHz" | That device runs at another rate than its virtual device, and Junction converts it. Nothing to do; to avoid the small extra delay, set both to the same rate in Audio MIDI Setup. |
 | Converted sound drops out for a moment | The device stopped delivering sound in time (a busy Mac, or a device that paused), so Junction faded it out and back in rather than click. A bigger **Buffer size** helps; the Routing Log shows rebuilds if the device stopped altogether. |
+| Dropouts since adding a plugin | Look at the plugin's box: "holding up the audio" means it takes too long; click **Bypass**, choose a bigger **Buffer size**, or try another plugin. The **Delay** box of the device or output counts overloads. |
+| A plugin's window doesn't open | It opens while the plugin runs: turn routing on and connect its item. With routing in the background the window belongs to Junction Helper and may be behind other windows. |
 | The volume keys don't change a virtual device | Virtual devices have no volume control yet; use the level faders in Junction. |
 | A device or interface shows "Not connected" | It's unplugged or off. Its cables come back to life when it returns. |
 | A virtual device switched sample rate on its own | Other apps (Audio MIDI Setup, a DAW) can set it, and macOS restores the last rate it remembers. Junction follows such changes; set the rate you want in the inspector. |

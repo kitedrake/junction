@@ -25,7 +25,13 @@ without your voice chat, step by step.
   on the virtual device, the mix before it goes into the device (what apps recording it hear); on an output, what it
   receives. Gain, pan, mono and a noise gate are built in; a high-pass filter, a three-band equalizer, a compressor
   and a limiter are Apple's Audio Units. Each effect can be bypassed and moved up or down; the inspector shows the
-  levels after the chain and the delay it adds (also counted in the destination's delay).
+  levels after the chain and the delay it adds (also counted in the destination's delay), and each effect's CPU share
+  and delay while it runs.
+- **Audio Unit plugins**: **Add Effect › Audio Unit…** lists every effect Audio Unit installed on the Mac by maker,
+  with a search field. A plugin opens its own window (**Open Window**) in the process that routes, runs in a process
+  of its own where macOS allows it, and is saved with the setup, settings made in its window included. One that keeps
+  holding up the audio thread is offered for bypass; each destination counts its overloads. A plugin that isn't
+  installed shows as missing, passes the audio through and keeps its saved settings.
 - **Navigation**: zoom about the pointer with a pinch or ⌘-scroll, or with ⌘+, ⌘−, ⌘0 (actual size) and ⌥⌘0 (fit);
   scroll or drag empty canvas to move around. A minimap shows the whole canvas and where you are; click it to go
   there.
@@ -228,6 +234,21 @@ Three parts (five with the helpers):
    sinks reach during a cross-fade is rendered by one at a time (a try-lock; the other passes the audio through).
    Each chain's `kAudioUnitProperty_Latency` is added to the sink's delay estimate and shown on its node. Meters on
    sources and sinks are taken after their effects. Effects run wherever routing runs (Junction Helper or the app).
+   **Plugins** (`Plugins.swift`, `PluginWindows.swift`): the picker lists `kAudioUnitType_Effect` components from
+   `AVAudioUnitComponentManager`. A plugin is an effect with its component codes, name and maker; its unit is made
+   with `AudioComponentInstantiate(…, kAudioComponentInstantiation_LoadOutOfProcess)` (waited for on the router's
+   queue, given up after 10 s), and in process only when macOS can't host it out of process. Apple's units Junction
+   offers itself load in process. A plugin's window opens in the process that runs its unit (the app asks Junction
+   Helper over XPC, `openPluginWindow`): the unit's view controller (`kAudioUnitProperty_RequestViewController`,
+   which also serves units hosted out of process), its Cocoa view (`kAudioUnitProperty_CocoaUI`), or Apple's
+   `AUGenericView`. While it is open, and when it closes, the unit's ClassInfo is read back (every 2 s, sent only
+   when it changed) and the app saves it into the effect's `state`. The kernel times every chain stage and every IO
+   cycle with `mach_absolute_time` (atomics only): a stage taking over half its buffer's duration counts a stall, a
+   cycle taking over 90 % an overload of its sink. Every 2 s the router turns the counts into each effect's CPU share,
+   peak and delay and each sink's overloads (carried across rebuilds), and `StallWatch` offers an effect for bypass
+   after three stalls within 10 s, or one render longer than a whole buffer while its sink overloaded (never a
+   bypassed one). A plugin whose component isn't installed is left out of its chain (the audio passes through) with
+   its saved state untouched; the plan still lists it, so it comes back once installed.
 4. **Junction Helper** (`Sources/JunctionHelper`, `RoutingService.swift`, `RoutingClient.swift`, `RoutingXPC.swift`):
    in builds made for it, the planner and router run in a UI-element app (no Dock icon) at
    `Junction.app/Contents/Library/LoginItems/JunctionHelper.app`, which Junction registers with
@@ -259,7 +280,8 @@ canvas, receiving nodes can set a buffer size and sample-rate conversion, named 
 source can be an app through a virtual device, `appThroughDevice`, which older files can't contain; nodes keep their
 effect chains in `effects`: each effect's four-character `type`, `subtype` and `manufacturer`, `bypass`, the
 `parameters` set in Junction, and an Audio Unit's `state`, its `kAudioUnitProperty_ClassInfo` as a base64 binary
-property list, restored when its unit is made). A schema 1 file from the
+property list, restored when its unit is made; a plugin also keeps its `name` and `vendor`, so it can be named while
+missing; codes with bytes that aren't printable are written as `0x` and eight hex digits). A schema 1 file from the
 shared-canvas versions is converted on load: each node moves to the canvas of the device it was wired to (unwired
 ones to the first device), and cables between devices are dropped. Schema 2 files load with automatic buffer sizes;
 schema 2 and 3 files get sample-rate conversion set to Automatic and start with no scenes and no effects (a schema 4
@@ -282,7 +304,12 @@ address and undefined-behaviour sanitizers with random buffer sizes, stalls on e
 rates, then swaps effect chains (random built-in effects, before and after the mix) from one thread while another
 renders through them, so a chain freed too early shows up as a use-after-free. The engine tests drive chains with a
 fake effect (order, bypass, swapping while rendering, no allocation on the rendering thread, counted through
-libmalloc's logging hook) and render Apple's four units, which needs no permission. The driver harness (`Tests/DriverHarness/harness.c`) loads the driver into a test process with a stand-in Core Audio
+libmalloc's logging hook) and render Apple's four units, which needs no permission. The plugin tests use Apple's
+units as stand-ins for third-party ones: the picker's list (AUDelay among the installed effects) and its search, a
+setting made directly on AUDelay surviving its state through `graph.json`, a missing component left out of its chain
+with its state kept, overloads counted per sink and stalls per stage (a fake effect that sleeps through its buffer),
+the cost read from two timings, and when `StallWatch` offers a bypass. They also print what AUDelay costs as a plugin
+(where it ran, load time, CPU share at 256 frames, latency); `--self-test` prints the same for a 512-frame buffer. The driver harness (`Tests/DriverHarness/harness.c`) loads the driver into a test process with a stand-in Core Audio
 host and checks the device list, properties, configuration changes, saved state across a simulated restart (also a
 list saved by driver 0.1), bit-exact loopback, the volume and mute controls with their ramp, directions and their
 hidden companions, channel names, icons, hidden devices, property-change notifications, the shared clock (same
@@ -379,6 +406,18 @@ system-audio permissions and **Install Driver…** with the first one.
   of at most 4096 frames (longer ones pass the audio through unprocessed). While a rebuilt sink cross-fades with the
   one it replaces, an Audio Unit both reach renders for one of them at a time; the other passes that buffer through.
   Pan is a balance between pairs of channels and does nothing on a mono source.
+- Third-party plugins haven't been tried yet: only Apple's units have stood in for them, and only in tests, where
+  plugin windows don't open. Which plugins macOS hosts out of process (and how their views appear from there), how
+  plugins that need a license prompt, network access or a DAW-style host behave, and plugins with side chains,
+  MIDI or a channel layout other than the node's (each runs with the node's channel count, non-interleaved) are
+  unverified; a plugin that refuses that format shows the error and is left out. Out of process, every buffer makes
+  a round trip to the plugin's process. Measured so far only with Apple's AUDelay standing in (on an Apple silicon
+  Mac, from `--self-test` and the tests, which print it): macOS hosted it out of process, it took about 0.2 s to
+  load, and rendering cost about 30 µs per 512-frame buffer at 48 kHz (0.3 % of the buffer's duration, round trip
+  included) with no added delay. A real plugin's own processing comes on top, and the round trip hasn't been timed
+  apart from it. Plugin windows open only while the plugin runs, and settings changed in a window
+  just before Junction quits may be lost (they are read every 2 s). Music effects (`aumf`) and instruments aren't
+  listed. Overload counts are Junction's own measurement of its rendering, not Core Audio's overload notifications.
 - Routing keeps running from the menu bar when the window is closed. It stops when Junction quits, unless it runs in
   Junction Helper with **Keep routing after quitting Junction** on.
 - Junction Helper hasn't been tried on a real Mac yet: registering it with `SMAppService`, launchd starting it at

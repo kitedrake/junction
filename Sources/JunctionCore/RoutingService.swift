@@ -9,6 +9,15 @@ public protocol SinkRouting: AnyObject {
     func resetHealth()
     func processesChanged()
     func takeMeters() -> [PortKey: Float]
+    /// Opens a plugin's window where its unit runs (on the main thread); returns why it can't, if it can't.
+    func openPluginWindow(_ effect: UUID, title: String) -> String?
+    /// Has `handler` told a plugin's state whenever its window changed it.
+    func observeEffectStates(_ handler: @escaping @Sendable (UUID, Data) -> Void)
+}
+
+extension SinkRouting {
+    public func openPluginWindow(_ effect: UUID, title: String) -> String? { "Plugin windows aren't available here." }
+    public func observeEffectStates(_ handler: @escaping @Sendable (UUID, Data) -> Void) {}
 }
 
 extension Router: SinkRouting {}
@@ -93,6 +102,10 @@ public final class RoutingService: NSObject, NSXPCListenerDelegate, @unchecked S
         events.observe { [weak self] in
             guard let self else { return }
             self.queue.async { self.forwardEvents() }
+        }
+        router.observeEffectStates { [weak self] effect, state in
+            guard let self else { return }
+            self.queue.async { self.broadcast(.effectState(effect: effect, state: state)) }
         }
     }
 
@@ -243,6 +256,9 @@ public final class RoutingService: NSObject, NSXPCListenerDelegate, @unchecked S
             if let connection { clients[ObjectIdentifier(connection)] = nil }
             stopIfIdle()
             return .done
+        case .openPluginWindow(let effect, let title):
+            guard isClient(connection) else { return .refused("Say hello first.") }
+            return router.openPluginWindow(effect, title: title).map { .refused($0) } ?? .done
         }
     }
 

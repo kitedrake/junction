@@ -1,4 +1,5 @@
 #include "JunctionKernel.h"
+#include "JunctionTiming.h"
 
 #include <math.h>
 #include <stdatomic.h>
@@ -22,6 +23,13 @@ struct JKRenderer {
     _Atomic uint64_t cycles;         // IO cycles begun
     _Atomic uint64_t finished;       // IO cycles finished (see jk_renderer_is_done_with)
     _Atomic uint64_t mismatches;
+    // Timing: how long rendering took (see jk_renderer_timing). The rate is set before the IOProc starts.
+    double sampleRate;
+    double secondsPerTick;
+    _Atomic uint64_t busyTicks;
+    _Atomic uint64_t renderedFrames;
+    _Atomic uint64_t overloads;
+    _Atomic uint32_t peakLoad;       // float bits
     // Fade applied to everything the sink receives, for cross-fading a rebuilt sink with its replacement.
     _Atomic uint32_t fadeTarget;     // float bits, 0…1
     _Atomic uint32_t fadeFrames;     // frames for a full 0 → 1 ramp
@@ -165,6 +173,7 @@ JKRenderer *jk_renderer_create_slots(uint32_t inputChannels, uint32_t outputChan
     atomic_init(&r->fadeFrames, 1);
     atomic_init(&r->fadeLevel, Bits(1.0f));
     r->fade = 1.0f;
+    r->secondsPerTick = jk_seconds_per_tick();
     return r;
 }
 
@@ -283,8 +292,8 @@ int jk_renderer_set_captures(JKRenderer *r, JKCapture *const *captures, uint32_t
     return 1;
 }
 
-static void Render(JKRenderer *r, const AudioBufferList *input, AudioBufferList *output,
-                   const AudioTimeStamp *outputTime);
+static uint32_t Render(JKRenderer *r, const AudioBufferList *input, AudioBufferList *output,
+                       const AudioTimeStamp *outputTime);
 
 OSStatus jk_renderer_ioproc(AudioObjectID device, const AudioTimeStamp *now, const AudioBufferList *input,
                             const AudioTimeStamp *inputTime, AudioBufferList *output, const AudioTimeStamp *outputTime,
@@ -293,9 +302,30 @@ OSStatus jk_renderer_ioproc(AudioObjectID device, const AudioTimeStamp *now, con
     JKRenderer *r = clientData;
     if (!r) return noErr;
     atomic_fetch_add(&r->cycles, 1);  // sequentially consistent: see jk_renderer_swap_chain
-    Render(r, input, output, outputTime);
+    uint64_t start = mach_absolute_time();
+    uint32_t frames = Render(r, input, output, outputTime);
+    uint64_t ticks = mach_absolute_time() - start;
+    if (frames > 0 && r->sampleRate > 0) {
+        float load = jk_load(ticks, r->secondsPerTick, frames, r->sampleRate);
+        atomic_fetch_add_explicit(&r->busyTicks, ticks, memory_order_relaxed);
+        atomic_fetch_add_explicit(&r->renderedFrames, frames, memory_order_relaxed);
+        if (load > JK_OVERLOAD_LOAD) atomic_fetch_add_explicit(&r->overloads, 1, memory_order_relaxed);
+        jk_raise_load(&r->peakLoad, load);
+    }
     atomic_fetch_add_explicit(&r->finished, 1, memory_order_release);
     return noErr;
+}
+
+void jk_renderer_set_sample_rate(JKRenderer *r, double sampleRate) {
+    r->sampleRate = sampleRate > 0 && isfinite(sampleRate) ? sampleRate : 0;
+}
+
+void jk_renderer_timing(JKRenderer *r, JKTiming *timing, int takePeak) {
+    timing->frames = atomic_load_explicit(&r->renderedFrames, memory_order_relaxed);
+    timing->seconds = (double)atomic_load_explicit(&r->busyTicks, memory_order_relaxed) * r->secondsPerTick;
+    timing->late = atomic_load_explicit(&r->overloads, memory_order_relaxed);
+    timing->peakLoad = takePeak ? Float(atomic_exchange_explicit(&r->peakLoad, 0, memory_order_relaxed))
+                                : Float(atomic_load_explicit(&r->peakLoad, memory_order_relaxed));
 }
 
 /// Runs each source slot's chain on copies of its channels (lanes); a slot without one passes them through.
@@ -355,8 +385,8 @@ static void ProcessOutputChain(JKRenderer *r, uint32_t availableOutputs, uint32_
     }
 }
 
-static void Render(JKRenderer *r, const AudioBufferList *input, AudioBufferList *output,
-                   const AudioTimeStamp *outputTime) {
+static uint32_t Render(JKRenderer *r, const AudioBufferList *input, AudioBufferList *output,
+                       const AudioTimeStamp *outputTime) {
 
     uint32_t frames = UINT32_MAX;
     uint32_t outputCount = 0;
@@ -394,7 +424,7 @@ static void Render(JKRenderer *r, const AudioBufferList *input, AudioBufferList 
     }
     if (inputCount != r->inputChannels || outputCount < r->outputChannels)
         atomic_fetch_add_explicit(&r->mismatches, 1, memory_order_relaxed);
-    if (frames == UINT32_MAX || frames == 0) return;
+    if (frames == UINT32_MAX || frames == 0) return 0;
     for (uint32_t c = inputCount; c < r->inputChannels; c++) r->inputs[c] = NULL;  // missing from the aggregate
     // Converted sources follow the aggregate's channels, read at this cycle's length.
     int convertible = frames <= JK_MAX_FRAMES;
@@ -491,4 +521,5 @@ static void Render(JKRenderer *r, const AudioBufferList *input, AudioBufferList 
         }
         if (peak > 0 && isfinite(peak)) RaisePeak(&r->outputPeaks[c], peak);
     }
+    return frames;
 }
