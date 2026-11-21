@@ -66,10 +66,16 @@ without your voice chat, step by step.
 | Audio device / interface | its playback channels | its input channels |
 | Default Output / Default Input | follows the device chosen in Sound settings | |
 | App | | that app's sound (stereo, helpers included) |
+| *App* through *virtual device* | | what that app plays into another of Junction's devices, on its own (up to 8 channels) |
 | System Audio | | everything apps play, except the apps you leave out and Junction itself |
 
 App and System Audio nodes can take their audio away from the speakers it normally plays on (**Only through
 Junction**), so it is heard only where you route it.
+
+**Per-app capture through a virtual device**: when an app plays into one of Junction's virtual devices, the sidebar's
+Apps section and the + menu offer "*app* through *device*" on the other devices' canvases: just that app's sound
+from that device, taken in the driver before the device mixes its apps together. It counts as the device's own audio
+for the feedback rules.
 
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/canvas-light.png">
@@ -171,7 +177,19 @@ Three parts (five with the helpers):
    plug-in object (`jcfg`: uid, name, channels, sample rate); the driver adds, renames, reshapes (through the host's
    configuration-change path) and removes devices to match, and saves the list in Core Audio's own storage so the
    devices exist after a restart even when Junction isn't running. Audio written to a device's output lands in a ring
-   buffer indexed by sample time and is read back by its input.
+   buffer indexed by sample time and is read back by its input. Before that mix, the driver copies each client's
+   output (`ProcessOutput`, keyed by the pid and bundle ID `AddDeviceClient` reported) into a ring of its own in one
+   shared memory region (layout: `Sources/JunctionKernel/include/JunctionCaptureRing.h`): 32 client slots of 8192
+   frames and up to 8 channels, indexed by the device's sample time, one writer and any number of readers, lock-free
+   (a seqlock on the frames: readers get silence, never a mix of two laps, for frames overwritten while they read; a
+   cycle longer than the ring keeps its end). Junction's own processes and clients without a bundle ID aren't
+   captured. The plug-in's `jcli` property lists the captured clients and announces changes. The region reaches
+   Junction only through Junction Driver Installer: the driver sends it (an XPC shared memory object) to the daemon's
+   second Mach service, `local.junction.driverd.capture`, which `AudioServerPlugIn_MachServices` in the driver's
+   Info.plist lets it reach from coreaudiod's sandbox; the daemon accepts it only from Apple's Core Audio processes
+   (code-signing requirement, user `_coreaudiod`) and maps it only for Junction and Junction Helper signed by its own
+   team. The router's IOProc reads an app's rings (all its processes on that device, mixed) into a sample-rate
+   converter on the driver's clock, like a converted device.
 2. **Planner** (`Sources/JunctionCore/Planner.swift`): turns the graph into one plan per destination ("sink"): a
    private aggregate device whose first sub-device is the sink (the clock), followed by every source device (with
    drift compensation) and one process tap per App/System Audio node. A source device at another nominal sample rate
@@ -217,7 +235,8 @@ Three parts (five with the helpers):
    signature doesn't check out is reported, not installed another way).
 
 The graph is saved to `~/Library/Application Support/Junction/graph.json` (schema 4: nodes belong to a device's
-canvas, receiving nodes can set a buffer size and sample-rate conversion, and named scenes are kept in `scenes`). A schema 1 file from the
+canvas, receiving nodes can set a buffer size and sample-rate conversion, named scenes are kept in `scenes`, and a
+source can be an app through a virtual device, `appThroughDevice`, which older files can't contain). A schema 1 file from the
 shared-canvas versions is converted on load: each node moves to the canvas of the device it was wired to (unwired
 ones to the first device), and cables between devices are dropped. Schema 2 files load with automatic buffer sizes;
 schema 2 and 3 files get sample-rate conversion set to Automatic and start with no scenes (a schema 4 file without
@@ -240,8 +259,15 @@ address and undefined-behaviour sanitizers with random buffer sizes, stalls on e
 rates. The driver harness (`Tests/DriverHarness/harness.c`) loads the driver into a test process with a stand-in Core Audio
 host and checks the device list, properties, configuration changes, saved state across a simulated restart (also a
 list saved by driver 0.1), bit-exact loopback, the volume and mute controls with their ramp, directions and their
-hidden companions, channel names, icons, hidden devices, property-change notifications, and the shared clock (same
-clock domain and identical zero time stamps over many periods, also for a device added later or reformatted). The
+hidden companions, channel names, icons, hidden devices, property-change notifications, the shared clock (same
+clock domain and identical zero time stamps over many periods, also for a device added later or reformatted), and
+per-app capture: two fake clients play different signals and each ring holds only its own, Junction's own and
+nameless clients get no ring, clients come and go (a reader of one that left is told, a new one gets a fresh ring),
+gaps read as silence, an overlong cycle and a reader that fell behind are handled, a reader racing the writer never
+sees a torn frame, and clients past 32 aren't captured. The harness reaches the region through
+`JunctionDriver_CaptureRegion`, an exported function coreaudiod never calls. The Swift tests read a fake region written
+with the driver's own functions, pump it through the kernel into a converter, hand it from the daemon's broker to
+Junction over XPC (in one process) and plan and loop-check the new source. The
 driver's device icons are drawn by `scripts/make-driver-icons.swift` into `Driver/Icons`; `build.sh` copies them
 into the driver bundle. `--loopback-test` is the real-system check: it adds a temporary device, plays 997 Hz into it,
 records its input, and restores the device list. It needs microphone permission for the app running it (Terminal).
@@ -343,6 +369,14 @@ system-audio permissions and **Install Driver…** with the first one.
   that the driver publishes only for Junction. Whether every app honours the hidden flag and the channel names
   hasn't been checked on a real Mac yet.
 - Virtual devices can't feed each other; to use the same source in two devices, add it to both canvases.
+- Per-app capture through a virtual device works end to end only with the driver installed and Junction Driver
+  Installer installed and allowed (release builds): the daemon is the only way the region reaches Junction, and an
+  ad-hoc signed daemon accepts nobody. It hasn't been tried on a real Mac yet: the driver reaching the daemon from
+  coreaudiod's sandbox, the daemon recognising coreaudiod's processes (identifiers `com.apple.audio.coreaudiod` and
+  `com.apple.audio.Core-Audio-Driver-Service`, user `_coreaudiod`), the HAL calling `ProcessOutput` for every client
+  and the audio itself are unverified. While it holds a region the daemon stays running. At most 32 clients and 8
+  channels per client are captured; the device's own volume isn't applied to it. Junction Helper notices apps
+  starting or stopping on a device within 3 s (the app at once).
 - A virtual device's sample rate can also be set by other apps (Audio MIDI Setup, a DAW), and macOS puts back the rate
   it remembers for a device when it appears. Junction insists on its own rate for a few seconds after you create, turn
   on or change a device, and otherwise adopts the outside change rather than fighting it.

@@ -133,7 +133,12 @@ public enum HAL {
             apps: audioApps(),
             defaultOutputUID: devices.first { $0.objectID == defaultOutput }?.uid,
             defaultInputUID: devices.first { $0.objectID == defaultInput }?.uid,
-            driver: DriverClient.status())
+            driver: DriverClient.status(),
+            deviceClients: DriverClient.deviceClients(from: DriverClient.capturedClients()) { pid, bundleID in
+                let owner = owningApp(pid: pid)
+                let appID = owner?.bundleID ?? bundleID
+                return AppRef(bundleID: appID, name: owner?.name ?? displayName(forBundleID: appID))
+            })
     }
 
     // MARK: Processes

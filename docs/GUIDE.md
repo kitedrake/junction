@@ -141,11 +141,25 @@ go; other virtual devices can't be dropped there, because devices never feed eac
 | An app | That one app's sound, including its helper processes |
 | Default Input | The microphone chosen in System Settings › Sound, following any change you make there |
 | A microphone or interface | That device's input channels |
+| *App* through *device* | What one app plays into one of your other virtual devices, on its own (see below) |
 
 | Output | Why you'd add one |
 | --- | --- |
 | Default Output | Hear the device on whatever System Settings › Sound plays through |
 | Headphones, speakers, an interface | Hear the device on that particular device |
+
+### An app through another virtual device
+
+When an app plays **into one of Junction's virtual devices** (you picked that device as the app's output, for
+example a "DJ Deck" speaker for your music player), the sidebar's **Apps** section and the **+** menu also offer
+**"Music through DJ Deck"**: only that app's sound, as it plays it into that device, before the device mixes it with
+everything else. Add it to another device's canvas like any source. It is offered on every canvas except that
+device's own, and only while the app is playing into the device; when the app stops, the node says "Not playing into
+DJ Deck" and its cables turn dashed until it plays again.
+
+This needs the Junction driver and **Junction Driver Installer** (allowed in System Settings › General › Login Items &
+Extensions; see section 15): the driver keeps each app's sound in a buffer of its own and the installer hands it to
+Junction only. Without the installer the node shows why it hears nothing.
 
 You don't need an output for a device that another app records (like OBS): add one only when you want to listen
 to it yourself. If apps already play on those headphones, you may hear some sounds twice.
@@ -410,7 +424,9 @@ Sending a device's sound back into itself would make it ring louder and louder. 
 - a device can't be connected into itself;
 - virtual devices never feed each other: each one has its own canvas;
 - a device can't go to **Default Output** while System Settings › Sound plays through that same device, or take
-  **Default Input** while that's the same device.
+  **Default Input** while that's the same device;
+- an app *through* a device counts as that device's sound: "Music through DJ Deck" can't go into DJ Deck, nor into a
+  device that already feeds DJ Deck.
 
 If you change Sound settings later in a way that would close a loop, Junction stops using that cable (it turns
 dashed) and explains why on the node.

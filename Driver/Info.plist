@@ -12,6 +12,10 @@
   <key>CFBundleVersion</key><string>__BUILD__</string>
   <key>LSMinimumSystemVersion</key><string>26.0</string>
   <key>NSHumanReadableCopyright</key><string>Junction by omso. GNU GPL v3 or later.</string>
+  <!-- coreaudiod's sandbox lets the driver reach only these services: Junction Driver Installer takes the per-app
+       capture region from it. -->
+  <key>AudioServerPlugIn_MachServices</key>
+  <array><string>local.junction.driverd.capture</string></array>
   <key>CFPlugInFactories</key>
   <dict>
     <key>BE8FA083-6518-4581-B626-0ECF8F994714</key><string>JunctionDriver_Create</string>

@@ -316,12 +316,17 @@ enum RouterError: Error, LocalizedError {
     }
 }
 
-/// One sink: its taps, aggregate device, renderer and IOProc, and an IOProc and converter per device it converts.
+/// One sink: its taps, aggregate device, renderer and IOProc, an IOProc and converter per device it converts, and a
+/// converter per app it captures through a virtual device (fed from the driver's rings by the renderer's IOProc).
 final class SinkRunner: @unchecked Sendable {
     private(set) var plan: SinkPlan
     private let renderer: OpaquePointer
-    /// One per `plan.converted`, in order; the renderer reads them, each converted device's IOProc writes one.
+    /// One per `plan.converted`, then one per `plan.captures`, in order; the renderer reads them all. Each converted
+    /// device's IOProc writes its own; the renderer pumps the captures' from the driver's rings.
     private let converters: [OpaquePointer]
+    /// The driver's capture region (kept mapped while the captures read it) and the readers made from it.
+    private var region: CaptureRegion?
+    private var captures: [OpaquePointer] = []
     private var converterProcs: [(device: AudioObjectID, proc: AudioDeviceIOProcID)] = []
     private var aggregate = AudioObjectID(kAudioObjectUnknown)
     private var procID: AudioDeviceIOProcID?
@@ -348,6 +353,14 @@ final class SinkRunner: @unchecked Sendable {
             jk_converter_set_same_clock(converter, device.sameClock ? 1 : 0)
             converters.append(converter)
         }
+        for capture in plan.captures {
+            guard let converter = jk_converter_create(UInt32(capture.channels), capture.sampleRate, plan.sampleRate) else {
+                converters.forEach { jk_converter_destroy($0) }
+                return nil
+            }
+            jk_converter_set_same_clock(converter, capture.sameClock ? 1 : 0)
+            converters.append(converter)
+        }
         guard let renderer = jk_renderer_create_converting(UInt32(plan.inputChannels), UInt32(plan.sinkOutputChannels),
                                                            UInt32(plan.routes.count), sources, destinations, gains,
                                                            converters, UInt32(converters.count))
@@ -362,6 +375,7 @@ final class SinkRunner: @unchecked Sendable {
 
     deinit {
         jk_renderer_destroy(renderer)
+        captures.forEach { jk_capture_destroy($0) }
         converters.forEach { jk_converter_destroy($0) }
     }
 
@@ -421,6 +435,7 @@ final class SinkRunner: @unchecked Sendable {
             guard status == noErr else { throw RouterError.start(status) }
             convertedIDs.append(id)
         }
+        connectCaptures()
         measureTiming(rate: rate, converted: convertedIDs)
         if fadingIn { jk_renderer_set_fade_now(renderer, 0) }
 
@@ -431,6 +446,35 @@ final class SinkRunner: @unchecked Sendable {
         status = AudioDeviceStart(aggregate, proc)
         guard status == noErr else { throw RouterError.start(status) }
         if fadingIn { jk_renderer_fade(renderer, 1, fadeFrames) }
+    }
+
+    /// Finds each captured app's slots in the driver's region and has the renderer read them. Without the region (no
+    /// Junction Driver Installer, or it hasn't got one yet) the sink runs with those channels silent and says why.
+    private func connectCaptures() {
+        guard !plan.captures.isEmpty else { return }
+        guard let region = CaptureRegion.source() else {
+            layoutWarning = "Can't capture \(plan.captures.map(\.name).joined(separator: ", ")): Junction Driver Installer doesn't share the driver's per-app audio. It needs the driver and Junction Driver Installer installed and allowed in Login Items."
+            return
+        }
+        self.region = region
+        var missing: [String] = []
+        for (index, capture) in plan.captures.enumerated() {
+            let slots = region.slots(device: capture.deviceUID, clients: capture.clients)
+            let converter = converters[plan.converted.count + index]
+            let indices = slots.map { UInt32($0.index) }, sequences = slots.map(\.sequence)
+            guard !slots.isEmpty,
+                  let reader = jk_capture_create(region.base, region.size, indices, sequences, UInt32(slots.count),
+                                                 UInt32(capture.channels), capture.sampleRate, converter)
+            else {
+                missing.append(capture.name)
+                continue
+            }
+            captures.append(reader)
+        }
+        if !captures.isEmpty { _ = jk_renderer_set_captures(renderer, captures, UInt32(captures.count)) }
+        if !missing.isEmpty {
+            layoutWarning = "The driver isn't capturing \(missing.joined(separator: ", ")) right now."
+        }
     }
 
     /// The aggregate's sub-devices: the sink first (the clock), then the sources. Core Audio's drift compensation keeps
@@ -477,6 +521,9 @@ final class SinkRunner: @unchecked Sendable {
             let input = Double(side(device, kAudioObjectPropertyScopeInput) + deviceBuffer) / deviceRate
             slowest = max(slowest, input + jk_converter_expected_delay(converters[index], buffer, deviceBuffer))
         }
+        for index in plan.captures.indices where plan.converted.count + index < converters.count {
+            slowest = max(slowest, jk_converter_expected_delay(converters[plan.converted.count + index], buffer, 512))
+        }
         latency = slowest + outputSide
     }
 
@@ -490,7 +537,8 @@ final class SinkRunner: @unchecked Sendable {
     var cycles: UInt64 { jk_renderer_cycle_count(renderer) }
 
     /// IO cycles of the sink, then of each converted device: the health check rebuilds the sink when one stops.
-    var activity: [UInt64] { [cycles] + converters.map { jk_converter_write_count($0) } }
+    /// Captured apps don't count: an app that stops playing isn't a stalled sink.
+    var activity: [UInt64] { [cycles] + converters.prefix(plan.converted.count).map { jk_converter_write_count($0) } }
 
     /// Waits (up to 0.1 s) until the IOProc has run once.
     func waitForFirstCycle() {
@@ -568,6 +616,7 @@ final class SinkRunner: @unchecked Sendable {
             parts.append("converts \(device.uid) from \(formatSampleRate(device.sampleRate)) to \(formatSampleRate(plan.sampleRate))")
         }
         for tap in taps { parts.append("\(tap.plan.name) \(Self.membership(tap.plan, tap.processes.count))") }
+        for capture in plan.captures { parts.append("captures \(capture.name)") }
         if let bufferFrames { parts.append("buffer \(bufferFrames) frames") }
         if let latency { parts.append(String(format: "about %.0f ms", latency * 1000)) }
         return parts.joined(separator: ", ")

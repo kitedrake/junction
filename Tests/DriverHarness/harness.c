@@ -3,7 +3,8 @@
 // right, changes are announced and saved, a fresh load restores the saved devices (also a list saved by driver
 // 0.1), and audio written to a device's output comes back out of its input. Driver 0.2 adds volume and mute
 // controls (with their ramp), directions and the hidden companion devices, channel names, icons, hidden devices
-// and the shared clock.
+// and the shared clock. Per-app capture: each client's output lands in its own ring in the shared region, clients come
+// and go, Junction's own processes aren't captured, and overruns are handled.
 //
 // Usage: harness <path to JunctionDriver.driver> [expected version]
 
@@ -19,9 +20,12 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "../../Sources/JunctionKernel/include/JunctionCaptureRing.h"
+
 enum {
     kSelectorConfig = 'jcfg',
     kSelectorVersion = 'jver',
+    kSelectorClients = 'jcli',
     kRingFrames = 16384,
     kZeroTimeStampPeriod = 16384,
     kRampFrames = 256,
@@ -44,6 +48,7 @@ static CFMutableDictionaryRef gStorage;
 static volatile int gDeviceListChanges, gNameChanges, gConfigRequests, gStorageWrites;
 static AudioObjectID gRequestedDevice;
 static AudioServerPlugInDriverRef gDriver;
+static void *gImage;  // the loaded copy of the driver binary
 
 /// Every announced property change, counted by selector.
 enum { kMaxSelectors = 64 };
@@ -142,6 +147,7 @@ static AudioServerPlugInDriverRef Load(const char *bundlePath, const char *copyN
         fprintf(stderr, "dlopen: %s\n", dlerror());
         exit(2);
     }
+    gImage = image;
     typedef void *(*Factory)(CFAllocatorRef, CFUUIDRef);
     Factory factory = (Factory)dlsym(image, "JunctionDriver_Create");
     if (!factory) {
@@ -730,6 +736,251 @@ static void TestSharedClock(void) {
     CFRelease(slower);
 }
 
+#pragma mark - Per-app capture
+
+static OSStatus DoClientIO(AudioObjectID device, UInt32 client, UInt32 operation, Float64 sampleTime, Float32 *buffer,
+                           UInt32 frames) {
+    AudioServerPlugInIOCycleInfo cycle;
+    memset(&cycle, 0, sizeof cycle);
+    cycle.mNominalIOBufferFrameSize = frames;
+    cycle.mInputTime.mSampleTime = sampleTime;
+    cycle.mOutputTime.mSampleTime = sampleTime;
+    return (*gDriver)->DoIOOperation(gDriver, device, Stream(device, kAudioObjectPropertyScopeOutput), client, operation,
+                                     frames, &cycle, buffer, NULL);
+}
+
+static OSStatus AddClient(AudioObjectID device, UInt32 client, pid_t pid, const char *bundleID) {
+    AudioServerPlugInClientInfo info = {client, pid, true, NULL};
+    if (bundleID) info.mBundleID = CFStringCreateWithCString(NULL, bundleID, kCFStringEncodingUTF8);
+    OSStatus status = (*gDriver)->AddDeviceClient(gDriver, device, &info);
+    if (info.mBundleID) CFRelease(info.mBundleID);
+    return status;
+}
+
+static OSStatus RemoveClient(AudioObjectID device, UInt32 client, pid_t pid) {
+    AudioServerPlugInClientInfo info = {client, pid, true, NULL};
+    return (*gDriver)->RemoveDeviceClient(gDriver, device, &info);
+}
+
+/// Each test client plays its own signal: a value for every sample time and channel, never zero, and different
+/// for every client (`which`), so a ring holding anyone else's audio shows.
+static Float32 Signal(int which, UInt64 time, UInt32 channel) {
+    return (Float32)which * 2.0f + 0.001f + (Float32)((time * 31 + channel * 7) % 1000) / 1000.0f;
+}
+
+static void Play(AudioObjectID device, UInt32 client, int which, UInt64 time, UInt32 frames, UInt32 channels) {
+    Float32 *buffer = malloc(sizeof(Float32) * frames * channels);
+    for (UInt32 f = 0; f < frames; f++)
+        for (UInt32 c = 0; c < channels; c++) buffer[f * channels + c] = Signal(which, time + f, c);
+    CHECK(DoClientIO(device, client, kAudioServerPlugInIOOperationProcessOutput, (Float64)time, buffer, frames) == noErr,
+          "ProcessOutput failed");
+    free(buffer);
+}
+
+/// The slot whose client has this bundle ID, or JCAP_SLOTS.
+static UInt32 SlotOf(void *region, const char *bundleID, JCapClient *client) {
+    for (UInt32 i = 0; i < JCAP_SLOTS; i++) {
+        if (jcap_client(region, i, client) && client->live && strcmp(client->bundleID, bundleID) == 0) return i;
+    }
+    return JCAP_SLOTS;
+}
+
+/// Frames [time, time + frames) of a slot hold exactly client `which`'s signal.
+static bool RingHolds(void *region, UInt32 slot, UInt32 sequence, int which, UInt64 time, UInt32 frames, UInt32 channels) {
+    Float32 *read = malloc(sizeof(Float32) * frames * channels);
+    int64_t lost = jcap_read(region, slot, sequence, time, frames, read, channels);
+    bool same = lost == 0;
+    for (UInt32 f = 0; same && f < frames; f++)
+        for (UInt32 c = 0; c < channels; c++) same = same && read[f * channels + c] == Signal(which, time + f, c);
+    free(read);
+    return same;
+}
+
+static int CountClients(void) {
+    AudioObjectPropertyAddress address = Address(kSelectorClients, kAudioObjectPropertyScopeGlobal);
+    CFArrayRef list = NULL;
+    UInt32 size = 0;
+    (*gDriver)->GetPropertyData(gDriver, kAudioObjectPlugInObject, 0, &address, 0, NULL, sizeof list, &size, &list);
+    int count = list ? (int)CFArrayGetCount(list) : -1;
+    if (list) CFRelease(list);
+    return count;
+}
+
+typedef struct {
+    AudioObjectID device;
+    volatile int stop;
+    UInt64 time;
+} Writer;
+
+static void *WriteContinuously(void *argument) {
+    Writer *writer = argument;
+    Float32 buffer[256 * 2];
+    while (!writer->stop) {
+        for (UInt32 f = 0; f < 256; f++)
+            for (UInt32 c = 0; c < 2; c++) buffer[f * 2 + c] = Signal(2, writer->time + f, c);
+        DoClientIO(writer->device, 8, kAudioServerPlugInIOOperationProcessOutput, (Float64)writer->time, buffer, 256);
+        __atomic_store_n(&writer->time, writer->time + 256, __ATOMIC_RELEASE);
+    }
+    return NULL;
+}
+
+static void TestPerAppCapture(void) {
+    CFDictionaryRef entry = DeviceEntry("junction.test.capture", "Capture", 2, 48000);
+    CHECK(SetDevices(&entry, 1) == noErr, "a device to capture from");
+    CFRelease(entry);
+    AudioObjectID device = DeviceForUID("junction.test.capture");
+    typedef void *(*RegionFunction)(UInt64 *);
+    RegionFunction regionFunction = (RegionFunction)dlsym(gImage, "JunctionDriver_CaptureRegion");
+    UInt64 size = 0;
+    void *region = regionFunction ? regionFunction(&size) : NULL;
+    CHECK(region && jcap_valid(region, size), "the driver has a valid capture region");
+    if (!region || !jcap_valid(region, size)) return;
+    UInt32 channels = StreamFormat(Stream(device, kAudioObjectPropertyScopeOutput)).mChannelsPerFrame;
+    CHECK(channels == 2, "the capture test device has 2 channels");
+
+    int clientNotes = Announced(kSelectorClients);
+    CHECK(AddClient(device, 7, 1001, "com.example.music") == noErr, "add a client");
+    CHECK(AddClient(device, 8, 1002, "com.example.call") == noErr, "add a second client");
+    CHECK(AddClient(device, 9, 1003, "local.junction.helper") == noErr, "add Junction's own client");
+    CHECK(AddClient(device, 10, 1004, NULL) == noErr, "add a client without a bundle ID");
+    CHECK(WaitForAnnouncement(kSelectorClients, clientNotes), "new clients are announced");
+    CHECK(CountClients() == 2, "two clients captured (not Junction's own, not one without a bundle ID), got %d",
+          CountClients());
+    JCapClient music, call, own;
+    UInt32 musicSlot = SlotOf(region, "com.example.music", &music);
+    UInt32 callSlot = SlotOf(region, "com.example.call", &call);
+    CHECK(musicSlot < JCAP_SLOTS && callSlot < JCAP_SLOTS && musicSlot != callSlot, "each client has its own slot");
+    CHECK(SlotOf(region, "local.junction.helper", &own) == JCAP_SLOTS, "Junction's own processes aren't captured");
+    CHECK(music.pid == 1001 && strcmp(music.deviceUID, "junction.test.capture") == 0 && music.channels == 2,
+          "a slot names its client's pid, device and channels");
+
+    CHECK((*gDriver)->StartIO(gDriver, device, 1) == noErr, "StartIO for capture");
+    Boolean willDo = false, inPlace = false;
+    (*gDriver)->WillDoIOOperation(gDriver, device, 7, kAudioServerPlugInIOOperationProcessOutput, &willDo, &inPlace);
+    CHECK(willDo, "the driver processes each client's output");
+
+    // Two clients play different signals in the same IO cycles, then the mix is written: each ring carries only
+    // its own client.
+    UInt64 start = 3 * kRingFrames + 100;
+    for (UInt64 t = start; t < start + 8 * 512; t += 512) {
+        Play(device, 7, 1, t, 512, 2);
+        Play(device, 8, 2, t, 512, 2);
+        Play(device, 9, 3, t, 512, 2);
+        Float32 mix[512 * 2] = {0};
+        DoClientIO(device, 1, kAudioServerPlugInIOOperationWriteMix, (Float64)t, mix, 512);
+    }
+    UInt64 end = start + 8 * 512;
+    CHECK(RingHolds(region, musicSlot, music.sequence, 1, start, (UInt32)(end - start), 2), "the first ring holds only its client");
+    CHECK(RingHolds(region, callSlot, call.sequence, 2, start, (UInt32)(end - start), 2), "the second ring holds only its client");
+    {
+        Float32 read[64 * 2];
+        jcap_read(region, musicSlot, music.sequence, end, 64, read, 2);
+        bool silent = true;
+        for (int i = 0; i < 128; i++) silent = silent && read[i] == 0;
+        CHECK(silent, "frames not written yet read as silence");
+        jcap_read(region, musicSlot, music.sequence, start - 64, 64, read, 2);
+        silent = true;
+        for (int i = 0; i < 128; i++) silent = silent && read[i] == 0;
+        CHECK(silent, "frames from before the client started read as silence");
+    }
+
+    // A pause: the gap reads as silence, not as an old lap of the ring.
+    UInt64 resume = end + 300;
+    Play(device, 8, 2, resume, 512, 2);
+    {
+        Float32 read[300 * 2];
+        jcap_read(region, callSlot, call.sequence, end, 300, read, 2);
+        bool silent = true;
+        for (int i = 0; i < 600; i++) silent = silent && read[i] == 0;
+        CHECK(silent, "a pause between cycles reads as silence");
+        CHECK(RingHolds(region, callSlot, call.sequence, 2, resume, 512, 2), "audio after a pause is kept");
+    }
+
+    // Overrun: a cycle longer than the ring keeps its end; frames the writer has gone past read as silence.
+    UInt64 longStart = resume + 512;
+    UInt32 longFrames = JCAP_FRAMES + 1000;
+    Play(device, 7, 1, longStart, longFrames, 2);
+    UInt64 longEnd = longStart + longFrames;
+    CHECK(jcap_client(region, musicSlot, &music) && music.overruns == 1, "an overlong cycle is counted as an overrun");
+    CHECK(RingHolds(region, musicSlot, music.sequence, 1, longEnd - JCAP_FRAMES, JCAP_FRAMES, 2),
+          "an overlong cycle keeps its last %d frames", JCAP_FRAMES);
+    {
+        Float32 *read = malloc(sizeof(Float32) * 200 * 2);
+        int64_t lost = jcap_read(region, musicSlot, music.sequence, longEnd - JCAP_FRAMES - 100, 200, read, 2);
+        bool ok = read[0] == 0 && read[199] == 0 && read[200] == Signal(1, longEnd - JCAP_FRAMES, 0);
+        CHECK(lost == 0 && ok, "a reader that fell behind the ring gets silence for what was overwritten");
+        free(read);
+    }
+
+    // A reader racing the writer never sees a mix of two laps: every frame is the right sample or silence.
+    {
+        Writer writer = {device, 0, longEnd + 10 * JCAP_FRAMES};
+        pthread_t thread;
+        pthread_create(&thread, NULL, WriteContinuously, &writer);
+        int torn = 0, reads = 0, adds = 0;
+        Float32 *read = malloc(sizeof(Float32) * 1024 * 2);
+        for (int i = 0; i < 4000; i++) {
+            UInt64 now = __atomic_load_n(&writer.time, __ATOMIC_ACQUIRE);
+            // Sometimes far behind (being overwritten right now), sometimes recent.
+            UInt64 at = now > JCAP_FRAMES ? now - (i % 2 ? JCAP_FRAMES - 64 : 700) : now;
+            jcap_read(region, callSlot, call.sequence, at, 1024, read, 2);
+            for (UInt32 f = 0; f < 1024; f++)
+                for (UInt32 c = 0; c < 2; c++) {
+                    Float32 v = read[f * 2 + c];
+                    if (v != 0 && v != Signal(2, at + f, c)) torn++;
+                }
+            reads++;
+            if (i % 400 == 0) {  // other clients come and go meanwhile
+                AddClient(device, 20, 2000, "com.example.other");
+                RemoveClient(device, 20, 2000);
+                adds++;
+            }
+        }
+        writer.stop = 1;
+        pthread_join(thread, NULL);
+        free(read);
+        CHECK(torn == 0, "%d samples read from a ring being written were neither right nor silent", torn);
+        CHECK(reads > 0 && adds > 0, "the race ran");
+    }
+
+    // Clients come and go: a client that leaves frees its slot, readers see it's gone, and a new client's ring
+    // carries only its own audio.
+    clientNotes = Announced(kSelectorClients);
+    CHECK(RemoveClient(device, 7, 1001) == noErr, "remove a client");
+    CHECK(WaitForAnnouncement(kSelectorClients, clientNotes), "a client leaving is announced");
+    CHECK(CountClients() == 1, "one client left");
+    Float32 scratch[16 * 2];
+    CHECK(jcap_read(region, musicSlot, music.sequence, longEnd - 16, 16, scratch, 2) == JCAP_READ_GONE,
+          "a reader of a client that left is told so");
+    Play(device, 7, 1, longEnd + 20 * JCAP_FRAMES, 64, 2);  // a client that left isn't captured any more
+    CHECK(AddClient(device, 11, 1005, "com.example.game") == noErr, "add a third client");
+    JCapClient game;
+    UInt32 gameSlot = SlotOf(region, "com.example.game", &game);
+    CHECK(gameSlot < JCAP_SLOTS && (gameSlot != musicSlot || game.sequence != music.sequence),
+          "the new client gets a slot of its own (or the old one under a new sequence)");
+    UInt64 later = longEnd + 30 * JCAP_FRAMES;
+    Play(device, 11, 4, later, 512, 2);
+    Play(device, 8, 2, later, 512, 2);
+    CHECK(RingHolds(region, gameSlot, game.sequence, 4, later, 512, 2), "the new client's ring holds only its audio");
+    CHECK(RingHolds(region, callSlot, call.sequence, 2, later, 512, 2), "the remaining client is unaffected");
+    CHECK(CountClients() == 2, "two clients again");
+
+    // More clients than slots: the extra ones aren't captured.
+    for (UInt32 i = 0; i < JCAP_SLOTS + 4; i++) {
+        char bundle[64];
+        snprintf(bundle, sizeof bundle, "com.example.many%u", i);
+        AddClient(device, 100 + i, (pid_t)(3000 + i), bundle);
+    }
+    CHECK(CountClients() == JCAP_SLOTS, "at most %d clients captured, got %d", JCAP_SLOTS, CountClients());
+    for (UInt32 i = 0; i < JCAP_SLOTS + 4; i++) RemoveClient(device, 100 + i, (pid_t)(3000 + i));
+    RemoveClient(device, 8, 1002);
+    RemoveClient(device, 9, 1003);
+    RemoveClient(device, 10, 1004);
+    RemoveClient(device, 11, 1005);
+    CHECK(CountClients() == 0, "every client gone");
+    (*gDriver)->StopIO(gDriver, device, 1);
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "usage: %s JunctionDriver.driver [version]\n", argv[0]);
@@ -749,8 +1000,10 @@ int main(int argc, char **argv) {
         AudioServerPlugInCustomPropertyInfo info[4];
         UInt32 size = 0;
         (*gDriver)->GetPropertyData(gDriver, kAudioObjectPlugInObject, 0, &address, 0, NULL, sizeof info, &size, info);
-        CHECK(size == 2 * sizeof info[0] && info[0].mSelector == kSelectorConfig &&
-                  info[0].mPropertyDataType == kAudioServerPlugInCustomPropertyDataTypeCFPropertyList,
+        CHECK(size == 3 * sizeof info[0] && info[0].mSelector == kSelectorConfig &&
+                  info[0].mPropertyDataType == kAudioServerPlugInCustomPropertyDataTypeCFPropertyList &&
+                  info[2].mSelector == kSelectorClients &&
+                  info[2].mPropertyDataType == kAudioServerPlugInCustomPropertyDataTypeCFPropertyList,
               "custom property info list");
         Boolean settable = false;
         AudioObjectPropertyAddress config = Address(kSelectorConfig, kAudioObjectPropertyScopeGlobal);
@@ -928,6 +1181,7 @@ int main(int argc, char **argv) {
     TestDeviceOptions(restored, renamed, wider, argv[1]);
     TestDirections(DeviceForUID("junction.test.chat"), wider, renamed, 4);
     TestSharedClock();
+    TestPerAppCapture();
 
     // A list saved by driver 0.1 (uid, name, channels and sample rate only) still loads; the rest takes defaults.
     {

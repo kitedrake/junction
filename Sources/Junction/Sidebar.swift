@@ -54,6 +54,12 @@ struct Sidebar: View {
                 ForEach(model.inventory.apps) { app in
                     PaletteRow(kind: .application(app.ref), role: .source, title: app.name, detail: app.isPlaying ? "Playing" : nil)
                 }
+                // Apps playing into one of Junction's devices: just that app's sound from it (not on its own canvas).
+                ForEach(model.appsThroughOtherDevices) { source in
+                    let device = model.graph.virtualDevice(source.device)?.name ?? "Deleted Device"
+                    PaletteRow(kind: .appThroughDevice(source.app, device: source.device), role: .source,
+                               title: "\(source.app.name) through \(device)", detail: "Only its sound from \(device)")
+                }
             }
 
             Section("Outputs") {

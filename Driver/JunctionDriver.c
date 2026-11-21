@@ -18,19 +18,34 @@
 // Each device has a volume and a mute control per side it shows apps. Output volume scales what is played into the
 // device, input volume what is recorded from it; DoIOOperation applies both with a short ramp.
 //
+// Per-app capture: what each app plays into a device is also kept on its own, before the device mixes it with
+// everything else, in a ring per client in one shared memory region (layout: JunctionCaptureRing.h). AddDeviceClient
+// gives each client a slot (Junction's own processes get none), DoIOOperation's ProcessOutput copies the client's
+// output into it, and RemoveDeviceClient frees it. The plug-in's 'jcli' property lists the clients being captured.
+// The driver hands the region to Junction Driver Installer (the privileged daemon, Mach service
+// kCaptureService, allowed by AudioServerPlugIn_MachServices in Info.plist), which gives it only to Junction's own
+// processes, signed by its team.
+//
 // Threading: gStateMutex guards the device list and each slot's name/uid/format/settings; a slot's ioMutex guards
-// its ring buffer and the gains being ramped. Lock order is always state, then io. The IO path (GetZeroTimeStamp,
-// DoIOOperation) never blocks: it only try-locks and reads atomics.
+// its ring buffer and the gains being ramped. Lock order is always state, then io. gClientMutex guards the capture
+// slots' bookkeeping and is never held together with the others. The IO path (GetZeroTimeStamp, DoIOOperation) never
+// blocks: it only try-locks and reads atomics.
 
 #include <CoreAudio/AudioServerPlugIn.h>
 #include <dispatch/dispatch.h>
+#include <mach/mach.h>
 #include <mach/mach_time.h>
+#include <mach/mach_vm.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <xpc/xpc.h>
+
+#include "../Sources/JunctionKernel/include/JunctionCaptureRing.h"
 
 #pragma mark - Constants
 
@@ -42,6 +57,10 @@
 #define kStorageKey "devices"
 #define kCompanionSuffix ".routing"
 #define kDefaultIcon "junction"
+/// Junction Driver Installer's service that takes the capture region (see the daemon's launchd plist).
+#define kCaptureService "local.junction.driverd.capture"
+/// Clients whose bundle ID starts with this are Junction's own and are never captured.
+#define kOwnBundlePrefix "local.junction."
 
 enum {
     kMaxDevices = 32,
@@ -52,6 +71,7 @@ enum {
     kObjectsPerDevice = 8,
     kSelectorConfig = 'jcfg',
     kSelectorVersion = 'jver',
+    kSelectorClients = 'jcli',
     kClockDomain = 'jnct',   // shared by every device: one clock, no drift between them
     kRampFrames = 256,       // a volume or mute change glides over this many frames
 };
@@ -116,6 +136,32 @@ static UInt64 gAnchorHostTime;
 static dispatch_queue_t gNotifyQueue;
 static pthread_once_t gOnce = PTHREAD_ONCE_INIT;
 
+/// A capture slot: which client of which device owns ring `index` of the shared region.
+typedef struct {
+    // Guarded by gClientMutex.
+    bool used;
+    UInt32 clientID;
+    UInt32 device;            // the device's slot in gSlots
+    pid_t pid;
+    char bundleID[JCAP_TEXT];
+    char deviceUID[JCAP_TEXT];
+    UInt64 releasedAt;        // generation counter, to reuse the longest-free slot first
+
+    // Read by the IO path.
+    _Atomic(bool) live;
+    _Atomic(UInt32) ioClientID;
+    _Atomic(UInt32) ioDevice;
+    _Atomic(UInt32) writers;  // IO threads writing the ring right now
+} Capture;
+
+static pthread_mutex_t gClientMutex = PTHREAD_MUTEX_INITIALIZER;
+static Capture gCaptures[JCAP_SLOTS];
+static UInt64 gCaptureGeneration;
+/// The shared region (JCAP_REGION_BYTES, allocated once; NULL if that failed: nothing is captured).
+static void *gCaptureRegion;
+static dispatch_queue_t gCaptureQueue;
+static xpc_connection_t gBroker;   // gCaptureQueue only
+
 static void OneTimeSetup(void) {
     for (UInt32 i = 0; i < kMaxDevices; i++) pthread_mutex_init(&gSlots[i].ioMutex, NULL);
     mach_timebase_info_data_t timebase;
@@ -123,6 +169,12 @@ static void OneTimeSetup(void) {
     gHostTicksPerSecond = 1.0e9 * (Float64)timebase.denom / (Float64)timebase.numer;
     gAnchorHostTime = mach_absolute_time();
     gNotifyQueue = dispatch_queue_create("local.junction.driver.notify", DISPATCH_QUEUE_SERIAL);
+    gCaptureQueue = dispatch_queue_create("local.junction.driver.capture", DISPATCH_QUEUE_SERIAL);
+    mach_vm_address_t address = 0;
+    if (mach_vm_allocate(mach_task_self(), &address, JCAP_REGION_BYTES, VM_FLAGS_ANYWHERE) == KERN_SUCCESS) {
+        gCaptureRegion = (void *)address;
+        jcap_init(gCaptureRegion, gAnchorHostTime ^ ((UInt64)getpid() << 32), gAnchorHostTime);
+    }
 }
 
 #pragma mark - Object IDs
@@ -691,6 +743,7 @@ static OSStatus DoIOOperation(AudioServerPlugInDriverRef, AudioObjectID, AudioOb
                               const AudioServerPlugInIOCycleInfo *, void *, void *);
 static OSStatus EndIOOperation(AudioServerPlugInDriverRef, AudioObjectID, UInt32, UInt32, UInt32,
                                const AudioServerPlugInIOCycleInfo *);
+static void ConnectCaptureBroker(void);
 
 static AudioServerPlugInDriverInterface gInterface = {
     NULL, QueryInterface, AddRef, Release, Initialize, CreateDevice, DestroyDevice, AddDeviceClient,
@@ -753,6 +806,7 @@ static OSStatus Initialize(AudioServerPlugInDriverRef inDriver, AudioServerPlugI
         FreeEntries(entries, count);
         CFRelease(stored);
     }
+    dispatch_async(gCaptureQueue, ^{ ConnectCaptureBroker(); });
     return noErr;
 }
 
@@ -767,15 +821,179 @@ static OSStatus DestroyDevice(AudioServerPlugInDriverRef d, AudioObjectID device
     return kAudioHardwareUnsupportedOperationError;
 }
 
+#pragma mark - Per-app capture
+
+/// Sends the capture region to Junction Driver Installer. Call on gCaptureQueue.
+static void SendCaptureRegion(xpc_connection_t connection) {
+    xpc_object_t message = xpc_dictionary_create(NULL, NULL, 0);
+    xpc_dictionary_set_string(message, "op", "publish");
+    xpc_dictionary_set_uint64(message, "layout", JCAP_LAYOUT);
+    xpc_object_t region = xpc_shmem_create(gCaptureRegion, (size_t)JCAP_REGION_BYTES);
+    if (region) {
+        xpc_dictionary_set_value(message, "region", region);
+        xpc_connection_send_message(connection, message);
+        xpc_release(region);
+    }
+    xpc_release(message);
+}
+
+/// Opens the connection to Junction Driver Installer and gives it the region. launchd starts the daemon for the
+/// message; when it quits or restarts the region is sent again. Without the daemon (not installed or not allowed)
+/// the driver tries again every minute. Call on gCaptureQueue.
+static void ConnectCaptureBroker(void) {
+    if (!gCaptureRegion || gBroker) return;
+    xpc_connection_t connection =
+        xpc_connection_create_mach_service(kCaptureService, gCaptureQueue, XPC_CONNECTION_MACH_SERVICE_PRIVILEGED);
+    if (!connection) return;
+    xpc_connection_set_event_handler(connection, ^(xpc_object_t event) {
+        if (event == XPC_ERROR_CONNECTION_INTERRUPTED) {
+            SendCaptureRegion(connection);
+        } else if (event == XPC_ERROR_CONNECTION_INVALID) {
+            if (gBroker == connection) {
+                gBroker = NULL;
+                xpc_release(connection);
+            }
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_SEC), gCaptureQueue, ^{ ConnectCaptureBroker(); });
+        }
+    });
+    gBroker = connection;
+    xpc_connection_resume(connection);
+    SendCaptureRegion(connection);
+}
+
+/// Waits (briefly; never on the IO path) until no IO thread writes a capture slot's ring.
+static void WaitForCaptureWriters(Capture *c) {
+    for (int i = 0; i < 2000 && atomic_load(&c->writers) != 0; i++) usleep(50);
+}
+
+static bool CStringFrom(CFStringRef string, char *out, size_t size) {
+    out[0] = 0;
+    return string && CFStringGetCString(string, out, (CFIndex)size, kCFStringEncodingUTF8);
+}
+
+/// Gives a new client of a device a capture slot: the longest-free one. Clients without a bundle ID, Junction's own
+/// processes and clients past JCAP_SLOTS aren't captured.
 static OSStatus AddDeviceClient(AudioServerPlugInDriverRef d, AudioObjectID device, const AudioServerPlugInClientInfo *c) {
-    (void)d; (void)device; (void)c;
+    if (d != gDriverRef) return kAudioHardwareBadObjectError;
+    UInt32 slot;
+    if (!c || !gCaptureRegion || !IsDeviceKind(Resolve(device, &slot))) return noErr;
+    char bundleID[JCAP_TEXT], deviceUID[JCAP_TEXT];
+    if (!CStringFrom(c->mBundleID, bundleID, sizeof bundleID) || bundleID[0] == 0) return noErr;
+    if (strncmp(bundleID, kOwnBundlePrefix, strlen(kOwnBundlePrefix)) == 0) return noErr;
+    pthread_mutex_lock(&gStateMutex);
+    bool named = gSlots[slot].uid && CStringFrom(gSlots[slot].uid, deviceUID, sizeof deviceUID);
+    UInt32 channels = gSlots[slot].channels;
+    pthread_mutex_unlock(&gStateMutex);
+    if (!named) return noErr;
+
+    pthread_mutex_lock(&gClientMutex);
+    UInt32 best = JCAP_SLOTS;
+    bool known = false;
+    for (UInt32 i = 0; i < JCAP_SLOTS; i++) {
+        Capture *capture = &gCaptures[i];
+        if (capture->used && capture->clientID == c->mClientID && capture->device == slot) known = true;
+        if (capture->used) continue;
+        if (best == JCAP_SLOTS || capture->releasedAt < gCaptures[best].releasedAt) best = i;
+    }
+    bool added = !known && best < JCAP_SLOTS;
+    if (added) {
+        Capture *capture = &gCaptures[best];
+        WaitForCaptureWriters(capture);
+        capture->used = true;
+        capture->clientID = c->mClientID;
+        capture->device = slot;
+        capture->pid = c->mProcessID;
+        memcpy(capture->bundleID, bundleID, sizeof bundleID);
+        memcpy(capture->deviceUID, deviceUID, sizeof deviceUID);
+        jcap_claim(gCaptureRegion, best, c->mProcessID, bundleID, deviceUID, channels);
+        atomic_store(&capture->ioClientID, c->mClientID);
+        atomic_store(&capture->ioDevice, slot);
+        atomic_store(&capture->live, true);
+    }
+    pthread_mutex_unlock(&gClientMutex);
+    if (added) NotifyOne(kAudioObjectPlugInObject, kSelectorClients, kAudioObjectPropertyScopeGlobal);
     return noErr;
 }
 
+/// Frees the client's capture slot once no IO thread writes it any more.
 static OSStatus RemoveDeviceClient(AudioServerPlugInDriverRef d, AudioObjectID device,
                                    const AudioServerPlugInClientInfo *c) {
-    (void)d; (void)device; (void)c;
+    if (d != gDriverRef) return kAudioHardwareBadObjectError;
+    UInt32 slot;
+    if (!c || !gCaptureRegion || !IsDeviceKind(Resolve(device, &slot))) return noErr;
+    bool removed = false;
+    pthread_mutex_lock(&gClientMutex);
+    for (UInt32 i = 0; i < JCAP_SLOTS; i++) {
+        Capture *capture = &gCaptures[i];
+        if (!capture->used || capture->clientID != c->mClientID || capture->device != slot) continue;
+        atomic_store(&capture->live, false);
+        WaitForCaptureWriters(capture);
+        jcap_release(gCaptureRegion, i);
+        capture->used = false;
+        capture->releasedAt = ++gCaptureGeneration;
+        removed = true;
+    }
+    pthread_mutex_unlock(&gClientMutex);
+    if (removed) NotifyOne(kAudioObjectPlugInObject, kSelectorClients, kAudioObjectPropertyScopeGlobal);
     return noErr;
+}
+
+/// The 'jcli' property: the clients being captured, as an array of dictionaries ("pid", "bundleID", "deviceUID",
+/// "channels"), in slot order.
+static CFArrayRef CopyCapturedClients(void) {
+    CFMutableArrayRef list = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
+    pthread_mutex_lock(&gClientMutex);
+    for (UInt32 i = 0; i < JCAP_SLOTS; i++) {
+        const Capture *capture = &gCaptures[i];
+        if (!capture->used) continue;
+        SInt32 pid = capture->pid, slotIndex = (SInt32)i;
+        SInt32 channels = (SInt32)jcap_header(gCaptureRegion)->slots[i].channels;
+        CFNumberRef pidNumber = CFNumberCreate(NULL, kCFNumberSInt32Type, &pid);
+        CFNumberRef slotNumber = CFNumberCreate(NULL, kCFNumberSInt32Type, &slotIndex);
+        CFNumberRef channelsNumber = CFNumberCreate(NULL, kCFNumberSInt32Type, &channels);
+        CFStringRef bundleID = CFStringCreateWithCString(NULL, capture->bundleID, kCFStringEncodingUTF8);
+        CFStringRef deviceUID = CFStringCreateWithCString(NULL, capture->deviceUID, kCFStringEncodingUTF8);
+        if (bundleID && deviceUID) {
+            const void *keys[] = {CFSTR("pid"), CFSTR("bundleID"), CFSTR("deviceUID"), CFSTR("channels"), CFSTR("slot")};
+            const void *values[] = {pidNumber, bundleID, deviceUID, channelsNumber, slotNumber};
+            CFDictionaryRef entry = CFDictionaryCreate(NULL, keys, values, 5, &kCFTypeDictionaryKeyCallBacks,
+                                                       &kCFTypeDictionaryValueCallBacks);
+            CFArrayAppendValue(list, entry);
+            CFRelease(entry);
+        }
+        if (bundleID) CFRelease(bundleID);
+        if (deviceUID) CFRelease(deviceUID);
+        CFRelease(pidNumber);
+        CFRelease(slotNumber);
+        CFRelease(channelsNumber);
+    }
+    pthread_mutex_unlock(&gClientMutex);
+    return list;
+}
+
+/// ProcessOutput: copies one client's output into its ring. Lock-free: finds the slot by scanning the atomics, and
+/// counts itself as a writer so RemoveDeviceClient never frees a ring being written.
+static void CaptureClientOutput(UInt32 device, UInt32 clientID, const Float32 *samples, UInt32 channels, UInt32 frames,
+                                Float64 sampleTime) {
+    if (!gCaptureRegion || !(sampleTime >= 0)) return;
+    for (UInt32 i = 0; i < JCAP_SLOTS; i++) {
+        Capture *capture = &gCaptures[i];
+        if (!atomic_load(&capture->live) || atomic_load(&capture->ioClientID) != clientID ||
+            atomic_load(&capture->ioDevice) != device)
+            continue;
+        atomic_fetch_add(&capture->writers, 1);
+        // Checked again now that RemoveDeviceClient would wait for this writer.
+        if (atomic_load(&capture->live) && atomic_load(&capture->ioClientID) == clientID)
+            jcap_write(gCaptureRegion, i, samples, channels, frames, (UInt64)sampleTime);
+        atomic_fetch_sub(&capture->writers, 1);
+        return;
+    }
+}
+
+/// For the driver harness, which has no daemon to ask: the capture region and its size. coreaudiod never calls it.
+__attribute__((visibility("default"))) void *JunctionDriver_CaptureRegion(UInt64 *outSize) {
+    if (outSize) *outSize = gCaptureRegion ? JCAP_REGION_BYTES : 0;
+    return gCaptureRegion;
 }
 
 static OSStatus PerformDeviceConfigurationChange(AudioServerPlugInDriverRef d, AudioObjectID deviceID, UInt64 action,
@@ -908,10 +1126,12 @@ static OSStatus PlugInProperty(const AudioObjectPropertyAddress *address, UInt32
         return noErr;
     }
     case kAudioObjectPropertyCustomPropertyInfoList: {
-        AudioServerPlugInCustomPropertyInfo info[2] = {
+        AudioServerPlugInCustomPropertyInfo info[3] = {
             {kSelectorConfig, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList,
              kAudioServerPlugInCustomPropertyDataTypeNone},
             {kSelectorVersion, kAudioServerPlugInCustomPropertyDataTypeCFString,
+             kAudioServerPlugInCustomPropertyDataTypeNone},
+            {kSelectorClients, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList,
              kAudioServerPlugInCustomPropertyDataTypeNone},
         };
         if (!outData) {
@@ -919,7 +1139,7 @@ static OSStatus PlugInProperty(const AudioObjectPropertyAddress *address, UInt32
             return noErr;
         }
         UInt32 fit = inDataSize / (UInt32)sizeof(info[0]);
-        if (fit > 2) fit = 2;
+        if (fit > 3) fit = 3;
         memcpy(outData, info, fit * sizeof(info[0]));
         *outDataSize = fit * (UInt32)sizeof(info[0]);
         return noErr;
@@ -936,6 +1156,14 @@ static OSStatus PlugInProperty(const AudioObjectPropertyAddress *address, UInt32
         return noErr;
     }
     case kSelectorVersion: RETURN_CF(CFSTR(kDriverVersion));
+    case kSelectorClients: {
+        if (outData) {
+            if (inDataSize < sizeof(CFPropertyListRef)) return kAudioHardwareBadPropertySizeError;
+            *(CFPropertyListRef *)outData = CopyCapturedClients();
+        }
+        *outDataSize = sizeof(CFPropertyListRef);
+        return noErr;
+    }
     default: return kAudioHardwareUnknownPropertyError;
     }
 }
@@ -1433,7 +1661,8 @@ static OSStatus WillDoIOOperation(AudioServerPlugInDriverRef d, AudioObjectID de
     (void)deviceID; (void)clientID;
     if (d != gDriverRef) return kAudioHardwareBadObjectError;
     bool willDo = operationID == kAudioServerPlugInIOOperationReadInput ||
-                  operationID == kAudioServerPlugInIOOperationWriteMix;
+                  operationID == kAudioServerPlugInIOOperationWriteMix ||
+                  (operationID == kAudioServerPlugInIOOperationProcessOutput && gCaptureRegion);
     if (outWillDo) *outWillDo = willDo;
     if (outWillDoInPlace) *outWillDoInPlace = true;
     return noErr;
@@ -1477,13 +1706,14 @@ static void ApplyGain(Float32 *samples, UInt32 frames, UInt32 channels, Float32 
 static OSStatus DoIOOperation(AudioServerPlugInDriverRef d, AudioObjectID deviceID, AudioObjectID streamID,
                               UInt32 clientID, UInt32 operationID, UInt32 frames,
                               const AudioServerPlugInIOCycleInfo *cycle, void *mainBuffer, void *secondaryBuffer) {
-    (void)streamID; (void)clientID; (void)secondaryBuffer;
+    (void)streamID; (void)secondaryBuffer;
     if (d != gDriverRef) return kAudioHardwareBadObjectError;
     UInt32 slot;
     if (!IODevice(deviceID, &slot)) return kAudioHardwareBadObjectError;
     bool isRead = operationID == kAudioServerPlugInIOOperationReadInput;
     bool isWrite = operationID == kAudioServerPlugInIOOperationWriteMix;
-    if ((!isRead && !isWrite) || !mainBuffer || !cycle || frames == 0) return noErr;
+    bool isProcess = operationID == kAudioServerPlugInIOOperationProcessOutput;
+    if ((!isRead && !isWrite && !isProcess) || !mainBuffer || !cycle || frames == 0) return noErr;
     Slot *s = &gSlots[slot];
     Float32 *buffer = mainBuffer;
     if (pthread_mutex_trylock(&s->ioMutex) != 0) {
@@ -1495,6 +1725,12 @@ static OSStatus DoIOOperation(AudioServerPlugInDriverRef d, AudioObjectID device
     Float32 *ring = s->ring;
     if (!ring || channels != s->channels) {
         if (isRead) memset(buffer, 0, (size_t)frames * s->channels * sizeof(Float32));
+        pthread_mutex_unlock(&s->ioMutex);
+        return noErr;
+    }
+    if (isProcess) {
+        // One client's output before the mix, as it played it (the device's output volume isn't applied).
+        CaptureClientOutput(slot, clientID, buffer, channels, frames, cycle->mOutputTime.mSampleTime);
         pthread_mutex_unlock(&s->ioMutex);
         return noErr;
     }

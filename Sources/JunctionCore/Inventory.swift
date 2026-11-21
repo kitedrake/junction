@@ -9,14 +9,17 @@ public struct Inventory: Equatable, Sendable {
     public var defaultOutputUID: String?
     public var defaultInputUID: String?
     public var driver: DriverStatus
+    /// Apps playing into Junction's virtual devices that the driver captures (see `DeviceClient`).
+    public var deviceClients: [DeviceClient]
 
     public init(devices: [DeviceInfo] = [], apps: [AudioApp] = [], defaultOutputUID: String? = nil,
-                defaultInputUID: String? = nil, driver: DriverStatus = .notInstalled) {
+                defaultInputUID: String? = nil, driver: DriverStatus = .notInstalled, deviceClients: [DeviceClient] = []) {
         self.devices = devices
         self.apps = apps
         self.defaultOutputUID = defaultOutputUID
         self.defaultInputUID = defaultInputUID
         self.driver = driver
+        self.deviceClients = deviceClients
     }
 
     public func device(_ uid: String?) -> DeviceInfo? {
@@ -164,6 +167,8 @@ public struct NodeInfo {
             return PortCounts(inputs: 0, outputs: inventory.device(inventory.defaultInputUID)?.inputChannels ?? 2)
         case .application, .systemAudio:
             return PortCounts(inputs: 0, outputs: 2)
+        case .appThroughDevice(_, let id):
+            return PortCounts(inputs: 0, outputs: min(graph.virtualDevice(id)?.channels ?? 2, CaptureRegion.maxChannels))
         }
     }
 
@@ -175,6 +180,7 @@ public struct NodeInfo {
         case .defaultInput: "Default Input"
         case .application(let app): app.name
         case .systemAudio: "System Audio"
+        case .appThroughDevice(let app, let id): "\(app.name) through \(graph.virtualDevice(id)?.name ?? "Deleted Device")"
         }
     }
 
@@ -200,6 +206,10 @@ public struct NodeInfo {
             if excluded.isEmpty { return "All apps" }
             let names = excluded.map(\.name)
             return "All apps except " + (names.count <= 2 ? names.joined(separator: " and ") : "\(names[0]) and \(names.count - 1) more")
+        case .appThroughDevice(let app, let id):
+            guard let device = graph.virtualDevice(id) else { return "App audio" }
+            return inventory.clients(of: app.bundleID, through: device).isEmpty ? "Not playing into \(device.name)"
+                                                                              : "App audio · playing into \(device.name)"
         }
     }
 
@@ -250,7 +260,7 @@ public struct NodeInfo {
         case .device(let ref): return inventory.device(ref.uid) != nil ? ref.uid : nil
         case .defaultOutput: return inventory.device(inventory.defaultOutputUID) != nil ? inventory.defaultOutputUID : nil
         case .defaultInput: return inventory.device(inventory.defaultInputUID) != nil ? inventory.defaultInputUID : nil
-        case .application, .systemAudio: return nil
+        case .application, .systemAudio, .appThroughDevice: return nil
         }
     }
 }

@@ -639,7 +639,7 @@ enum NodeStyle {
         case .virtualDevice: Color(red: 0.49, green: 0.36, blue: 0.95)
         case .device: Color(red: 0.16, green: 0.52, blue: 0.95)
         case .defaultOutput, .defaultInput: Color(red: 0.05, green: 0.65, blue: 0.68)
-        case .application: Color(red: 0.96, green: 0.55, blue: 0.13)
+        case .application, .appThroughDevice: Color(red: 0.96, green: 0.55, blue: 0.13)
         case .systemAudio: Color(red: 0.92, green: 0.29, blue: 0.48)
         }
     }
@@ -651,7 +651,16 @@ enum NodeStyle {
         case .defaultOutput: "speaker.wave.2.fill"
         case .defaultInput: "mic.fill"
         case .application: "app.fill"
+        case .appThroughDevice: "app.connected.to.app.below.fill"
         case .systemAudio: "macwindow.on.rectangle"
+        }
+    }
+
+    /// The app an App or "<app> through <device>" node stands for.
+    static func app(_ kind: NodeKind) -> AppRef? {
+        switch kind {
+        case .application(let app), .appThroughDevice(let app, _): app
+        default: nil
         }
     }
 
@@ -667,7 +676,7 @@ struct NodeIcon: View {
     var size: CGFloat = 30
 
     var body: some View {
-        if case .application(let app) = kind, let icon = NodeStyle.appIcon(app.bundleID) {
+        if let app = NodeStyle.app(kind), let icon = NodeStyle.appIcon(app.bundleID) {
             Image(nsImage: icon)
                 .resizable()
                 .frame(width: size + 4, height: size + 4)

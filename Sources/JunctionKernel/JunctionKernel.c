@@ -29,6 +29,9 @@ struct JKRenderer {
     JKConverter **converters;
     uint32_t converterCount;
     float *converted;
+    // Per-app captures (not owned), pumped into their converters at the start of each cycle.
+    JKCapture **captures;
+    uint32_t captureCount;
     // Per-cycle channel tables (audio thread only), sized for the expected layout.
     const float **inputs;
     uint32_t *inputStrides;
@@ -120,6 +123,7 @@ void jk_renderer_destroy(JKRenderer *r) {
     free(r->outputs);
     free(r->outputStrides);
     free(r->converters);
+    free(r->captures);
     free(r->converted);
     free(r);
 }
@@ -180,6 +184,18 @@ static inline void RaisePeak(_Atomic uint32_t *slot, float peak) {
     }
 }
 
+int jk_renderer_set_captures(JKRenderer *r, JKCapture *const *captures, uint32_t count) {
+    free(r->captures);
+    r->captures = NULL;
+    r->captureCount = 0;
+    if (!captures || count == 0) return 1;
+    r->captures = calloc(count, sizeof *r->captures);
+    if (!r->captures) return 0;
+    memcpy(r->captures, captures, count * sizeof *captures);
+    r->captureCount = count;
+    return 1;
+}
+
 OSStatus jk_renderer_ioproc(AudioObjectID device, const AudioTimeStamp *now, const AudioBufferList *input,
                             const AudioTimeStamp *inputTime, AudioBufferList *output, const AudioTimeStamp *outputTime,
                             void *clientData) {
@@ -229,6 +245,7 @@ OSStatus jk_renderer_ioproc(AudioObjectID device, const AudioTimeStamp *now, con
     // Converted sources follow the aggregate's channels, read at this cycle's length.
     int convertible = frames <= JK_MAX_FRAMES;
     if (!convertible && r->converterCount) atomic_fetch_add_explicit(&r->mismatches, 1, memory_order_relaxed);
+    for (uint32_t i = 0; i < r->captureCount; i++) jk_capture_pump(r->captures[i]);
     for (uint32_t i = 0, channel = r->inputChannels; i < r->converterCount; i++) {
         JKConverter *converter = r->converters[i];
         float *audio = r->converted + (size_t)(channel - r->inputChannels) * JK_MAX_FRAMES;

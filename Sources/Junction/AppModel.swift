@@ -937,6 +937,11 @@ final class AppModel {
     }
 
     var canvasDevice: VirtualDevice? { canvas.flatMap(graph.virtualDevice) }
+
+    /// "<app> through <device>" sources the shown canvas can use: apps playing into Junction's other devices.
+    var appsThroughOtherDevices: [AppThroughDevice] {
+        inventory.appsThroughDevices(graph.virtualDevices.filter { $0.id != canvas && $0.isEnabled })
+    }
     var canvasNodes: [Node] { canvas.map(graph.nodes(on:)) ?? [] }
     var canvasCables: [Cable] { canvas.map(graph.cables(on:)) ?? [] }
 

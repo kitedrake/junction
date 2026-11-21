@@ -173,8 +173,9 @@ enum CommandLineTool {
             check(plist["Label"] as? String == DriverDaemon.label
                   && plist["BundleProgram"] as? String == DriverDaemon.executablePath
                   && (plist["MachServices"] as? [String: Any])?[DriverDaemon.machServiceName] != nil
+                  && (plist["MachServices"] as? [String: Any])?[CaptureBroker.machServiceName] != nil
                   && (plist["AssociatedBundleIdentifiers"] as? [String])?.contains(RoutingXPC.appBundleIdentifier) == true,
-                  "launch daemon names the driver installer and its XPC service")
+                  "launch daemon names the driver installer and its XPC services (installs, per-app capture)")
         } else {
             check(false, "launch daemon bundled (Contents/Library/LaunchDaemons/\(DriverDaemon.plistName))")
         }
@@ -182,6 +183,15 @@ enum CommandLineTool {
         check(usesDaemon != nil, "this build installs the driver "
               + (usesDaemon == true ? "with the driver installer once approved" : "with an administrator password"))
         check(daemonRoundTrip(), "driver installer answers over XPC and installs only the bundled copy (stand-in, nothing installed)")
+
+        // Per-app capture: the driver may reach the daemon from coreaudiod's sandbox, and a ring written the driver's
+        // way reads back through the kernel's capture reader.
+        if let driver = DriverClient.bundledDriverURL,
+           let info = NSDictionary(contentsOf: driver.appendingPathComponent("Contents/Info.plist")) as? [String: Any] {
+            check((info["AudioServerPlugIn_MachServices"] as? [String])?.contains(CaptureBroker.machServiceName) == true,
+                  "the driver may reach \(CaptureBroker.machServiceName) from coreaudiod's sandbox")
+        }
+        check(captureRoundTrip(), "a per-app ring written the driver's way reaches the renderer's converter")
 
         // Crash reports: a release build's address is https; others copy the report.
         let crashURL = Bundle.main.object(forInfoDictionaryKey: CrashReports.urlKey)
@@ -330,6 +340,28 @@ enum CommandLineTool {
     }
 
     /// Asks a DriverDaemonService on an anonymous listener to install, with stand-in actions that touch nothing.
+    /// A made-up client's ring, written as the driver writes it, pumped into a converter and read back at the sink.
+    private static func captureRoundTrip() -> Bool {
+        guard let region = CaptureRegion.makeLocal(), let converter = jk_converter_create(2, 48_000, 48_000) else { return false }
+        defer { jk_converter_destroy(converter) }
+        jk_converter_set_same_clock(converter, 1)
+        var slots: [UInt32] = [0], sequences = [jcap_claim(region.base, 0, 1, "com.example.player", "junction.self-test", 2)]
+        guard region.slots().first?.bundleID == "com.example.player",
+              let capture = jk_capture_create(region.base, region.size, &slots, &sequences, 1, 2, 48_000, converter)
+        else { return false }
+        defer { jk_capture_destroy(capture) }
+        var time: UInt64 = 48_000, peak: Float = 0
+        var samples = [Float](repeating: 0.25, count: 512 * 2), output = [Float](repeating: 0, count: 512 * 2)
+        for cycle in 0..<100 {
+            jcap_write(region.base, 0, &samples, 2, 512, time)
+            time += 512
+            jk_capture_pump(capture)
+            output.withUnsafeMutableBufferPointer { jk_converter_read(converter, $0.baseAddress!, 512, 512, nil) }
+            if cycle > 80 { peak = max(peak, output.map(abs).max() ?? 0) }
+        }
+        return abs(peak - 0.25) < 0.01
+    }
+
     private static func daemonRoundTrip() -> Bool {
         final class StandIn: PrivilegedActions, @unchecked Sendable {
             let staging = URL(fileURLWithPath: "/nonexistent/.JunctionDriver.installing")

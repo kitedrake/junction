@@ -164,6 +164,10 @@ public enum NodeKind: Codable, Hashable, Sendable {
     case application(AppRef)
     /// Everything apps play (stereo), except the listed apps. Junction's own output is never included.
     case systemAudio(excluding: [AppRef])
+    /// What one app plays into one of Junction's virtual devices, on its own (the driver's per-app capture): the
+    /// device's first channels, at most `CaptureRegion.maxChannels`. Audio passes through that device, so the
+    /// feedback rules treat it as the device's own audio.
+    case appThroughDevice(AppRef, device: UUID)
 
     /// Process taps: their source is app audio rather than a device.
     public var isTap: Bool {
@@ -272,6 +276,8 @@ public struct Graph: Codable, Equatable, Sendable {
     /// absent in older files, which means macOS's default). 4: receiving nodes choose sample-rate conversion
     /// (`Node.rateConversion`), and virtual devices have a direction, channel names, an icon, a hidden switch and a
     /// volume and mute per side, and the graph keeps named scenes (`scenes`; absent in older files, which means none).
+    /// Schema 4 also has the "<app> through <device>" source (`NodeKind.appThroughDevice`), which older files can't
+    /// contain, so they need no conversion for it.
     public static let currentSchema = 4
     public var schema = Graph.currentSchema
     public var virtualDevices: [VirtualDevice] = []

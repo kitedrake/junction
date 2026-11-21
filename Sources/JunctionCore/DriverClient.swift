@@ -7,6 +7,7 @@ public enum DriverClient {
     public static let installPath = "/Library/Audio/Plug-Ins/HAL/JunctionDriver.driver"
     static let configSelector: AudioObjectPropertySelector = 0x6A63_6667  // 'jcfg'
     static let versionSelector: AudioObjectPropertySelector = 0x6A76_6572 // 'jver'
+    static let clientsSelector: AudioObjectPropertySelector = 0x6A63_6C69 // 'jcli'
 
     /// The plug-in object, when coreaudiod has loaded the driver.
     static func plugIn() -> AudioObjectID? {
@@ -34,6 +35,28 @@ public enum DriverClient {
         var size = UInt32(MemoryLayout<Unmanaged<CFPropertyList>?>.size)
         guard AudioObjectGetPropertyData(plugIn, &address, 0, nil, &size, &result) == noErr, let result else { return nil }
         return result.takeRetainedValue() as? [[String: Any]]
+    }
+
+    /// The apps' processes the driver captures, as it lists them (pid, bundle ID, device UID, channels). Empty when
+    /// the driver isn't loaded.
+    public static func capturedClients() -> [[String: Any]] {
+        guard let plugIn = plugIn() else { return [] }
+        var address = HAL.address(clientsSelector)
+        var result: Unmanaged<CFPropertyList>?
+        var size = UInt32(MemoryLayout<Unmanaged<CFPropertyList>?>.size)
+        guard AudioObjectGetPropertyData(plugIn, &address, 0, nil, &size, &result) == noErr, let result else { return [] }
+        return result.takeRetainedValue() as? [[String: Any]] ?? []
+    }
+
+    /// Reads the driver's client list, naming each client's app with `appOf` (pid and bundle ID to the app).
+    static func deviceClients(from list: [[String: Any]], appOf: (Int32, String) -> AppRef) -> [DeviceClient] {
+        list.compactMap { entry in
+            guard let pid = (entry["pid"] as? NSNumber)?.int32Value, let bundleID = entry["bundleID"] as? String,
+                  let uid = entry["deviceUID"] as? String
+            else { return nil }
+            let channels = (entry["channels"] as? NSNumber)?.intValue ?? 2
+            return DeviceClient(pid: pid, bundleID: bundleID, deviceUID: uid, channels: channels, app: appOf(pid, bundleID))
+        }
     }
 
     /// The published devices as VirtualDevice values (all enabled), or nil when the driver isn't loaded.
@@ -77,12 +100,13 @@ public enum DriverClient {
     }
 
     /// Calls `handler` on `queue` when the driver reports that its list changed by itself (a volume or mute set in
-    /// Sound settings, a sample rate set elsewhere). Keep the returned object alive; make a new one after Core Audio
-    /// restarts.
+    /// Sound settings, a sample rate set elsewhere), or that an app started or stopped playing into one of its
+    /// devices. Keep the returned object alive; make a new one after Core Audio restarts.
     public final class ConfigWatcher: @unchecked Sendable {
         private let queue: DispatchQueue
         private let block: AudioObjectPropertyListenerBlock
         private let plugIn: AudioObjectID
+        private static let selectors = [configSelector, clientsSelector]
 
         public init?(queue: DispatchQueue, handler: @escaping @Sendable () -> Void) {
             guard let plugIn = DriverClient.plugIn() else { return nil }
@@ -91,11 +115,15 @@ public enum DriverClient {
             block = { _, _ in handler() }
             var address = HAL.address(configSelector)
             guard AudioObjectAddPropertyListenerBlock(plugIn, &address, queue, block) == noErr else { return nil }
+            address = HAL.address(clientsSelector)
+            AudioObjectAddPropertyListenerBlock(plugIn, &address, queue, block)  // drivers before 0.2.0 have no list
         }
 
         deinit {
-            var address = HAL.address(configSelector)
-            AudioObjectRemovePropertyListenerBlock(plugIn, &address, queue, block)
+            for selector in Self.selectors {
+                var address = HAL.address(selector)
+                AudioObjectRemovePropertyListenerBlock(plugIn, &address, queue, block)
+            }
         }
     }
 

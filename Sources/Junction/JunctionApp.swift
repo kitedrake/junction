@@ -348,10 +348,15 @@ struct AddMenuItems: View {
                     Button(device.name) { add(.device(device.ref), .source) }
                 }
             }
-            if !model.inventory.apps.isEmpty {
+            if !model.inventory.apps.isEmpty || !model.appsThroughOtherDevices.isEmpty {
                 Section("Apps") {
                     ForEach(model.inventory.apps) { app in
                         Button(app.name) { add(.application(app.ref), .source) }
+                    }
+                    ForEach(model.appsThroughOtherDevices) { source in
+                        Button("\(source.app.name) through \(model.graph.virtualDevice(source.device)?.name ?? "Deleted Device")") {
+                            add(.appThroughDevice(source.app, device: source.device), .source)
+                        }
                     }
                 }
             }

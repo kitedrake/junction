@@ -2,12 +2,18 @@
 // locks or allocation. One renderer serves one sink: it reads the private aggregate device's input buffers
 // (every source's channels, side by side) and mixes them into the sink's output channels. A source device running
 // at another sample rate stays outside the aggregate: its own IOProc feeds a converter (a lock-free ring and a
-// resampler), and the renderer reads the converted audio after the aggregate's channels.
+// resampler), and the renderer reads the converted audio after the aggregate's channels. Per-app capture works the
+// same way: the renderer's IOProc pumps what an app played into one of Junction's devices from the driver's shared
+// ring (JunctionCaptureRing.h) into a converter of its own.
 #ifndef JUNCTION_KERNEL_H
 #define JUNCTION_KERNEL_H
 
 #include <CoreAudio/CoreAudio.h>
 #include <stdint.h>
+
+// The driver's per-app capture region: SwiftPM makes this file the module's umbrella header, so Swift sees the ring
+// layout and its reader functions through it.
+#include "JunctionCaptureRing.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -15,6 +21,7 @@ extern "C" {
 
 typedef struct JKRenderer JKRenderer;
 typedef struct JKConverter JKConverter;
+typedef struct JKCapture JKCapture;
 
 /// The largest IO buffer, in frames, that converted audio is delivered for in one cycle (longer cycles get silence
 /// on converted channels and count as a layout mismatch).
@@ -75,6 +82,28 @@ uint64_t jk_converter_overrun_count(const JKConverter *_Nonnull converter);
 /// IO cycles the producer has written so far (to tell whether the source device is still running).
 uint64_t jk_converter_write_count(const JKConverter *_Nonnull converter);
 
+// MARK: Per-app capture
+
+/// Clients of one app (its processes playing into one device) a capture reads together.
+#define JK_CAPTURE_MAX_SLOTS 8
+
+/// Creates a reader of the driver's capture region (`regionSize` bytes, mapped by the caller and kept mapped until
+/// the capture is destroyed) that mixes the given client slots, each still owned by the client with the matching
+/// sequence, and passes `channels` channels on to `converter` (not owned), whose input rate is the device's,
+/// `sampleRate`. Returns NULL for a region it doesn't understand, an argument out of range or no memory.
+JKCapture *_Nullable jk_capture_create(const void *_Nonnull region, uint64_t regionSize, const uint32_t *_Nonnull slots,
+                                       const uint32_t *_Nonnull sequences, uint32_t slotCount, uint32_t channels,
+                                       double sampleRate, JKConverter *_Nonnull converter);
+/// Frees the capture. Only call once the renderer using it has been destroyed.
+void jk_capture_destroy(JKCapture *_Nonnull capture);
+/// Audio thread: moves the frames the clients have written since the last call into the converter, with time stamps
+/// on the driver's clock. Starts at the newest frame; a reader that fell behind by most of the ring skips ahead.
+void jk_capture_pump(JKCapture *_Nonnull capture);
+/// Frames passed on so far (to tell whether the clients still play), and times the reader skipped ahead or found
+/// frames already overwritten.
+uint64_t jk_capture_frame_count(const JKCapture *_Nonnull capture);
+uint64_t jk_capture_overrun_count(const JKCapture *_Nonnull capture);
+
 // MARK: Renderer
 
 /// Creates a renderer. `inputChannels` is how many channels the aggregate's input buffers should hold in total,
@@ -93,6 +122,10 @@ JKRenderer *_Nullable jk_renderer_create_converting(uint32_t inputChannels, uint
                                                     const float *_Nullable gains,
                                                     JKConverter *_Nonnull const *_Nullable converters,
                                                     uint32_t converterCount);
+
+/// Has the renderer pump these captures (not owned) at the start of every IO cycle, before it reads the converters
+/// they feed. Only call before the IOProc starts. Returns 0 if memory runs out.
+int jk_renderer_set_captures(JKRenderer *_Nonnull renderer, JKCapture *_Nonnull const *_Nullable captures, uint32_t count);
 
 /// Frees the renderer. Only call once the IOProc using it has been destroyed.
 void jk_renderer_destroy(JKRenderer *_Nonnull renderer);

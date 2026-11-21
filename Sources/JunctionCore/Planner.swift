@@ -5,7 +5,9 @@ import Foundation
 // app/system-audio source. Core Audio keeps the clocks in step (drift compensation), so the render callback only
 // copies channels with gains; devices in the sink's clock domain (Junction's own devices share one) need none. A
 // source device at another nominal sample rate stays out of the aggregate when the sink's conversion is Automatic:
-// it runs on its own IOProc and the kernel converts it to the sink's rate.
+// it runs on its own IOProc and the kernel converts it to the sink's rate. An "<app> through <device>" source reads
+// the driver's per-app ring for that app (see Capture.swift) and is converted the same way, after the converted
+// devices.
 
 public struct RoutingPlan: Equatable, Sendable {
     public var sinks: [SinkPlan] = []
@@ -41,6 +43,8 @@ public struct SinkPlan: Equatable, Sendable, Identifiable {
     /// Source devices running at another rate, converted to the sink's: they stay out of the aggregate and their
     /// channels follow its inputs (route inputs from `inputChannels` on), one device after another.
     public var converted: [SubDevice] = []
+    /// Apps captured through a virtual device: their channels follow the converted devices', one after another.
+    public var captures: [CapturePlan] = []
 
     public var id: UUID { sinkNode }
 
@@ -55,7 +59,27 @@ public struct SinkPlan: Equatable, Sendable, Identifiable {
         }
         let tapKeys = taps.map { "\($0.node.uuidString):\($0.mode):\($0.mutesOriginal)" }.joined(separator: ",")
         let routeKeys = routes.map { "\($0.input)>\($0.output)" }.joined(separator: ",")
-        return "\(sinkUID)|\(key(subDevices))|\(tapKeys)|\(routeKeys)|\(bufferFrames ?? 0)|converted:\(key(converted))"
+        let captureKeys = captures.map(\.key).joined(separator: ",")
+        return "\(sinkUID)|\(key(subDevices))|\(tapKeys)|\(routeKeys)|\(bufferFrames ?? 0)|converted:\(key(converted))|captures:\(captureKeys)"
+    }
+}
+
+/// One app's audio read from the driver's per-app rings of one virtual device.
+public struct CapturePlan: Equatable, Sendable {
+    public var node: UUID
+    public var name: String
+    /// The virtual device the app plays into (its UID, not its companion's).
+    public var deviceUID: String
+    public var sampleRate: Double
+    public var channels: Int
+    /// The app's processes playing into it right now: a change rebuilds the sink.
+    public var clients: [CaptureClientRef]
+    /// The sink runs on the driver's clock too (it is one of Junction's devices): converted at the exact ratio.
+    public var sameClock: Bool
+
+    var key: String {
+        let pids = clients.map { "\($0.pid)/\($0.bundleID)" }.joined(separator: ";")
+        return "\(node.uuidString):\(deviceUID)@\(sampleRate):\(channels)\(sameClock ? "=" : "~"):\(pids)"
     }
 }
 
@@ -175,7 +199,8 @@ public enum Planner {
                                         sameClock: true)]
             var taps: [TapPlan] = []
             var converted: [SubDevice] = []
-            enum Origin { case device(String), tap(Int), converted(String) }
+            var captures: [CapturePlan] = []
+            enum Origin { case device(String), tap(Int), converted(String), capture(Int) }
             var pending: [(cable: Cable, origin: Origin, gain: Float)] = []
 
             for cable in cables {
@@ -193,6 +218,41 @@ public enum Planner {
                     guard cable.from.channel < 2 else { plan.idleCables.insert(cable.id); continue }
                     let index = tapIndex(&taps, source, name: "System Audio", mode: .allExcept(excluded.map(\.bundleID)))
                     pending.append((cable, .tap(index), gain))
+                case .appThroughDevice(let app, let deviceID):
+                    guard let virtual = graph.virtualDevice(deviceID), virtual.isEnabled,
+                          let device = inventory.device(virtual.uid), cable.from.channel < info.ports(source).outputs
+                    else {
+                        plan.note(source.id, unavailableReason(source, graph: graph, inventory: inventory))
+                        plan.idleCables.insert(cable.id)
+                        continue
+                    }
+                    // The app's audio passes through its device: the same loop guard as the device's own audio.
+                    if loopbacks.contains(sinkUID) {
+                        let from = loopback(virtual.uid), into = loopback(sinkUID)
+                        if from == into || reaches(into, from) {
+                            plan.note(sink.id, "A cable into \(info.title(sink)) would feed its own audio back into it, so it is not used.")
+                            plan.idleCables.insert(cable.id)
+                            continue
+                        }
+                        feeds[from, default: []].insert(into)
+                    }
+                    let clients = inventory.clients(of: app.bundleID, through: virtual)
+                    guard !clients.isEmpty else {
+                        plan.idleCables.insert(cable.id)  // not playing into it right now
+                        continue
+                    }
+                    let index: Int
+                    if let existing = captures.firstIndex(where: { $0.node == source.id }) {
+                        index = existing
+                    } else {
+                        captures.append(CapturePlan(
+                            node: source.id, name: info.title(source), deviceUID: virtual.uid, sampleRate: device.sampleRate,
+                            channels: info.ports(source).outputs,
+                            clients: clients.map { CaptureClientRef(pid: $0.pid, bundleID: $0.bundleID) },
+                            sameClock: device.sharesClock(with: sinkDevice)))
+                        index = captures.count - 1
+                    }
+                    pending.append((cable, .capture(index), gain))
                 default:
                     guard let uid = info.returnUID(source), let device = inventory.device(uid),
                           cable.from.channel < device.inputChannels
@@ -256,11 +316,17 @@ public enum Planner {
                 convertedOffsets[device.uid] = total
                 total += device.inputChannels
             }
+            var captureOffsets: [Int] = []
+            for capture in captures {
+                captureOffsets.append(total)
+                total += capture.channels
+            }
             let routes = pending.map { item -> Route in
                 let input = switch item.origin {
                 case .device(let uid): offsets[uid]! + item.cable.from.channel
                 case .tap(let index): tapBase + index * 2 + item.cable.from.channel
                 case .converted(let uid): convertedOffsets[uid]! + item.cable.from.channel
+                case .capture(let index): captureOffsets[index] + item.cable.from.channel
                 }
                 return Route(cable: item.cable.id, source: item.cable.from, input: input, output: item.cable.to.channel, gain: item.gain)
             }
@@ -270,7 +336,8 @@ public enum Planner {
                 subDevices: subDevices, taps: taps, routes: routes,
                 masterGain: sink.isMuted ? 0 : Gain.linear(sink.gainDB), bufferFrames: sink.bufferFrames,
                 inputChannels: inputChannels,
-                outputChannels: subDevices.reduce(0) { $0 + $1.outputChannels }, converted: converted))
+                outputChannels: subDevices.reduce(0) { $0 + $1.outputChannels }, converted: converted,
+                captures: captures))
         }
         return plan
     }
@@ -292,6 +359,12 @@ public enum Planner {
         case .defaultOutput: return "There is no output device."
         case .defaultInput: return "There is no input device."
         case .application, .systemAudio: return ""
+        case .appThroughDevice(let app, let id):
+            guard let device = graph.virtualDevice(id) else { return "This virtual device was deleted." }
+            if !device.isEnabled { return "\(device.name) is turned off." }
+            if !inventory.driver.isInstalled { return "The Junction driver isn't installed, so \(device.name) doesn't exist yet." }
+            if inventory.device(device.uid) == nil { return "\(device.name) isn't available yet." }
+            return "\(app.name) isn't playing into \(device.name) right now."
         }
     }
 
@@ -346,6 +419,7 @@ public enum Rules {
             case .device(let ref): loopback(uid: ref.uid)
             case .defaultOutput: loopback(uid: inventory.defaultOutputUID)
             case .defaultInput: loopback(uid: inventory.defaultInputUID)
+            case .appThroughDevice(_, let device): "vd:\(device)"  // the device's own audio, one app of it
             case .application, .systemAudio: nil
             }
         }

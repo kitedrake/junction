@@ -27,7 +27,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "Junction",
-            dependencies: ["JunctionCore", .product(name: "Sparkle", package: "Sparkle")],
+            dependencies: ["JunctionCore", "JunctionKernel", .product(name: "Sparkle", package: "Sparkle")],
             path: "Sources/Junction",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
