@@ -287,6 +287,26 @@ final class EditingTests: XCTestCase {
         XCTAssertEqual(written, heard, "writing the moves gives what was heard")
     }
 
+    @MainActor func testNodeDragShowsTheNewPlacesBeforeTheGraphHasThem() throws {
+        let (graph, system, mic, _) = sample()
+        let drag = NodeDrag()
+        XCTAssertEqual(drag.placed(mic), mic, "nothing moves before a drag")
+        drag.move(from: [system.id: CGPoint(x: system.x, y: system.y), mic.id: CGPoint(x: mic.x, y: mic.y)],
+                  by: CGSize(width: 25, height: -100))
+        XCTAssertEqual(drag.placed(mic).x, mic.x + 25)
+        XCTAssertEqual(drag.placed(mic).y, mic.y - 100)
+        XCTAssertEqual(drag.placed(system).y, 0, "never above the canvas's corner, as moving nodes in the graph")
+        let shown = drag.moved(graph)
+        XCTAssertEqual(shown.node(mic.id)?.x, mic.x + 25)
+        XCTAssertEqual(shown.nodes.filter { $0.id != mic.id && $0.id != system.id }, graph.nodes.filter { $0.id != mic.id && $0.id != system.id },
+                       "the other nodes stay")
+        XCTAssertEqual(drag.positions[mic.id], CGPoint(x: mic.x + 25, y: mic.y - 100))
+        XCTAssertEqual(drag.positions[system.id], CGPoint(x: system.x + 25, y: 0))
+        drag.end()
+        XCTAssertTrue(drag.positions.isEmpty)
+        XCTAssertEqual(drag.moved(graph), graph)
+    }
+
     func testSelection() {
         let a = UUID(), b = UUID(), c = UUID()
         XCTAssertNil(CanvasSelection.of([]))

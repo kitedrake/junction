@@ -223,20 +223,17 @@ struct CanvasView: View {
                             dragOrigins[other.id] = CGPoint(x: other.x, y: other.y)
                         }
                     }
-                    model.moveNodes(dragOrigins.mapValues {
-                        CGPoint(x: $0.x + translation.width, y: $0.y + translation.height)
-                    })
+                    model.dragNodes(from: dragOrigins, by: translation)
                 }, onMoveEnd: {
-                    let moved = dragOrigins.keys
+                    let moved = model.endNodeDrag()
                     dragOrigins = [:]
-                    model.endEditing()
                     // One unwired node let go over a cable goes onto it.
                     if moved.count == 1, let id = moved.first, let problem = model.insertOnCable(id) { refuse(problem) }
                 }, onEscape: {
                     focusedPort = nil
                     focused = true
                 })
-                .offset(x: node.x, y: node.y)
+                .modifier(NodePlacement(node: node))
             }
             if let box {
                 let frame = rect(box.start, box.end)
@@ -429,12 +426,13 @@ struct MinimapView: View {
 
     var body: some View {
         let info = model.info
-        let nodes = model.canvasNodes
+        let drag = model.nodeDrag
+        let nodes = model.canvasNodes.map(drag.placed)  // dragged nodes where the drag has them
         let frames = nodes.map { NodeLayout.frame($0, info.ports($0)) }
         let viewport = model.viewport
         let visible = viewport.visibleRect(model.canvasViewSize)
         let map = Minimap(world: dragWorld ?? Minimap.world(nodes: frames, visible: visible), size: Self.size)
-        let graph = model.graph
+        let graph = drag.origins.isEmpty ? model.graph : drag.moved(model.graph)
         let cables = model.canvasCables
         VStack(spacing: 6) {
             Canvas { context, _ in
@@ -536,13 +534,27 @@ enum CableGeometry {
     }
 }
 
+/// Puts a node at its place on the canvas, or where it is being dragged to. Only this redraws while it is dragged, not
+/// the node itself.
+private struct NodePlacement: ViewModifier {
+    @Environment(AppModel.self) private var model
+    let node: Node
+
+    func body(content: Content) -> some View {
+        let placed = model.nodeDrag.placed(node)
+        content.offset(x: placed.x, y: placed.y)
+    }
+}
+
 /// All cables, plus the one being dragged.
 struct CableLayer: View {
     @Environment(AppModel.self) private var model
     let wire: PendingWire?
 
     var body: some View {
-        let graph = model.graph
+        let drag = model.nodeDrag
+        // Dragged nodes are where the drag has them; the graph gets those places when it ends.
+        let graph = drag.origins.isEmpty ? model.graph : drag.moved(model.graph)
         let moving: UUID? = if case .moving(let cable) = wire?.start { cable.id } else { nil }
         let cables = model.canvasCables.filter { $0.id != moving }
         let nodes = model.canvasNodes

@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 
 // Canvas editing that doesn't depend on the window: what is selected, copying and pasting nodes with their cables,
 // removing a selection, tidying a canvas, and undo and redo of every edit.
@@ -386,5 +387,52 @@ public struct FaderMoves {
     public mutating func take() -> [Move] {
         defer { moves = [] }
         return moves
+    }
+}
+
+/// Nodes being dragged on the canvas: where they started and how far they have moved. Observed on its own, so a drag
+/// redraws the nodes' places and the cables, not the rest of the window; the graph gets the new places when the drag
+/// ends (the app's `dragNodes`).
+@MainActor @Observable
+public final class NodeDrag {
+    public private(set) var origins: [UUID: CGPoint] = [:]
+    public private(set) var offset = CGSize.zero
+
+    public init() {}
+
+    public func move(from origins: [UUID: CGPoint], by offset: CGSize) {
+        if origins != self.origins { self.origins = origins }
+        self.offset = offset
+    }
+
+    public func end() {
+        origins = [:]
+        offset = .zero
+    }
+
+    /// Where the drag puts each node: never left of or above the canvas's corner, as `AppModel.moveNodes` does.
+    public var positions: [UUID: CGPoint] { origins.mapValues(place) }
+
+    /// The graph as it shows: the dragged nodes at their dragged places.
+    public func moved(_ graph: Graph) -> Graph {
+        var shown = graph
+        for index in shown.nodes.indices where origins[shown.nodes[index].id] != nil {
+            shown.nodes[index] = placed(shown.nodes[index])
+        }
+        return shown
+    }
+
+    /// The node as it shows: at its dragged place while it moves.
+    public func placed(_ node: Node) -> Node {
+        guard let origin = origins[node.id] else { return node }
+        let point = place(origin)
+        var moved = node
+        moved.x = point.x
+        moved.y = point.y
+        return moved
+    }
+
+    private func place(_ origin: CGPoint) -> CGPoint {
+        CGPoint(x: max(0, origin.x + offset.width), y: max(0, origin.y + offset.height))
     }
 }

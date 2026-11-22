@@ -347,6 +347,8 @@ graph while they move: changing it redraws most of the window, about 100 ms, whi
 second. `AppModel.moveFader` keeps each move in `FaderMoves`, sends the router and the helper the graph with the moves
 applied, and shows the value in the controls reading `AppModel.fader(key)`. The graph changes once when the fader is
 let go (`endEditing`, one undo step; a MIDI controller's moves aren't undo steps), or after a second without a move.
+Dragging nodes works the same way: `NodeDrag` holds where the dragged nodes started and how far they moved, the nodes'
+places, the cables and the minimap read it, and the graph gets the new places when the drag ends (`endNodeDrag`).
 
 ## Development
 
@@ -361,7 +363,9 @@ JUNCTION_SNAPSHOT=/tmp/shots build/Junction.app/Contents/MacOS/Junction   # demo
 ```
 
 Snapshot mode needs Screen Recording permission for the terminal that starts it, and its window must stay in front
-while it runs: an inactive window is captured with greyed-out controls. Menus follow the system's appearance in both
+while it runs: an inactive window is captured with greyed-out controls. It shares its preferences with the Junction
+installed on the Mac (window places and sizes, canvas or mixer): it puts back whatever it changed when it finishes, but
+not if it is stopped early. Menus follow the system's appearance in both
 versions. It doesn't run inside Nightshift's sandbox.
 
 The kernel stress test (`Tests/KernelHarness/stress.c`) runs the sample-rate converter and the renderer under

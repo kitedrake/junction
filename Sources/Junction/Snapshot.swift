@@ -172,9 +172,10 @@ extension Demo {
 /// Development aid: `JUNCTION_SNAPSHOT=<folder>` loads the demo setup, saves PNGs of the main states, each as
 /// `<state>-light.png` and `<state>-dark.png`, into the folder and quits. Needs Screen Recording permission for the terminal that launches it.
 enum Snapshot {
-    static func runIfRequested(_ model: AppModel) {
+    @MainActor static func runIfRequested(_ model: AppModel) {
         guard let folder = ProcessInfo.processInfo.environment["JUNCTION_SNAPSHOT"].map({ URL(fileURLWithPath: $0, isDirectory: true) })
         else { return }
+        keepPreferences()
         Task { @MainActor in
             try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             /// Saves the current state in both appearances (light first, dark last, so the next state starts dark).
@@ -320,7 +321,26 @@ enum Snapshot {
             NSApp.windows.first { $0.isVisible && $0.contentView != nil }?.makeKeyAndOrderFront(nil)
             resize(980, 560)
             await both("minimum-size")
+            restorePreferences()
             NSApp.terminate(nil)
+        }
+    }
+
+    /// Junction's preferences as snapshot mode found them. They are shared with this Mac's own copy of Junction, and
+    /// snapshot mode's windows save their places and sizes there: those go back when it ends.
+    @MainActor private static var foundPreferences: [String: Any]?
+
+    @MainActor private static func keepPreferences() {
+        guard let id = Bundle.main.bundleIdentifier else { return }
+        foundPreferences = UserDefaults.standard.persistentDomain(forName: id) ?? [:]
+    }
+
+    @MainActor private static func restorePreferences() {
+        guard let id = Bundle.main.bundleIdentifier, let found = foundPreferences else { return }
+        for window in NSApp.windows { window.setFrameAutosaveName("") }  // closing them mustn't save again
+        let now = UserDefaults.standard.persistentDomain(forName: id) ?? [:]
+        for key in Set(now.keys).union(found.keys) where (now[key] as? NSObject) != (found[key] as? NSObject) {
+            UserDefaults.standard.set(found[key], forKey: key)
         }
     }
 

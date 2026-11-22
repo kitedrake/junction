@@ -54,7 +54,7 @@ final class AppModel {
     var showInspector = true
     /// The shown canvas as nodes and cables, or as a mixer (the same graph either way).
     var showsMixer = UserDefaults.standard.bool(forKey: "showsMixer") {
-        didSet { UserDefaults.standard.set(showsMixer, forKey: "showsMixer") }
+        didSet { if !isDemo { UserDefaults.standard.set(showsMixer, forKey: "showsMixer") } }
     }
     /// The template sheet that is open.
     var template: TemplateKind?
@@ -137,6 +137,8 @@ final class AppModel {
     @ObservationIgnored private var restartTask: Task<Void, Never>?
     @ObservationIgnored private var lastCoreAudioRestart: Date?
     @ObservationIgnored private var saveTask: Task<Void, Never>?
+    /// Nodes being dragged on the canvas (see `dragNodes`).
+    @ObservationIgnored let nodeDrag = NodeDrag()
     /// Fader moves not in `graph` yet (see `moveFader`).
     @ObservationIgnored private var faderMoves = FaderMoves()
     @ObservationIgnored private var faderValues: [String: FaderValue] = [:]
@@ -169,6 +171,7 @@ final class AppModel {
 
     init(demo: Bool) {
         isDemo = demo
+        if demo { showsMixer = false }  // snapshot mode starts on the canvas, whatever this Mac's Junction shows
         graph = Graph()
         history = EditHistory(read: { [unowned self] in graph }, write: { [unowned self] restored in
             // Undo puts back the canvases; whether routing is on stays as it is.
@@ -1301,6 +1304,23 @@ final class AppModel {
                 graph.nodes[index].y = max(0, point.y)
             }
         }
+    }
+
+    /// Drags nodes without changing `graph` yet: they show at their new places at once (see `NodeDrag`), and `graph`
+    /// gets them as one undo step when the drag ends (`endNodeDrag`). Changing `graph` redraws most of the window, too
+    /// slow to do for every step of a drag.
+    func dragNodes(from origins: [UUID: CGPoint], by offset: CGSize) {
+        nodeDrag.move(from: origins, by: offset)
+    }
+
+    /// Puts the dragged nodes where they were let go; returns the nodes that moved.
+    @discardableResult
+    func endNodeDrag() -> [UUID] {
+        let positions = nodeDrag.positions
+        if !positions.isEmpty { moveNodes(positions) }
+        nodeDrag.end()
+        endEditing()
+        return Array(positions.keys)
     }
 
     func updateNode(_ id: UUID, _ name: String = "Change Node", _ change: (inout Node) -> Void) {
