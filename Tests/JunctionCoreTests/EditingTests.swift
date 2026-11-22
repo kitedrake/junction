@@ -257,6 +257,36 @@ final class EditingTests: XCTestCase {
                        "the next node in the column starts below the labels")
     }
 
+    func testFaderMovesAreHeardBeforeTheGraphChangesAndKeepTheLatestPerFader() throws {
+        let (graph, system, mic, _) = sample()
+        let cable = try XCTUnwrap(graph.cables.first { $0.from.node == mic.id })
+        var moves = FaderMoves()
+        func level(_ id: UUID, _ dB: Double) -> (inout Graph) -> Void {
+            { graph in if let index = graph.nodes.firstIndex(where: { $0.id == id }) { graph.nodes[index].gainDB = dB } }
+        }
+        moves.record("level mic", "Change Level", level(mic.id, -3))
+        moves.record("cable", "Change Level", undoable: false) { graph in
+            if let index = graph.cables.firstIndex(where: { $0.id == cable.id }) { graph.cables[index].gainDB = -12 }
+        }
+        moves.record("level system", "Change Level", level(system.id, -6))
+        moves.record("level mic", "Change Level", level(mic.id, -9))  // the same fader again: replaces its first move
+
+        XCTAssertEqual(moves.moves.map(\.key), ["level mic", "cable", "level system"], "one move per fader, in the order they started")
+        XCTAssertEqual(moves.moves.map(\.undoable), [true, false, true])
+        let heard = moves.applied(to: graph)
+        XCTAssertEqual(heard.node(mic.id)?.gainDB, -9)
+        XCTAssertEqual(heard.node(system.id)?.gainDB, -6)
+        XCTAssertEqual(heard.cables.first { $0.id == cable.id }?.gainDB, -12)
+        XCTAssertEqual(graph.node(mic.id)?.gainDB, 0, "the graph itself waits")
+
+        let taken = moves.take()
+        XCTAssertTrue(moves.isEmpty)
+        XCTAssertEqual(moves.applied(to: graph), graph)
+        var written = graph
+        for move in taken { move.change(&written) }
+        XCTAssertEqual(written, heard, "writing the moves gives what was heard")
+    }
+
     func testSelection() {
         let a = UUID(), b = UUID(), c = UUID()
         XCTAssertNil(CanvasSelection.of([]))

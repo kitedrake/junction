@@ -108,8 +108,9 @@ private struct NodeInspector: View {
 
         GroupBox {
             VStack(alignment: .leading, spacing: 10) {
-                GainSlider(title: ports.outputs > 0 && ports.inputs == 0 ? "Level sent" : "Level", dB: node.gainDB) { value in
-                    model.updateNode(node.id, "Change Level") { $0.gainDB = value }
+                GainSlider(title: ports.outputs > 0 && ports.inputs == 0 ? "Level sent" : "Level", dB: node.gainDB,
+                           fader: AppModel.levelKey(node: node.id)) { value in
+                    model.moveLevel(node: node.id, to: value)
                 }
                 HStack {
                     Toggle("Mute", isOn: Binding(get: { node.isMuted }, set: { value in model.updateNode(node.id, value ? "Mute" : "Unmute") { $0.isMuted = value } }))
@@ -278,12 +279,14 @@ private struct VirtualDeviceLevels: View {
             VStack(alignment: .leading, spacing: 10) {
                 if device.showsOutput {
                     side("Played into it", volume: device.outputVolume, muted: device.outputMuted,
-                         setVolume: { value in model.updateVirtualDevice(device.id, "Change Volume") { $0.outputVolume = value } },
+                         fader: AppModel.volumeKey(device: device.id, input: false),
+                         setVolume: { value in model.moveVolume(device: device.id, input: false, to: value) },
                          setMuted: { value in model.updateVirtualDevice(device.id, "Mute") { $0.outputMuted = value } })
                 }
                 if device.showsInput {
                     side("Recorded from it", volume: device.inputVolume, muted: device.inputMuted,
-                         setVolume: { value in model.updateVirtualDevice(device.id, "Change Volume") { $0.inputVolume = value } },
+                         fader: AppModel.volumeKey(device: device.id, input: true),
+                         setVolume: { value in model.moveVolume(device: device.id, input: true, to: value) },
                          setMuted: { value in model.updateVirtualDevice(device.id, "Mute") { $0.inputMuted = value } })
                 }
                 Text("The same volume apps and Sound settings show for “\(device.name)”.")
@@ -308,8 +311,24 @@ private struct VirtualDeviceLevels: View {
         }
     }
 
-    private func side(_ title: String, volume: Double, muted: Bool, setVolume: @escaping (Double) -> Void,
+    private func side(_ title: String, volume: Double, muted: Bool, fader: String, setVolume: @escaping (Double) -> Void,
                       setMuted: @escaping (Bool) -> Void) -> some View {
+        VolumeSide(title: title, volume: volume, muted: muted, fader: fader, setVolume: setVolume, setMuted: setMuted)
+    }
+}
+
+/// One side's volume and mute.
+private struct VolumeSide: View {
+    @Environment(AppModel.self) private var model
+    let title: String
+    let volume: Double
+    let muted: Bool
+    let fader: String
+    let setVolume: (Double) -> Void
+    let setMuted: (Bool) -> Void
+
+    var body: some View {
+        let volume = model.fader(fader).value ?? volume
         VStack(alignment: .leading, spacing: 2) {
             HStack {
                 Text(title)
@@ -573,7 +592,8 @@ private struct EffectRow: View {
             }
             if let kind, !effect.bypass {
                 ForEach(kind.parameters) { parameter in
-                    EffectSlider(parameter: parameter, value: effect.value(parameter)) { value in
+                    EffectSlider(parameter: parameter, value: effect.value(parameter),
+                                 fader: AppModel.effectKey(effect.id, parameter)) { value in
                         model.setEffectParameter(effect.id, in: node.id, parameter, value)
                     }
                 }
@@ -604,9 +624,12 @@ private struct EffectSlider: View {
     @Environment(AppModel.self) private var model
     let parameter: EffectParameter
     let value: Double
+    /// What it moves (`AppModel.effectKey`): while it moves it shows that value, before the graph has it.
+    let fader: String
     let onChange: (Double) -> Void
 
     var body: some View {
+        let value = model.fader(fader).value ?? value
         VStack(alignment: .leading, spacing: 2) {
             HStack {
                 Text(parameter.name).font(.callout)
@@ -616,7 +639,10 @@ private struct EffectSlider: View {
             Slider(value: Binding(get: { position(value) }, set: { onChange(parameterValue(at: $0)) }), in: 0...1,
                    onEditingChanged: { if !$0 { model.endEditing() } })
                 .controlSize(.small)
-                .onTapGesture(count: 2) { onChange(parameter.defaultValue) }
+                .onTapGesture(count: 2) {
+                    onChange(parameter.defaultValue)
+                    model.endEditing()
+                }
                 .accessibilityLabel(parameter.name)
                 .accessibilityValue(parameter.text(value))
                 .help("Double-click to reset to \(parameter.text(parameter.defaultValue))")
@@ -746,7 +772,9 @@ private struct CableRow: View {
                 .help("Disconnect")
             }
             HStack(alignment: .bottom, spacing: 6) {
-                GainSlider(title: nil, dB: cable.gainDB) { value in model.updateCable(cable.id) { $0.gainDB = value } }
+                GainSlider(title: nil, dB: cable.gainDB, fader: AppModel.levelKey(cable: cable.id)) { value in
+                    model.moveLevel(cable: cable.id, to: value)
+                }
                 MIDILearnButton(target: .cableLevel(cable.id))
             }
         }
@@ -773,7 +801,9 @@ private struct CableInspector: View {
         }
         GroupBox {
             HStack(alignment: .bottom, spacing: 6) {
-                GainSlider(title: "Level", dB: cable.gainDB) { value in model.updateCable(cable.id) { $0.gainDB = value } }
+                GainSlider(title: "Level", dB: cable.gainDB, fader: AppModel.levelKey(cable: cable.id)) { value in
+                    model.moveLevel(cable: cable.id, to: value)
+                }
                 MIDILearnButton(target: .cableLevel(cable.id))
             }
             .padding(6)
@@ -798,11 +828,14 @@ struct GainSlider: View {
     @Environment(AppModel.self) private var model
     let title: String?
     let dB: Double
+    /// What it moves (`AppModel.levelKey`): while it moves it shows that value, before the graph has it.
+    let fader: String
     let onChange: (Double) -> Void
     /// Option or Command is held: a click on the fader resets it instead of moving it.
     @State private var resetArmed = false
 
     var body: some View {
+        let dB = model.fader(fader).value ?? dB
         VStack(alignment: .leading, spacing: 2) {
             HStack {
                 if let title { Text(title) }
@@ -815,17 +848,22 @@ struct GainSlider: View {
             Slider(value: Binding(get: { dB }, set: { onChange(($0 * 2).rounded() / 2) }), in: Gain.floorDB...Gain.ceilingDB,
                    onEditingChanged: { if !$0 { model.endEditing() } })
                 .controlSize(.small)
-                .onTapGesture(count: 2) { onChange(0) }
+                .onTapGesture(count: 2) { reset() }
                 .overlay {
                     // The slider handles its own clicks, so while a modifier is down a clear layer takes them.
                     if resetArmed {
                         Color.clear
                             .contentShape(Rectangle())
-                            .onTapGesture { onChange(0) }
+                            .onTapGesture { reset() }
                     }
                 }
                 .onModifierKeysChanged(mask: [.option, .command]) { _, keys in resetArmed = !keys.isEmpty }
                 .help("Option-click or Command-click to reset to 0 dB")
         }
+    }
+
+    private func reset() {
+        onChange(0)
+        model.endEditing()
     }
 }

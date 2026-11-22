@@ -75,8 +75,8 @@ private struct ChannelStrip: View {
             PanKnob(strip: strip, title: title)
 
             HStack(alignment: .bottom, spacing: 6) {
-                VerticalFader(dB: node.gainDB, tint: tint, label: "\(title) level") { value in
-                    model.updateNode(node.id, "Change Level") { $0.gainDB = value }
+                VerticalFader(dB: node.gainDB, fader: AppModel.levelKey(node: node.id), tint: tint, label: "\(title) level") { value in
+                    model.moveLevel(node: node.id, to: value)
                 }
                 StripMeters(levels: strip.ports.map {
                     model.level(node.id, output: strip.role != .output, channel: $0.channel)
@@ -186,7 +186,8 @@ private struct PanKnob: View {
 
     var body: some View {
         VStack(spacing: 1) {
-            if strip.hasPan, let pan = Mixer.pan(strip.node, graph: model.graph) {
+            if strip.hasPan, let saved = Mixer.pan(strip.node, graph: model.graph) {
+                let pan = model.fader(AppModel.panKey(node: strip.node)).value ?? saved
                 Slider(value: Binding(get: { pan }, set: { model.setPan(($0 * 20).rounded() / 20, of: strip.node) }),
                        in: -1...1, onEditingChanged: { if !$0 { model.endEditing() } })
                     .controlSize(.mini)
@@ -213,6 +214,8 @@ private struct PanKnob: View {
 struct VerticalFader: View {
     @Environment(AppModel.self) private var model
     let dB: Double
+    /// What it moves (`AppModel.levelKey`): while it moves it shows that value, before the graph has it.
+    let fader: String
     let tint: Color
     let label: String
     let onChange: (Double) -> Void
@@ -221,6 +224,7 @@ struct VerticalFader: View {
     private static let range = Gain.floorDB...Gain.ceilingDB
 
     var body: some View {
+        let dB = model.fader(fader).value ?? dB
         GeometryReader { geometry in
             let height = max(geometry.size.height - 14, 1)
             let fraction = (min(max(dB, Self.range.lowerBound), Self.range.upperBound) - Self.range.lowerBound)
@@ -329,7 +333,8 @@ private struct MonitorSendControl: View {
     let title: String
 
     var body: some View {
-        let send = model.monitor?.send(node) ?? MonitorSend(node: node)
+        let saved = model.monitor?.send(node) ?? MonitorSend(node: node)
+        let send = moving(saved)
         VStack(spacing: 0) {
             HStack(spacing: 4) {
                 Button {
@@ -351,9 +356,9 @@ private struct MonitorSendControl: View {
                     .foregroundStyle(.secondary)
             }
             Slider(value: Binding(get: { send.gainDB }, set: { value in
-                var changed = send
+                var changed = saved
                 changed.gainDB = (value * 2).rounded() / 2
-                model.updateMonitor("Change Monitor Level") { $0.setSend(changed) }
+                model.moveMonitorSend(changed)
             }), in: Gain.floorDB...Gain.ceilingDB, onEditingChanged: { if !$0 { model.endEditing() } })
                 .controlSize(.mini)
                 .disabled(!send.isOn)
@@ -361,6 +366,14 @@ private struct MonitorSendControl: View {
                 .help("\(title)'s level in the monitor, before its fader and mute")
         }
         .frame(height: 34)
+    }
+
+    /// The send as it shows: with its level while its fader moves.
+    private func moving(_ saved: MonitorSend) -> MonitorSend {
+        guard let canvas = model.canvas, let dB = model.fader(AppModel.sendKey(canvas: canvas, node: node)).value else { return saved }
+        var send = saved
+        send.gainDB = dB
+        return send
     }
 }
 
@@ -433,8 +446,9 @@ private struct MonitorStrip: View {
             Text(" ").font(.system(size: 10)).frame(height: 32)
 
             HStack(alignment: .bottom, spacing: 6) {
-                VerticalFader(dB: monitor?.gainDB ?? 0, tint: tint, label: "Monitor level") { value in
-                    model.updateMonitor("Change Monitor Level") { $0.gainDB = value }
+                VerticalFader(dB: monitor?.gainDB ?? 0, fader: model.canvas.map { AppModel.monitorKey(canvas: $0) } ?? "",
+                              tint: tint, label: "Monitor level") { value in
+                    model.moveMonitorLevel(to: value)
                 }
                 StripMeters(levels: (0..<2).map { channel in
                     id.map { model.meters[PortKey(node: $0, isOutput: false, channel: channel)] ?? 0 } ?? 0

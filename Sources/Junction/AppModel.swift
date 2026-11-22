@@ -15,6 +15,12 @@ enum NodeRole: String, Codable {
     case source, output
 }
 
+/// A fader's value while it moves (see `AppModel.moveFader`); nil when it isn't moving.
+@MainActor @Observable
+final class FaderValue {
+    var value: Double?
+}
+
 /// The app's state: the graph (saved), what is on the system, the routing plan and how it runs.
 @MainActor @Observable
 final class AppModel {
@@ -131,6 +137,10 @@ final class AppModel {
     @ObservationIgnored private var restartTask: Task<Void, Never>?
     @ObservationIgnored private var lastCoreAudioRestart: Date?
     @ObservationIgnored private var saveTask: Task<Void, Never>?
+    /// Fader moves not in `graph` yet (see `moveFader`).
+    @ObservationIgnored private var faderMoves = FaderMoves()
+    @ObservationIgnored private var faderValues: [String: FaderValue] = [:]
+    @ObservationIgnored private var faderCommit: Task<Void, Never>?
     /// The parameters each Audio Unit effect had when its state was last read (see `refreshEffectStates`).
     @ObservationIgnored private var capturedParameters: [UUID: [String: Double]] = [:]
     /// Whether each plugin is installed, by component, and when that was last looked up.
@@ -264,6 +274,7 @@ final class AppModel {
         timers.forEach { $0.invalidate() }
         timers.removeAll()
         restartTask?.cancel()
+        commitFaders()  // before routing stops: writing them replans
         router?.stopAll()
         saveNow()
         helper?.goodbye()  // the helper stops routing unless it should keep going
@@ -273,7 +284,7 @@ final class AppModel {
 
     private func startRoutingInProcess() {
         router = Router { statuses in
-            Task { @MainActor in AppModel.shared.statuses = statuses }
+            Task { @MainActor in AppModel.shared.adoptStatuses(statuses) }
         }
         router?.observeEffectStates { effect, state in
             Task { @MainActor in AppModel.shared.adoptEffectState(effect, state) }
@@ -307,7 +318,7 @@ final class AppModel {
             Self.log.notice("Connected to \(state.processName, privacy: .public) (process \(state.processID))")
             refreshPermissions()
         case .notice(.statuses(let fresh)):
-            statuses = fresh
+            adoptStatuses(fresh)
         case .notice(.meters(let fresh)):
             for (key, value) in fresh { helperMeters[key] = max(helperMeters[key] ?? 0, value) }
         case .notice(.events(let logged)):
@@ -419,9 +430,16 @@ final class AppModel {
         if changed { graph = updated }
     }
 
+    /// The router reports after every change, mostly with nothing new: assigning the same statuses would still redraw
+    /// every view that shows them.
+    private func adoptStatuses(_ fresh: [UUID: SinkStatus]) {
+        if fresh != statuses { statuses = fresh }
+    }
+
     private func replan(force: Bool = false) {
-        helper?.send(graph: graph)  // the helper plans for itself; it gets every change (sent only when it differs)
-        let new = Planner.plan(graph, inventory: inventory)
+        let heard = heardGraph
+        helper?.send(graph: heard)  // the helper plans for itself; it gets every change (sent only when it differs)
+        let new = Planner.plan(heard, inventory: inventory)
         guard force || new != plan else { return }
         plan = new
         router?.apply(new)
@@ -1148,8 +1166,114 @@ final class AppModel {
         return changed
     }
 
-    /// A drag or a fader was let go: the next change is a new undo step.
-    func endEditing() { history.endCoalescing() }
+    /// A drag or a fader was let go: a fader's move lands in the graph, and the next change is a new undo step.
+    func endEditing() {
+        commitFaders()
+        history.endCoalescing()
+    }
+
+    // MARK: Faders
+
+    /// Moves a fader (a level, pan, monitor send or effect setting) without changing `graph` yet: `value` shows at once
+    /// in the controls that read `fader(key)`, and the change is heard at once (the router and the helper get the graph
+    /// with it). `graph` changes once, as one undo step, when the fader is let go (`endEditing`). Changing `graph`
+    /// redraws most of the window, which is too slow to do for every step of a drag.
+    func moveFader(_ key: String, _ name: String, value: Double, undoable: Bool = true,
+                   _ change: @escaping (inout Graph) -> Void) {
+        faderMoves.record(key, name, undoable: undoable, change)
+        fader(key).value = value
+        let heard = heardGraph
+        helper?.send(graph: heard)
+        router?.apply(Planner.plan(heard, inventory: inventory))
+        if heard.virtualDevices != graph.virtualDevices { publishControls(heard.virtualDevices) }
+        // A fader whose view went away mid-drag is never let go, and a MIDI controller never is: their moves land in
+        // the graph once they rest.
+        faderCommit?.cancel()
+        faderCommit = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled else { return }
+            self?.commitFaders()
+        }
+    }
+
+    /// The value a fader shows while it moves (nil otherwise), observed on its own so only that fader redraws.
+    func fader(_ key: String) -> FaderValue {
+        if let value = faderValues[key] { return value }
+        let value = FaderValue()
+        faderValues[key] = value
+        return value
+    }
+
+    /// The graph as it is heard: `graph` with the faders that are moving.
+    private var heardGraph: Graph { faderMoves.isEmpty ? graph : faderMoves.applied(to: graph) }
+
+    /// Writes the faders' moves to the graph: MIDI's directly, the others as one undo step.
+    private func commitFaders() {
+        faderCommit?.cancel()
+        faderCommit = nil
+        let moves = faderMoves.take()
+        guard !moves.isEmpty else { return }
+        let silent = moves.filter { !$0.undoable }
+        if !silent.isEmpty {
+            var updated = graph
+            for move in silent { move.change(&updated) }
+            if updated != graph { graph = updated }
+        }
+        let undoable = moves.filter(\.undoable)
+        if let last = undoable.last {
+            edit(last.name) { graph in
+                for move in undoable { move.change(&graph) }
+            }
+        }
+        replan()  // in case nothing changed in `graph` (the fader went back where it started)
+        for move in moves { faderValues[move.key]?.value = nil }
+    }
+
+    // The faders: keys name what they move, so a second view of the same control (canvas and mixer) shows it moving.
+
+    static func levelKey(node: UUID) -> String { "level \(node)" }
+    static func levelKey(cable: UUID) -> String { "cable \(cable)" }
+    static func panKey(node: UUID) -> String { "pan \(node)" }
+    static func monitorKey(canvas: UUID) -> String { "monitor \(canvas)" }
+    static func sendKey(canvas: UUID, node: UUID) -> String { "send \(canvas) \(node)" }
+    static func effectKey(_ effect: UUID, _ parameter: EffectParameter) -> String { "effect \(effect) \(parameter.id)" }
+    static func volumeKey(device: UUID, input: Bool) -> String { "volume \(device) \(input ? "in" : "out")" }
+
+    func moveLevel(node id: UUID, to dB: Double) {
+        moveFader(Self.levelKey(node: id), "Change Level", value: dB) { graph in
+            guard let index = graph.nodes.firstIndex(where: { $0.id == id }) else { return }
+            graph.nodes[index].gainDB = dB
+        }
+    }
+
+    /// Moves a virtual device's volume as apps see it (see `moveFader`).
+    func moveVolume(device id: UUID, input: Bool, to volume: Double) {
+        moveFader(Self.volumeKey(device: id, input: input), "Change Volume", value: volume) { graph in
+            guard let index = graph.virtualDevices.firstIndex(where: { $0.id == id }) else { return }
+            if input { graph.virtualDevices[index].inputVolume = volume } else { graph.virtualDevices[index].outputVolume = volume }
+        }
+    }
+
+    /// A volume fader moving: the driver gets the volumes at once, in order, and they win over what the driver reports
+    /// for a moment (see `reconcileControls`).
+    private func publishControls(_ devices: [VirtualDevice]) {
+        guard !isDemo, inventory.driver.isInstalled else { return }
+        let until = Date().addingTimeInterval(3)
+        for device in devices {
+            guard let saved = graph.virtualDevice(device.id), !Self.sameControls(device, saved) else { continue }
+            assertControlsUntil[device.id] = until
+        }
+        Self.controlsQueue.async { try? DriverClient.publish(devices) }
+    }
+
+    private nonisolated static let controlsQueue = DispatchQueue(label: "local.junction.controls")
+
+    func moveLevel(cable id: UUID, to dB: Double, undoable: Bool = true) {
+        moveFader(Self.levelKey(cable: id), "Change Level", value: dB, undoable: undoable) { graph in
+            guard let index = graph.cables.firstIndex(where: { $0.id == id }) else { return }
+            graph.cables[index].gainDB = dB
+        }
+    }
 
     var canUndo: Bool { _ = historyVersion; return history.canUndo }
     var canRedo: Bool { _ = historyVersion; return history.canRedo }
@@ -1220,9 +1344,10 @@ final class AppModel {
 
     /// A parameter while its slider moves (one undo step per drag, see `endEditing`).
     func setEffectParameter(_ effect: UUID, in node: UUID, _ parameter: EffectParameter, _ value: Double) {
-        updateNode(node, "Change \(parameter.name)") { node in
-            guard let index = node.effects.firstIndex(where: { $0.id == effect }) else { return }
-            node.effects[index].set(parameter, value)
+        moveFader(Self.effectKey(effect, parameter), "Change \(parameter.name)", value: value) { graph in
+            guard let nodeIndex = graph.nodes.firstIndex(where: { $0.id == node }),
+                  let index = graph.nodes[nodeIndex].effects.firstIndex(where: { $0.id == effect }) else { return }
+            graph.nodes[nodeIndex].effects[index].set(parameter, value)
         }
     }
 
@@ -1609,7 +1734,7 @@ final class AppModel {
 
     /// Messages from a controller while routing runs here.
     private func receiveMIDI(_ messages: [MIDIMessage], from source: String?) {
-        var working = graph
+        var working = heardGraph
         var actions: [MIDIAction] = []
         for message in messages {
             for action in midiControl.handle(message, from: source, graph: working)
@@ -1628,6 +1753,8 @@ final class AppModel {
         for action in actions {
             if case .learned(let mapping) = action {
                 learned.append(mapping)
+            } else if case .cableLevel(let id, let dB) = action {
+                moveLevel(cable: id, to: dB, undoable: false)  // a controller's fader moves like one on screen
             } else {
                 action.apply(to: &updated, inventory: inventory)
                 if log, case .scene(let id) = action, let scene = graph.scenes.first(where: { $0.id == id }) {
@@ -1665,7 +1792,23 @@ final class AppModel {
 
     /// Pans a strip by changing its cables' levels (one undo step per drag).
     func setPan(_ pan: Double, of node: UUID) {
-        edit("Change Pan", coalescing: "pan \(node)") { Mixer.setPan(pan, of: node, in: &$0) }
+        moveFader(Self.panKey(node: node), "Change Pan", value: pan) { Mixer.setPan(pan, of: node, in: &$0) }
+    }
+
+    /// Moves the shown canvas's monitor level (see `moveFader`).
+    func moveMonitorLevel(to dB: Double) {
+        guard let canvas else { return }
+        moveFader(Self.monitorKey(canvas: canvas), "Change Monitor Level", value: dB) { graph in
+            graph.updateMonitor(for: canvas) { $0.gainDB = dB }
+        }
+    }
+
+    /// Moves a strip's level in the shown canvas's monitor (see `moveFader`).
+    func moveMonitorSend(_ send: MonitorSend) {
+        guard let canvas else { return }
+        moveFader(Self.sendKey(canvas: canvas, node: send.node), "Change Monitor Level", value: send.gainDB) { graph in
+            graph.updateMonitor(for: canvas) { $0.setSend(send) }
+        }
     }
 
     /// Changes the shown canvas's monitor as one undo step (several in a row with the same name, as a fader drag).

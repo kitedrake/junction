@@ -345,3 +345,46 @@ public final class EditHistory {
         if grouping { undoManager.endUndoGrouping() }
     }
 }
+
+/// Fader moves not written to the graph yet: while a fader moves, the app plays and shows its value at once and writes
+/// the graph only when it is let go, because changing the graph redraws most of the window. Keeps the latest move of
+/// each fader, in the order the faders started moving.
+public struct FaderMoves {
+    public struct Move {
+        /// Which fader (a second move of the same fader replaces the first).
+        public let key: String
+        /// The undo step's name.
+        public let name: String
+        /// A move from a MIDI controller isn't an undo step: the controller still shows where it is.
+        public let undoable: Bool
+        public let change: (inout Graph) -> Void
+    }
+
+    public private(set) var moves: [Move] = []
+
+    public init() {}
+
+    public var isEmpty: Bool { moves.isEmpty }
+
+    public mutating func record(_ key: String, _ name: String, undoable: Bool = true, _ change: @escaping (inout Graph) -> Void) {
+        let move = Move(key: key, name: name, undoable: undoable, change: change)
+        if let index = moves.firstIndex(where: { $0.key == key }) {
+            moves[index] = move
+        } else {
+            moves.append(move)
+        }
+    }
+
+    /// The graph as it is heard: `graph` with every move.
+    public func applied(to graph: Graph) -> Graph {
+        var heard = graph
+        for move in moves { move.change(&heard) }
+        return heard
+    }
+
+    /// Hands over the moves to write them to the graph, and forgets them.
+    public mutating func take() -> [Move] {
+        defer { moves = [] }
+        return moves
+    }
+}

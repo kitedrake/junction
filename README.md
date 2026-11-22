@@ -342,6 +342,12 @@ canvas's own (using the ID of the monitor), fed by copies of the cables into the
 without the sources' levels, mutes or effects; it never plays into one of Junction's devices (`Rules.monitorProblem`,
 also checked by the planner while Default Output points at one), so it can't close a loop.
 
+Faders (levels, pan, monitor sends, effect settings, device volumes, and MIDI controllers' levels) don't change the
+graph while they move: changing it redraws most of the window, about 100 ms, which capped a fader at about ten steps a
+second. `AppModel.moveFader` keeps each move in `FaderMoves`, sends the router and the helper the graph with the moves
+applied, and shows the value in the controls reading `AppModel.fader(key)`. The graph changes once when the fader is
+let go (`endEditing`, one undo step; a MIDI controller's moves aren't undo steps), or after a second without a move.
+
 ## Development
 
 ```sh
