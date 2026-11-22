@@ -139,8 +139,8 @@ enum Demo {
                                                             monitorID: running],
                            meters: meters)
         model.selection = .node(system.id)
-        // Settings as a released build shows them before the driver installer is allowed: crash reports on.
-        model.setDemoDriverInstaller(.requiresApproval, offersCrashReports: true)
+        // Settings as a standard release build shows them (no helper, no driver installer), with crash reports on.
+        model.setDemoDriverInstaller(nil, offersCrashReports: true)
         model.setDemoMIDI(learning: nil, sources: [midiController])
         EventLog.shared.add(.info, "Stream Mix: started. 4 cables, System Audio leaves out 3 processes, buffer 512 frames, about 12 ms")
         EventLog.shared.add(.error, "AirPods Pro: Couldn't combine the devices (the device went away). Attempt 1; trying again in 2 s.")

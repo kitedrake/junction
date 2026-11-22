@@ -80,7 +80,7 @@ struct MIDISection: View {
         } header: {
             Text("MIDI")
         } footer: {
-            Text("Controls work wherever routing runs, also after Junction quits when routing keeps going. A knob or fader takes over a level once it reaches it, so the level doesn't jump. Deleting what a control drives removes its mapping.")
+            Text("\(RoutingHelper.buildUsesHelper ? "Controls work wherever routing runs, also after Junction quits when routing keeps going." : "Controls work while Junction routes.") A knob or fader takes over a level once it reaches it, so the level doesn't jump. Deleting what a control drives removes its mapping.")
         }
     }
 }

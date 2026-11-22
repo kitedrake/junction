@@ -524,15 +524,15 @@ is.
 - The menu bar icon also switches scenes and each virtual device on or off, and offers driver updates.
 - **Junction › Settings…** (also in the menu bar icon's menu) has **Open at login**, so routing is ready after a
   restart (Junction then starts in the menu bar, without its window), and **Show in Dock**: turn it off to keep
-  Junction in the menu bar only. It also shows whether the driver installs without a password (section 2), turns
-  crash reports on (section 17) and uninstalls Junction (section 16). Its **MIDI** section lists your MIDI
-  mappings (section 12).
+  Junction in the menu bar only. It also turns crash reports on (section 17) and uninstalls Junction (section 16); in
+  a Junction built with its driver installer, it shows whether the driver installs without a password (section 2). Its
+  **MIDI** section lists your MIDI mappings (section 12).
 
 ### Routing in the background
 
-The standard Junction routes by itself: Settings shows **Routing runs inside Junction**, and routing stops when it
-quits. A Junction built for it (not yet the standard one) routes in **Junction Helper** instead, a small helper inside
-Junction with no Dock icon or window. Settings then shows **Routing runs in the background**. You don't need to do
+The standard Junction routes by itself, and routing stops when it quits. A Junction built for it (not yet the
+standard one) routes in **Junction Helper** instead, a small helper inside Junction with no Dock icon or window.
+Settings then shows **Routing runs in the background**. You don't need to do
 anything: Junction starts the helper when it needs it and sends it every change you make.
 
 - **Keep routing after quitting Junction** (Settings): with it on, your devices keep their sound after you quit
@@ -598,8 +598,8 @@ like Junction), Junction says why and installs nothing; download Junction again.
 ### Uninstall Junction
 
 **Junction › Settings… › Uninstall Junction…** removes everything Junction added to your Mac: the audio driver (your
-virtual devices disappear from all apps, and sound stops for a moment), Junction Helper, the driver installer and the
-login item. Choose:
+virtual devices disappear from all apps, and sound stops for a moment) and the login item, and Junction Helper and the
+driver installer in a Junction built with them. Choose:
 
 - **Uninstall and Keep My Setup**: your devices, canvases and scenes stay, ready if you install Junction again.
 - **Uninstall and Remove My Setup**: they go too, with Junction's settings.

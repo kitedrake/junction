@@ -16,8 +16,8 @@ enum DockIcon {
     }
 }
 
-/// Junction › Settings…: where routing runs, MIDI controls, start at login, the Dock icon, driver installs, crash
-/// reports and uninstalling.
+/// Junction › Settings…: where routing runs and how the driver installs (only in builds made for Junction Helper or
+/// Junction Driver Installer), MIDI controls, start at login, the Dock icon, crash reports and uninstalling.
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @AppStorage(DockIcon.key) private var showsDockIcon = true
@@ -27,7 +27,9 @@ struct SettingsView: View {
     var body: some View {
         @Bindable var model = model
         Form {
-            RoutingSection(keepRouting: $model.keepRoutingAfterQuit)
+            if RoutingHelper.buildUsesHelper {
+                RoutingSection(keepRouting: $model.keepRoutingAfterQuit)
+            }
             MIDISection()
             Section {
                 Toggle("Open at login", isOn: Binding(
@@ -53,13 +55,16 @@ struct SettingsView: View {
             } footer: {
                 Text("Junction keeps routing from the menu bar when its window is closed. Without the Dock icon, open the window and these settings from the menu bar icon.")
             }
-            DriverInstallerSection()
+            if model.driverInstaller != nil {
+                DriverInstallerSection()
+            }
             Section {
                 Toggle("Offer to send crash reports", isOn: $model.offersCrashReports)
             } footer: {
+                let crashed = RoutingHelper.buildUsesHelper ? "After Junction or Junction Helper crashes" : "After Junction crashes"
                 Text(CrashReporting.destination != nil || model.isDemo
-                     ? "After Junction or Junction Helper crashes, Junction offers a report the next time it opens: its diagnostic report (versions, your audio devices and apps, your setup, recent routing events) and the crash log macOS wrote. You read all of it first; nothing is sent unless you click Send Report."
-                     : "After Junction or Junction Helper crashes, Junction offers a report the next time it opens: its diagnostic report (versions, your audio devices and apps, your setup, recent routing events) and the crash log macOS wrote. This build has no address to send it to: copy it into a bug report yourself.")
+                     ? "\(crashed), Junction offers a report the next time it opens: its diagnostic report (versions, your audio devices and apps, your setup, recent routing events) and the crash log macOS wrote. You read all of it first; nothing is sent unless you click Send Report."
+                     : "\(crashed), Junction offers a report the next time it opens: its diagnostic report (versions, your audio devices and apps, your setup, recent routing events) and the crash log macOS wrote. This build has no address to send it to: copy it into a bug report yourself.")
             }
             UninstallSection()
         }
@@ -82,14 +87,14 @@ struct SettingsView: View {
     }
 }
 
-/// Where routing runs: in Junction Helper, in the background (builds made for it), or inside Junction.
+/// Where routing runs, in builds made for Junction Helper: in the helper, in the background, or inside Junction when the
+/// helper is turned off.
 private struct RoutingSection: View {
     @Environment(AppModel.self) private var model
     @Binding var keepRouting: Bool
 
     var body: some View {
-        // Snapshot mode shows what a build with the helper shows.
-        let background = model.placement.usesHelper || model.isDemo
+        let background = model.placement.usesHelper
         Section {
             LabeledContent {
                 Text(background ? "Junction Helper" : "Junction").foregroundStyle(.secondary)
@@ -124,7 +129,8 @@ private struct RoutingSection: View {
     }
 }
 
-/// Whether Install Driver… needs a password: Junction Driver Installer installs without one once the user approves it.
+/// Whether Install Driver… needs a password, in builds made for Junction Driver Installer: it installs without one once
+/// the user approves it.
 private struct DriverInstallerSection: View {
     @Environment(AppModel.self) private var model
 
@@ -175,7 +181,9 @@ private struct UninstallSection: View {
                     .disabled(model.isUninstalling || model.isInstallingDriver)
             }
         } footer: {
-            Text("Removes the audio driver (your virtual devices disappear from every app), Junction Helper, the driver installer and the login item, then quits. Then move Junction to the Bin.")
+            Text(RoutingHelper.buildUsesHelper || DriverInstaller.buildUsesDaemon
+                 ? "Removes the audio driver (your virtual devices disappear from every app), Junction Helper, the driver installer and the login item, then quits. Then move Junction to the Bin."
+                 : "Removes the audio driver (your virtual devices disappear from every app) and the login item, then quits. Then move Junction to the Bin.")
         }
         .confirmationDialog("Uninstall Junction?", isPresented: $confirming) {
             Button("Uninstall and Keep My Setup", role: .destructive) { model.uninstallJunction(removeSettings: false) }
