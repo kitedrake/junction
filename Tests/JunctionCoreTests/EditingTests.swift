@@ -235,6 +235,28 @@ final class EditingTests: XCTestCase {
         XCTAssertEqual(again, graph, "tidying a tidy canvas changes nothing")
     }
 
+    func testEffectLabelsMakeANodeTallerAndTidyUpLeavesRoomForThem() throws {
+        var (graph, system, mic, _) = sample()
+        let canvas = Demo.streamMix.id
+        let info = NodeInfo(graph: graph, inventory: Demo.inventory)
+        let plain = CanvasMetrics.height(system, info.ports(system))
+        let index = try XCTUnwrap(graph.nodes.firstIndex { $0.id == system.id })
+        graph.nodes[index].effects = [Effect(.highPass), Effect(.gate)]
+        let withEffects = graph.nodes[index]
+        XCTAssertEqual(CanvasMetrics.height(withEffects, info.ports(withEffects)), plain + CanvasMetrics.effectsRow)
+        XCTAssertEqual(CanvasMetrics.frame(withEffects, info.ports(withEffects)).height, plain + CanvasMetrics.effectsRow)
+        let micPorts = info.ports(mic)
+        XCTAssertEqual(CanvasMetrics.height(mic, micPorts),
+                       CanvasMetrics.header + CanvasMetrics.topPadding + Double(CanvasMetrics.rows(micPorts)) * CanvasMetrics.row
+                           + CanvasMetrics.bottomPadding, "a node without effects has no label row")
+
+        Editing.tidyUp(&graph, canvas: canvas, inventory: Demo.inventory)
+        let tidied = try XCTUnwrap(graph.nodes.first { $0.id == system.id })
+        let below = try XCTUnwrap(graph.nodes.first { $0.id == mic.id })
+        XCTAssertEqual(below.y, tidied.y + plain + CanvasMetrics.effectsRow + CanvasMetrics.gap,
+                       "the next node in the column starts below the labels")
+    }
+
     func testSelection() {
         let a = UUID(), b = UUID(), c = UUID()
         XCTAssertNil(CanvasSelection.of([]))

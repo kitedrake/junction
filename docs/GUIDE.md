@@ -291,6 +291,11 @@ levels after the effects (the meters on the canvas do too). Some effects, such a
 little delay: the box says how much, and the delay under **Delay** includes it. Effects are saved with the setup and
 with scenes, and they keep working when Junction routes in the background.
 
+On the canvas, an item with effects lists them under its channels, in order: a green dot when an effect is on, struck
+through when it's bypassed. Click one to bypass it or turn it back on. When they don't all fit, the names get shorter,
+then the last ones show as **+2** (or the item says **4 effects**): click that to select the item and see them all in
+the inspector.
+
 Under each effect the box shows what it costs while it runs: how much of the Mac's processor it uses ("CPU 1.2 %"),
 the delay it adds, and "own process" for a plugin macOS runs on its own.
 

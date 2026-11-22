@@ -9,11 +9,12 @@ enum NodeLayout {
     static let row = CGFloat(CanvasMetrics.row)
     static let topPadding = CGFloat(CanvasMetrics.topPadding)
     static let bottomPadding = CGFloat(CanvasMetrics.bottomPadding)
+    static let effectsRow = CGFloat(CanvasMetrics.effectsRow)
     static let portRadius: CGFloat = 6
 
     static func rows(_ ports: PortCounts) -> Int { CanvasMetrics.rows(ports) }
 
-    static func height(for ports: PortCounts) -> CGFloat { CGFloat(CanvasMetrics.height(for: ports)) }
+    static func height(_ node: Node, _ ports: PortCounts) -> CGFloat { CGFloat(CanvasMetrics.height(node, ports)) }
 
     static func origin(_ node: Node) -> CGPoint { CGPoint(x: node.x, y: node.y) }
 
@@ -817,8 +818,14 @@ struct NodeCard: View {
             }
             .padding(.top, NodeLayout.topPadding)
             .padding(.bottom, NodeLayout.bottomPadding)
+
+            if !node.effects.isEmpty {
+                EffectLabels(node: node)
+                    .padding(.horizontal, 12)
+                    .frame(height: NodeLayout.effectsRow, alignment: .top)
+            }
         }
-        .frame(width: NodeLayout.width, height: NodeLayout.height(for: ports), alignment: .top)
+        .frame(width: NodeLayout.width, height: NodeLayout.height(node, ports), alignment: .top)
         .glassEffect(.regular.tint(tint.opacity(0.06)), in: .rect(cornerRadius: 16))
         .overlay {
             RoundedRectangle(cornerRadius: 16)
@@ -911,7 +918,7 @@ struct NodeCard: View {
                     .position(local(NodeLayout.busInputPoint(node)))
             }
         }
-        .frame(width: NodeLayout.width, height: NodeLayout.height(for: ports), alignment: .topLeading)
+        .frame(width: NodeLayout.width, height: NodeLayout.height(node, ports), alignment: .topLeading)
     }
 
     /// A channel dot that the keyboard and VoiceOver can reach: Return (or VoiceOver's action) opens a list of the
@@ -974,6 +981,77 @@ struct NodeCard: View {
                 wire = nil
                 onWireEnd(finished)
             }
+    }
+}
+
+/// A node's effects as small labels under its channels, in chain order: a green dot when on, struck through when
+/// bypassed. Clicking one bypasses it or turns it back on (the inspector edits their settings). When they don't all fit,
+/// short titles are used, then the first ones and "+2", then "4 effects"; those select the node to show the rest.
+struct EffectLabels: View {
+    @Environment(AppModel.self) private var model
+    let node: Node
+
+    var body: some View {
+        let effects = node.effects
+        ViewThatFits(in: .horizontal) {
+            row(effects, short: false)
+            row(effects, short: true)
+            if effects.count > 2 { row(Array(effects.prefix(2)), short: true, more: effects.count - 2) }
+            if effects.count > 1 { row(Array(effects.prefix(1)), short: true, more: effects.count - 1) }
+            summary(effects)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func row(_ shown: [Effect], short: Bool, more: Int = 0) -> some View {
+        HStack(spacing: 4) {
+            ForEach(shown) { chip($0, short: short) }
+            if more > 0 {
+                Button { model.selection = .node(node.id) } label: { capsule(Text("+\(more)")) }
+                    .buttonStyle(.plain)
+                    .help(node.effects.suffix(more).map(\.title).joined(separator: ", ") + ": select the item to see them")
+                    .accessibilityLabel("\(more) more effects")
+            }
+        }
+        .fixedSize()
+    }
+
+    private func summary(_ effects: [Effect]) -> some View {
+        Button { model.selection = .node(node.id) } label: {
+            capsule(Text(effects.count == 1 ? "1 effect" : "\(effects.count) effects"))
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .help(effects.map(\.title).joined(separator: ", ") + ": select the item to see them")
+    }
+
+    private func chip(_ effect: Effect, short: Bool) -> some View {
+        Button {
+            model.setEffectBypass(effect.id, in: node.id, !effect.bypass)
+        } label: {
+            capsule(HStack(spacing: 4) {
+                Circle().fill(effect.bypass ? Color.secondary.opacity(0.4) : .green).frame(width: 5, height: 5)
+                Text(short ? effect.shortTitle : effect.title)
+                    .strikethrough(effect.bypass)
+                    .lineLimit(1)
+                    .frame(maxWidth: 96)
+            }, dimmed: effect.bypass)
+        }
+        .buttonStyle(.plain)
+        .help(effect.bypass ? "\(effect.title) is bypassed: click to turn it on" : "Click to bypass \(effect.title)")
+        .accessibilityLabel(effect.title)
+        .accessibilityValue(effect.bypass ? "Bypassed" : "On")
+        .accessibilityHint(effect.bypass ? "Turns it on" : "Bypasses it")
+    }
+
+    private func capsule(_ content: some View, dimmed: Bool = false) -> some View {
+        content
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(dimmed ? .tertiary : .secondary)
+            .padding(.horizontal, 7)
+            .frame(height: 18)
+            .background(Capsule().fill(.quaternary.opacity(0.6)))
+            .contentShape(Capsule())
     }
 }
 

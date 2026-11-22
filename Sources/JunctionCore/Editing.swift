@@ -58,6 +58,8 @@ public enum CanvasMetrics {
     public static let row = 24.0
     public static let topPadding = 6.0
     public static let bottomPadding = 10.0
+    /// The row of effect labels under the channels, on nodes that have effects.
+    public static let effectsRow = 24.0
     /// Space left between nodes stacked in a column.
     public static let gap = 30.0
     /// Where the first node of a column starts.
@@ -65,12 +67,12 @@ public enum CanvasMetrics {
 
     public static func rows(_ ports: PortCounts) -> Int { max(1, max(ports.inputs, ports.outputs)) }
 
-    public static func height(for ports: PortCounts) -> Double {
-        header + topPadding + Double(rows(ports)) * row + bottomPadding
+    public static func height(_ node: Node, _ ports: PortCounts) -> Double {
+        header + topPadding + Double(rows(ports)) * row + bottomPadding + (node.effects.isEmpty ? 0 : effectsRow)
     }
 
     public static func frame(_ node: Node, _ ports: PortCounts) -> CGRect {
-        CGRect(x: node.x, y: node.y, width: nodeWidth, height: height(for: ports))
+        CGRect(x: node.x, y: node.y, width: nodeWidth, height: height(node, ports))
     }
 }
 
@@ -252,12 +254,12 @@ public enum Editing {
             var y = CanvasMetrics.top
             for node in column.sorted(by: { ($0.y, $0.x) < ($1.y, $1.x) }) {
                 positions[node.id] = (x, y)
-                y += CanvasMetrics.height(for: info.ports(node)) + CanvasMetrics.gap
+                y += CanvasMetrics.height(node, info.ports(node)) + CanvasMetrics.gap
             }
             return y - CanvasMetrics.gap - CanvasMetrics.top
         }
         let tallest = max(stack(sources, x: CanvasColumn.sources), stack(outputs, x: CanvasColumn.outputs))
-        let deviceHeight = CanvasMetrics.height(for: info.ports(device))
+        let deviceHeight = CanvasMetrics.height(device, info.ports(device))
         positions[device.id] = (CanvasColumn.device, CanvasMetrics.top + max(0, (tallest - deviceHeight) / 2).rounded())
         for index in graph.nodes.indices {
             guard let (x, y) = positions[graph.nodes[index].id] else { continue }

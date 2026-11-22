@@ -26,7 +26,8 @@ without your voice chat, step by step.
   receives. Gain, pan, mono and a noise gate are built in; a high-pass filter, a three-band equalizer, a compressor
   and a limiter are Apple's Audio Units. Each effect can be bypassed and moved up or down; the inspector shows the
   levels after the chain and the delay it adds (also counted in the destination's delay), and each effect's CPU share
-  and delay while it runs.
+  and delay while it runs. On the canvas, a node with effects lists them in a row under its channels; clicking one
+  bypasses it or turns it back on.
 - **Audio Unit plugins**: **Add Effect › Audio Unit…** lists every effect Audio Unit installed on the Mac by maker,
   with a search field. A plugin opens its own window (**Open Window**) in the process that routes, runs in a process
   of its own where macOS allows it, and is saved with the setup, settings made in its window included. One that keeps

@@ -1127,7 +1127,7 @@ final class AppModel {
     private func freeSpot(role: NodeRole, canvas: UUID) -> CGPoint {
         let column = role == .source ? CanvasColumn.sources : CanvasColumn.outputs
         let bottom = graph.nodes(on: canvas).filter { abs($0.x - column) < 150 }
-            .map { $0.y + Double(NodeLayout.height(for: info.ports($0))) }.max() ?? 20
+            .map { $0.y + Double(NodeLayout.height($0, info.ports($0))) }.max() ?? 20
         return CGPoint(x: column, y: bottom + 30)
     }
 

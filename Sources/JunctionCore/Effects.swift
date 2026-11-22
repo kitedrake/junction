@@ -73,6 +73,9 @@ public struct Effect: Codable, Identifiable, Hashable, Sendable {
     /// "Noise Gate", "Space Reverb".
     public var title: String { kind?.title ?? name ?? (isPlugin ? "\(manufacturer) \(subtype)" : "Unknown Effect") }
 
+    /// "Gate", "Space Reverb": for labels where space is short (a plugin keeps its name).
+    public var shortTitle: String { kind?.shortTitle ?? title }
+
     /// A parameter's value: as set, or the effect's default.
     public func value(_ parameter: EffectParameter) -> Double {
         parameters[String(parameter.id)] ?? parameter.defaultValue
@@ -101,6 +104,20 @@ public enum EffectKind: String, CaseIterable, Sendable {
         case .highPass: "High-Pass Filter"
         case .equalizer: "Equalizer"
         case .dynamics: "Compressor"
+        case .limiter: "Limiter"
+        }
+    }
+
+    /// The title in a word, for the labels on canvas nodes.
+    public var shortTitle: String {
+        switch self {
+        case .gain: "Gain"
+        case .pan: "Pan"
+        case .mono: "Mono"
+        case .gate: "Gate"
+        case .highPass: "High-Pass"
+        case .equalizer: "EQ"
+        case .dynamics: "Comp"
         case .limiter: "Limiter"
         }
     }
