@@ -25,6 +25,14 @@ public struct RoutingPlan: Equatable, Sendable {
     mutating func note(_ node: UUID, _ message: String) {
         if !(issues[node] ?? []).contains(message) { issues[node, default: []].append(message) }
     }
+
+    /// The sinks that use any of these devices: as their output, as a source in their aggregate or converted to their
+    /// rate.
+    public func sinks(using uids: Set<String>) -> Set<UUID> {
+        Set(sinks.filter { sink in
+            uids.contains(sink.sinkUID) || (sink.subDevices + sink.converted).contains { uids.contains($0.uid) }
+        }.map(\.sinkNode))
+    }
 }
 
 public struct SinkPlan: Equatable, Sendable, Identifiable {

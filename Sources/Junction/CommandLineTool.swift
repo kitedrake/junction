@@ -411,6 +411,8 @@ enum CommandLineTool {
             func resetHealth() {}
             func processesChanged() {}
             func takeMeters() -> [PortKey: Float] { [:] }
+            func hold(_ sinks: Set<UUID>) {}
+            func resume(_ sinks: Set<UUID>) {}
         }
         let standIn = StandIn()
         let environment = RoutingService.Environment(readInventory: { inventory }, permission: { .allowed },

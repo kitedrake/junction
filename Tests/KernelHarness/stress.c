@@ -2,8 +2,9 @@
 // by test.sh: random buffer sizes on both sides, stalls of either side, odd buffer layouts and every pair of common
 // rates, through a renderer that mixes converted channels. Any out-of-bounds access stops the run; the output must
 // stay finite and bounded. Then effect chains are swapped in and out from one thread while another renders through
-// them: a chain freed too early is a use-after-free the address sanitizer reports. Last, a correction stage's settings
-// blocks are swapped the same way while it cross-fades between them.
+// them: a chain freed too early is a use-after-free the address sanitizer reports. Then a correction stage's settings
+// blocks are swapped the same way while it cross-fades between them. Last, calibration takes are started and stopped
+// from one thread while another runs the measurement IOProc with random buffer sizes, layouts and lost buffers.
 #include "JunctionKernel.h"
 
 #include <mach/mach_time.h>
@@ -12,6 +13,7 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 static uint64_t state = 0x9E3779B97F4A7C15ull;
 static uint32_t Random(uint32_t below) {
@@ -222,6 +224,84 @@ static void StressCorrections(void) {
     jk_renderer_destroy(run.renderer);
 }
 
+// MARK: Measurement takes while IO runs
+
+typedef struct {
+    JKMeasure *measure;
+    _Atomic int stop;
+    float peak;
+    int finite;
+} MeasureRun;
+
+static void *MeasureLoop(void *argument) {
+    MeasureRun *run = argument;
+    static float input[JK_MAX_FRAMES * 3], left[JK_MAX_FRAMES], right[JK_MAX_FRAMES];
+    uint64_t seed = 0xD1B54A32D192ED03ull;
+    double sampleTime = 0;
+    while (!atomic_load(&run->stop)) {
+        seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17;
+        uint32_t frames = 1 + (uint32_t)(seed % JK_MAX_FRAMES);
+        if (seed % 97 == 0) sampleTime += 64;  // a lost buffer
+        // The microphone (channel 2 of 3) counts frames, so a take can check it recorded them in order.
+        for (uint32_t i = 0; i < frames; i++) input[3 * i + 2] = (float)fmod(sampleTime + i, 1 << 20);
+        AudioBufferList in = {1, {{3, frames * 12, input}}};
+        struct { UInt32 count; AudioBuffer buffers[2]; } out = {2, {{1, frames * 4, left}, {1, frames * 4, right}}};
+        AudioTimeStamp time = {.mSampleTime = sampleTime, .mFlags = kAudioTimeStampSampleTimeValid};
+        jk_measure_ioproc(0, &time, &in, &time, (AudioBufferList *)&out, &time, run->measure);
+        for (uint32_t i = 0; i < frames; i++) {
+            if (!isfinite(left[i]) || !isfinite(right[i])) run->finite = 0;
+            if (fabsf(left[i]) > run->peak) run->peak = fabsf(left[i]);
+            if (fabsf(right[i]) > run->peak) run->peak = fabsf(right[i]);
+        }
+        sampleTime += frames;
+    }
+    return NULL;
+}
+
+static void StressMeasurement(void) {
+    enum { kCapacity = 48000 };
+    MeasureRun run = {.measure = jk_measure_create(2, kCapacity), .finite = 1};
+    CHECK(run.measure != NULL, "measurement created");
+    if (!run.measure) return;
+    CHECK(jk_measure_create(0, 0) == NULL, "a measurement needs room for a take");
+    static float signal[kCapacity];
+    for (int i = 0; i < kCapacity; i++) signal[i] = 0.9f * (float)sin(i * 0.01);
+    pthread_t thread;
+    pthread_create(&thread, NULL, MeasureLoop, &run);
+    int complete = 0, stopped = 0, inOrder = 1, refused = 0;
+    for (int take = 0; take < 300; take++) {
+        uint32_t frames = 1 + Random(kCapacity);
+        CHECK(jk_measure_start(run.measure, signal, kCapacity + 1, 0) == 0, "a take longer than the capacity is refused");
+        while (!jk_measure_start(run.measure, signal, frames, Random(3))) refused++;  // the last take is still fading
+        uint64_t dropouts = jk_measure_dropouts(run.measure);
+        if (Random(4) == 0) {
+            usleep(Random(2000));
+            jk_measure_stop(run.measure);
+            stopped++;
+            continue;
+        }
+        while (!jk_measure_is_done(run.measure)) usleep(50);
+        complete++;
+        CHECK(jk_measure_recorded(run.measure) == frames, "a done take recorded every frame");
+        if (jk_measure_dropouts(run.measure) != dropouts) continue;  // a lost buffer: the take is out of step
+        const float *recording = jk_measure_recording(run.measure);
+        for (uint32_t i = 1; i < frames; i++) {
+            float step = recording[i] - recording[i - 1];
+            if (step != 1 && step != 1 - (float)(1 << 20)) inOrder = 0;
+        }
+    }
+    jk_measure_stop(run.measure);
+    atomic_store(&run.stop, 1);
+    pthread_join(thread, NULL);
+    CHECK(inOrder, "takes without a lost buffer recorded the microphone in order");
+    CHECK(run.finite && run.peak <= 0.9f, "output is the signal or silence (peak %g)", run.peak);
+    CHECK(jk_measure_dropouts(run.measure) > 0, "lost buffers were noticed");
+    printf("ok   measurement: %d takes done, %d stopped, %llu cycles, %llu dropouts\n", complete, stopped,
+           (unsigned long long)jk_measure_cycles(run.measure), (unsigned long long)jk_measure_dropouts(run.measure));
+    (void)refused;
+    jk_measure_destroy(run.measure);
+}
+
 int main(void) {
     mach_timebase_info_data_t timebase;
     mach_timebase_info(&timebase);
@@ -296,6 +376,7 @@ int main(void) {
     free(sink);
     StressChains();
     StressCorrections();
+    StressMeasurement();
     printf(failures ? "Kernel stress test: %d failure(s).\n" : "Kernel stress test passed.\n", failures);
     return failures ? 1 : 0;
 }

@@ -1433,6 +1433,30 @@ final class AppModel {
         }
     }
 
+    // MARK: Measuring
+
+    /// A speaker measurement on real devices. It runs in this process (also when Junction Helper routes), so the
+    /// Microphone permission it needs is Junction's own: ask with `requestMicrophoneForMeasuring` first. The sinks
+    /// using the output or the microphone are held where routing runs, here or in the helper, until it finishes.
+    func makeMeasurement(_ configuration: MeasurementEngine.Configuration) -> MeasurementEngine {
+        let device = CoreAudioMeasurementDevice(outputUID: configuration.outputUID, outputName: configuration.outputName,
+                                                micUID: configuration.micUID, micName: configuration.micName,
+                                                micChannel: configuration.micChannel)
+        let routing: MeasurementRouting? = router ?? helper
+        return MeasurementEngine(configuration: configuration, plan: plan, device: device, routing: routing)
+    }
+
+    /// Asks macOS (the usual prompt, naming Junction) for this process's Microphone permission; `done` gets whether
+    /// it is allowed.
+    func requestMicrophoneForMeasuring(_ done: @escaping @Sendable (Bool) -> Void) {
+        guard !isDemo else { return done(false) }
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized: done(true)
+        case .notDetermined: AVCaptureDevice.requestAccess(for: .audio, completionHandler: done)
+        default: done(false)
+        }
+    }
+
     /// The delay a node's effects add where it runs (from the routing's status), or nil when it isn't running.
     func effectLatency(_ node: UUID) -> TimeInterval? {
         let values = statuses.values.compactMap { $0.effectLatencies?[node] }

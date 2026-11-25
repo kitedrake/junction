@@ -321,6 +321,49 @@ OSStatus jk_renderer_ioproc(AudioObjectID device, const AudioTimeStamp *_Nonnull
                             AudioBufferList *_Nonnull output, const AudioTimeStamp *_Nonnull outputTime,
                             void *_Nullable clientData);
 
+// MARK: Measurement
+
+typedef struct JKMeasure JKMeasure;
+
+/// Frames a cancelled take fades out over (within the next IO buffer).
+#define JK_MEASURE_FADE_FRAMES 128
+
+/// Plays a test signal on one output channel and records one microphone channel in step with it, for calibration.
+/// One IOProc runs it (the output device's, or a private aggregate's with the output device as its clock); a control
+/// thread starts and stops takes. `micChannel` counts the IOProc's input channels across its buffers. `capacity` is
+/// the longest take, in frames. Returns NULL if memory runs out or an argument is out of range.
+JKMeasure *_Nullable jk_measure_create(uint32_t micChannel, uint32_t capacity);
+/// Frees it. Only call once the IOProc no longer runs it.
+void jk_measure_destroy(JKMeasure *_Nonnull measure);
+/// Reads the microphone from `converter` (not owned; its channels, starting at `micChannel`) instead of the input
+/// buffers: for a microphone at another rate, whose own IOProc writes the converter. Only call before IO starts.
+void jk_measure_set_converter(JKMeasure *_Nonnull measure, JKConverter *_Nullable converter);
+
+/// Control thread: copies `frames` frames of `signal` to play on output channel `channel` and records as many frames
+/// from the next IO cycle on. Returns 0 (and does nothing) while a take is still playing or fading out, or when the
+/// take is longer than the capacity.
+int jk_measure_start(JKMeasure *_Nonnull measure, const float *_Nonnull signal, uint32_t frames, uint32_t channel);
+/// Control thread, any time: the take stops; the next IO buffer fades out within JK_MEASURE_FADE_FRAMES and is
+/// silent after that. Never blocks.
+void jk_measure_stop(JKMeasure *_Nonnull measure);
+/// After the IOProc has stopped for good: forgets a take that couldn't fade out (the device went away).
+void jk_measure_reset(JKMeasure *_Nonnull measure);
+/// Whether the latest take has recorded all its frames.
+int jk_measure_is_done(const JKMeasure *_Nonnull measure);
+/// Frames recorded so far in the latest take, and the recording (read it once the take is done).
+uint32_t jk_measure_recorded(const JKMeasure *_Nonnull measure);
+const float *_Nonnull jk_measure_recording(const JKMeasure *_Nonnull measure);
+/// IO cycles run so far, and those that came after a gap in the device's sample time (a lost buffer): a take with a
+/// gap is out of step and has to be done again.
+uint64_t jk_measure_cycles(const JKMeasure *_Nonnull measure);
+uint64_t jk_measure_dropouts(const JKMeasure *_Nonnull measure);
+
+/// The AudioDeviceIOProc. Pass the measurement as client data. Outputs silence on every channel but the take's.
+OSStatus jk_measure_ioproc(AudioObjectID device, const AudioTimeStamp *_Nonnull now,
+                           const AudioBufferList *_Nonnull input, const AudioTimeStamp *_Nonnull inputTime,
+                           AudioBufferList *_Nonnull output, const AudioTimeStamp *_Nonnull outputTime,
+                           void *_Nullable clientData);
+
 #ifdef __cplusplus
 }
 #endif

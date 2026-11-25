@@ -5,7 +5,8 @@ import os
 
 /// How one sink is doing.
 public struct SinkStatus: Codable, Equatable, Sendable {
-    public enum State: String, Codable, Equatable, Sendable { case running, failed }
+    /// `held`: stopped for now, while Junction measures a device the sink uses (see `Router.hold`).
+    public enum State: String, Codable, Equatable, Sendable { case running, failed, held }
     public var state: State
     public var message: String?
     /// While running: roughly how long audio takes from the sink's sources to the sink (seconds), and the buffer size
@@ -82,6 +83,10 @@ public final class Router: @unchecked Sendable {
     private var stallWatch = StallWatch()
     /// Told (on `queue`) a plugin's state after its window changed it.
     private var effectStateHandler: (@Sendable (UUID, Data) -> Void)?
+    /// Sinks stopped while a measurement uses their devices (`queue` only): plans keep them, but they stay down.
+    private var held: Set<UUID> = []
+    /// Builds a sink's taps, aggregate and IOProc: `SinkRunner.start`, or a stand-in that opens nothing in tests.
+    private let startSink: (SinkRunner, [HAL.AudioProcess]) throws -> Void
 
     struct Failure {
         var key: String
@@ -101,9 +106,19 @@ public final class Router: @unchecked Sendable {
     /// A sink that has run this long since its last failure starts again from the shortest retry delay.
     static let healthyAfter: TimeInterval = 30
 
-    public init(events: EventLog = .shared, onStatus: @escaping StatusHandler) {
+    public convenience init(events: EventLog = .shared, onStatus: @escaping StatusHandler) {
+        self.init(events: events, onStatus: onStatus) { runner, processes in
+            try runner.start(processes: processes, fadingIn: true)
+        }
+    }
+
+    /// `startSink` stands in for `SinkRunner.start` (tests); without `checksHealth` stalled sinks aren't rebuilt.
+    init(events: EventLog = .shared, onStatus: @escaping StatusHandler, checksHealth: Bool = true,
+         startSink: @escaping (SinkRunner, [HAL.AudioProcess]) throws -> Void) {
         self.events = events
         self.onStatus = onStatus
+        self.startSink = startSink
+        guard checksHealth else { return }
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + 2, repeating: 2, leeway: .milliseconds(200))
         timer.setEventHandler { [weak self] in self?.checkHealth() }
@@ -156,6 +171,41 @@ public final class Router: @unchecked Sendable {
         }
     }
 
+    /// Stops these sinks, fading them out, and keeps them stopped through new plans, rebuilds and retries until
+    /// `resume`: a measurement needs their devices to itself. Returns once they have stopped. Not on the router's queue.
+    public func hold(_ sinks: Set<UUID>) {
+        queue.sync {
+            let new = sinks.subtracting(held)
+            guard !new.isEmpty else { return }
+            held.formUnion(new)
+            let names = lastPlan.sinks.filter { new.contains($0.sinkNode) }.map(\.name)
+            if !names.isEmpty { events.add(.info, "Paused \(names.joined(separator: ", ")) while Junction measures") }
+            applyNow(lastPlan)
+        }
+    }
+
+    /// Builds held sinks again (the ones the plan still has).
+    public func resume(_ sinks: Set<UUID>) {
+        queue.async {
+            let back = sinks.intersection(self.held)
+            guard !back.isEmpty else { return }
+            self.held.subtract(back)
+            let names = self.lastPlan.sinks.filter { back.contains($0.sinkNode) }.map(\.name)
+            if !names.isEmpty { self.events.add(.info, "Resumed \(names.joined(separator: ", "))") }
+            self.applyNow(self.lastPlan)
+        }
+    }
+
+    /// The sinks held right now.
+    public var heldSinks: Set<UUID> { queue.sync { held } }
+
+    /// The sinks with a running runner (tests).
+    var runningSinks: Set<UUID> {
+        lock.lock()
+        defer { lock.unlock() }
+        return Set(runners.keys)
+    }
+
     /// After the Mac wakes, IO takes a moment to resume: start counting stalls afresh.
     public func resetHealth() {
         queue.async { self.progress = [:] }
@@ -205,7 +255,13 @@ public final class Router: @unchecked Sendable {
         failures = failures.filter { wanted[$0.key]?.structureKey == $0.value.key }
         let now = Date()
         var processes: [HAL.AudioProcess]?
-        for sink in plan.sinks {
+        for sink in plan.sinks where held.contains(sink.sinkNode) {
+            retire(sink.sinkNode)
+            progress[sink.sinkNode] = nil
+            failures[sink.sinkNode] = nil  // it starts afresh once resumed
+            statuses[sink.sinkNode] = SinkStatus(state: .held, message: "Paused while Junction measures a device it uses.")
+        }
+        for sink in plan.sinks where !held.contains(sink.sinkNode) {
             if let runner = runners[sink.sinkNode], runner.plan.structureKey == sink.structureKey, !rebuildingAll {
                 runner.update(sink, pool: effects)
                 if statuses[sink.sinkNode]?.state == .running {
@@ -223,7 +279,7 @@ public final class Router: @unchecked Sendable {
                 continue
             }
             do {
-                try runner.start(processes: processes ?? [], fadingIn: true)
+                try startSink(runner, processes ?? [])
                 let replacing = runners[sink.sinkNode] != nil
                 if let old = runners[sink.sinkNode] { runner.overloadCarry = old.overloadCount }  // counted since first built
                 if replacing { runner.waitForFirstCycle() }  // so the old one doesn't fade out before this one plays

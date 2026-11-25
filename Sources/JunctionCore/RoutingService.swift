@@ -13,6 +13,9 @@ public protocol SinkRouting: AnyObject {
     func openPluginWindow(_ effect: UUID, title: String) -> String?
     /// Has `handler` told a plugin's state whenever its window changed it.
     func observeEffectStates(_ handler: @escaping @Sendable (UUID, Data) -> Void)
+    /// Stops sinks while a measurement uses their devices (returns once they have stopped), and builds them again.
+    func hold(_ sinks: Set<UUID>)
+    func resume(_ sinks: Set<UUID>)
 }
 
 extension SinkRouting {
@@ -77,6 +80,8 @@ public final class RoutingService: NSObject, NSXPCListenerDelegate, @unchecked S
     private var midi = MIDIControl()
     /// The MIDI controllers listened to (the helper's `MIDIInput` reports them).
     public private(set) var midiSources: [String] = []
+    /// Sinks held for each app's measurement (in-process requests under the service's own key).
+    private var holds: [ObjectIdentifier: Set<UUID>] = [:]
 
     /// Called on `queue` with each new plan (the helper watches the devices it uses).
     public var onPlan: ((RoutingPlan) -> Void)?
@@ -296,6 +301,7 @@ public final class RoutingService: NSObject, NSXPCListenerDelegate, @unchecked S
             setKeepRouting(keep)
             return .done
         case .goodbye:
+            releaseHolds(of: holder(connection))
             if let connection { clients[ObjectIdentifier(connection)] = nil }
             if clients.isEmpty { midi.learn(nil) }  // nobody is left to see what it learns
             stopIfIdle()
@@ -307,7 +313,32 @@ public final class RoutingService: NSObject, NSXPCListenerDelegate, @unchecked S
             guard isClient(connection) else { return .refused("Say hello first.") }
             midi.learn(target)
             return .done
+        case .hold(let sinks):
+            guard isClient(connection) else { return .refused("Say hello first.") }
+            holds[holder(connection), default: []].formUnion(sinks)
+            router.hold(sinks)
+            return .done
+        case .resume(let sinks):
+            guard isClient(connection) else { return .refused("Say hello first.") }
+            let key = holder(connection)
+            holds[key]?.subtract(sinks)
+            if holds[key]?.isEmpty == true { holds[key] = nil }
+            router.resume(sinks.subtracting(holds.values.reduce(into: Set<UUID>()) { $0.formUnion($1) }))
+            return .done
         }
+    }
+
+    /// Sinks held right now, by any app.
+    public var heldSinks: Set<UUID> { holds.values.reduce(into: Set<UUID>()) { $0.formUnion($1) } }
+
+    private func holder(_ connection: NSXPCConnection?) -> ObjectIdentifier {
+        connection.map(ObjectIdentifier.init) ?? ObjectIdentifier(self)
+    }
+
+    /// An app went away in the middle of a measurement: its held sinks come back.
+    private func releaseHolds(of key: ObjectIdentifier) {
+        guard let sinks = holds.removeValue(forKey: key) else { return }
+        router.resume(sinks.subtracting(heldSinks))
     }
 
     public var state: HelperState {
@@ -365,6 +396,7 @@ public final class RoutingService: NSObject, NSXPCListenerDelegate, @unchecked S
             self.queue.async {
                 guard let connection = self.clients.removeValue(forKey: key) else { return }
                 connection.exportedObject = nil
+                self.releaseHolds(of: key)
                 self.stopIfIdle()
             }
         }

@@ -308,7 +308,8 @@ Three parts (five with the helpers):
    launch, plans and routes, and follows Core Audio restarts, wake and device changes itself. The app stays the
    editor: it saves `graph.json`, sends every change to the helper, and receives statuses, meters, routing events
    (the helper writes them to `events.log` too) and the helper's Microphone permission; it can also ask for a
-   rebuild or for the permission. Messages are Codable values sent as JSON over one `NSXPCConnection` method each
+   rebuild or for the permission, and hold sinks while it measures speakers (protocol 4; they come back when it
+   resumes them or goes away). Messages are Codable values sent as JSON over one `NSXPCConnection` method each
    way; each side checks the other's code signature (bundle identifier, and the team when there is one). Without
    "keep routing", the helper stops routing and quits when no app is connected. The app routes in its own process
    when the build doesn't use the helper, in tests, in snapshot mode, when the helper is turned off in Login Items,
@@ -397,7 +398,8 @@ correction stage's response (an impulse through the kernel, read at the grid's f
 computed curve within 0.1 dB at 44.1, 48 and 96 kHz, at several Amounts and with low, high-Q filters at 96 kHz; check
 the delay and level sample by sample, that extra channels are left exactly as they were, that settings switched every
 buffer don't step, that changing them doesn't allocate on the audio thread, and the profile through `graph.json` and
-schema 4 files. The stress test also swaps correction blocks while another thread renders through them. The plugin tests use Apple's
+schema 4 files. The stress test also swaps correction blocks while another thread renders through them, and starts
+and stops measurement takes while another thread runs the measurement IOProc with random buffers and lost ones. The plugin tests use Apple's
 units as stand-ins for third-party ones: the picker's list (AUDelay among the installed effects) and its search, a
 setting made directly on AUDelay surviving its state through `graph.json`, a missing component left out of its chain
 with its state kept, overloads counted per sink and stalls per stage (a fake effect that sleeps through its buffer),
@@ -421,7 +423,7 @@ records its input, and restores the device list. It needs microphone permission 
 and rate, reports a rate set from outside, disappears and returns); it opens no audio and needs no permission.
 
 **Speaker and headphone calibration** is in progress: the Calibration effect runs profiles and loads headphone EQ
-presets; measuring speakers in the app isn't there yet. JunctionCore has the maths, without device access
+presets; JunctionCore can measure speakers, but the app doesn't offer it yet. JunctionCore has the maths, without device access
 (`Calibration*.swift`): an exponential sine sweep (20 Hz to 20 kHz or 0.45 × the rate)
 with its regularised inverse and deconvolution to an impulse response, arrival-time detection, the response on a
 fixed 240-point log grid through a frequency-dependent window, 1/3-, 1/6- and 1/12-octave smoothing, level-matched
@@ -430,6 +432,22 @@ tilt, shelves), a fitter (peaking and shelving filters within boost and cut limi
 preamp keeping the curve at or below 0 dB, per-channel delay and level), cookbook biquad coefficients for any rate,
 parametric EQ preset import and export, and `CalibrationProfile`. The tests use simulated rooms (known filters, delay,
 noise, clock drift).
+
+The measurement engine (`Measurement.swift`) runs in the app's own process behind a device protocol: a noise-floor
+check, a level check with pink noise on one channel (it reports the microphone's level and refuses a clipping input,
+lowering the level 6 dB, no signal, or less than 30 dB above the noise; the sweeps play at the level it checked), then
+one sweep per channel at each listening position, analysed with the maths above into a speaker profile. Before it
+opens the devices it asks the router (in the app, or Junction Helper over XPC) to hold every sink that uses the output
+or the microphone, and resumes them afterwards; held sinks are stopped and stay down through new plans, rebuilds and
+retries. The real devices (`MeasurementDevice.swift`) never change a device's rate or settings: the output is the
+clock, and the microphone joins it in a private aggregate device with drift compensation, or runs into the kernel's
+sample-rate converter when the rates differ. The kernel's measurement stage (`JunctionMeasure.c`) plays and records in
+the same IO cycles, counts lost buffers (a take with one is played again) and fades a cancelled take out within the
+next buffer. The tests run it through a simulated output and microphone (a synthetic room with latency, clock wander,
+noise, clipping, lost buffers and a microphone that disappears): a three-position measurement reproduces the room
+within the maths' tolerances, each error says what went wrong, cancelling frees everything, and the held sinks are
+exactly the affected ones, in the router and through the helper's XPC protocol. Measuring needs Junction's own
+Microphone permission, asked with the usual prompt.
 
 `build.sh` always puts Junction Helper and its launch agent into Junction.app; `ROUTING_HELPER` decides whether the
 app registers and uses it (`JunctionRoutingHelper` in its Info.plist): `1` routes in the helper, `0` inside the app.
@@ -535,6 +553,9 @@ system-audio permissions and **Install Driver…** with the first one.
   apart from it. Plugin windows open only while the plugin runs, and settings changed in a window
   just before Junction quits may be lost (they are read every 2 s). Music effects (`aumf`) and instruments aren't
   listed. Overload counts are Junction's own measurement of its rendering, not Core Audio's overload notifications.
+- Measuring speakers hasn't been tried with real hardware: the private aggregate device, drift compensation, the
+  sample-rate converter path, the Microphone prompt and real rooms are unverified; only the simulated device layer is
+  tested, and the app doesn't offer measuring yet. A sink added while a measurement runs isn't held.
 - Calibration hasn't been heard through real devices yet. Its filters are minimum phase only (peaking and shelving
   biquads): they correct level, not timing, so a room's reflections and a speaker's phase aren't straightened. A
   profile belongs to the device it was made for: on another one (or when Default Output moves) it still runs, with a
