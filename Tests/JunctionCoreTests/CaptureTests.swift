@@ -276,7 +276,7 @@ final class CaptureTests: XCTestCase {
         let data = try JSONEncoder().encode(graph)
         var loaded = try JSONDecoder().decode(Graph.self, from: data)
         loaded.upgrade()
-        XCTAssertEqual(loaded.schema, 4)
+        XCTAssertEqual(loaded.schema, Graph.currentSchema)
         XCTAssertEqual(loaded.node(source.id)?.kind, .appThroughDevice(Self.spotify, device: Demo.chat.id))
         XCTAssertEqual(loaded.cables, graph.cables, "its cables survive tidying")
         // Deleting the device it captures from leaves the node, which then says so.

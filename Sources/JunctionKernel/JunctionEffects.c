@@ -1,5 +1,5 @@
-// Effect chains for the renderer: the built-in effects (gain, pan, mono, noise gate) and Audio Units, processed in
-// place on non-interleaved channels. Everything a chain needs on the audio thread is made when it is built; while it
+// Effect chains for the renderer: the built-in effects (gain, pan, mono, noise gate, correction) and Audio Units,
+// processed in place on non-interleaved channels. Everything a chain needs on the audio thread is made when it is built; while it
 // runs only atomics change (bypass, parameters). Each stage's rendering is timed, so an effect that holds up the audio
 // thread can be found (see jk_chain_stage_timing).
 #include "JunctionKernel.h"
@@ -11,10 +11,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+typedef struct Correction Correction;
+
 typedef struct {
     JKEffectKind kind;
     JKEffectProcess process;         // custom stages and units
     void *context;
+    Correction *correction;          // a correction stage's state (made with the stage)
     _Atomic uint32_t bypass;
     _Atomic uint32_t parameters[JK_EFFECT_MAX_PARAMETERS];  // float bit patterns
     // Audio thread only.
@@ -81,8 +84,11 @@ JKChain *jk_chain_create(uint32_t channels, double sampleRate, uint32_t capacity
     return chain;
 }
 
+static void CorrectionFree(Correction *state);
+
 void jk_chain_destroy(JKChain *chain) {
     if (!chain) return;
+    for (uint32_t s = 0; s < chain->count; s++) CorrectionFree(chain->stages[s].correction);
     free(chain->stages);
     free(chain);
 }
@@ -114,9 +120,17 @@ static int Append(JKChain *chain, JKEffectKind kind, JKEffectProcess process, vo
     return (int)chain->count++;
 }
 
+static Correction *CorrectionMake(uint32_t channels, double sampleRate);
+
 int jk_chain_add(JKChain *chain, JKEffectKind kind) {
-    if (kind < JK_EFFECT_GAIN || kind > JK_EFFECT_GATE) return -1;
-    return Append(chain, kind, NULL, NULL);
+    if (kind < JK_EFFECT_GAIN || kind > JK_EFFECT_CORRECTION) return -1;
+    if (kind != JK_EFFECT_CORRECTION) return Append(chain, kind, NULL, NULL);
+    if (chain->count >= chain->capacity) return -1;
+    Correction *state = CorrectionMake(chain->channels, chain->sampleRate);
+    if (!state) return -1;
+    int stage = Append(chain, kind, NULL, NULL);
+    chain->stages[stage].correction = state;
+    return stage;
 }
 
 int jk_chain_add_custom(JKChain *chain, JKEffectProcess process, void *context) {
@@ -244,6 +258,9 @@ static void Gate(Stage *stage, double sampleRate, float *const *channels, uint32
     stage->hold = hold;
 }
 
+static void Correct(Correction *state, float *const *channels, uint32_t count, uint32_t frames);
+static void CorrectionBypassed(Correction *state);
+
 void jk_chain_process(JKChain *chain, float *const *channels, uint32_t channelCount, uint32_t frames) {
     if (!chain || frames == 0 || frames > JK_MAX_FRAMES) return;
     uint32_t count = channelCount < chain->channels ? channelCount : chain->channels;
@@ -252,6 +269,7 @@ void jk_chain_process(JKChain *chain, float *const *channels, uint32_t channelCo
         Stage *stage = &chain->stages[s];
         if (atomic_load_explicit(&stage->bypass, memory_order_relaxed)) {
             stage->primed = 0;  // after a bypass, gain and pan start where they are set rather than gliding back
+            if (stage->correction) CorrectionBypassed(stage->correction);
             continue;
         }
         uint64_t start = mach_absolute_time();
@@ -260,6 +278,7 @@ void jk_chain_process(JKChain *chain, float *const *channels, uint32_t channelCo
         case JK_EFFECT_PAN: Pan(stage, channels, count, frames); break;
         case JK_EFFECT_MONO: Mono(channels, count, frames); break;
         case JK_EFFECT_GATE: Gate(stage, chain->sampleRate, channels, count, frames); break;
+        case JK_EFFECT_CORRECTION: Correct(stage->correction, channels, count, frames); break;
         case JK_EFFECT_CUSTOM: stage->process(stage->context, channels, count, frames); break;
         }
         uint64_t ticks = mach_absolute_time() - start;
@@ -281,6 +300,255 @@ void jk_chain_stage_timing(JKChain *chain, uint32_t stage, JKTiming *timing, int
     uint32_t bits = takePeak ? atomic_exchange_explicit(&s->peakLoad, 0, memory_order_relaxed)
                              : atomic_load_explicit(&s->peakLoad, memory_order_relaxed);
     timing->peakLoad = Float(bits);
+}
+
+// MARK: Correction
+
+typedef struct {
+    uint32_t sections;
+    uint32_t delay;                  // frames
+    float level;                     // linear
+    double coefficients[JK_CORRECTION_MAX_SECTIONS][5];  // b0, b1, b2, a1, a2
+} CorrectionChannel;
+
+struct JKCorrection {
+    uint32_t channels;
+    float preamp;
+    CorrectionChannel channel[];
+};
+
+/// A channel's cascade in direct form I: every signal's last two samples, newest first. [0] is the cascade's input,
+/// [k] the output of section k (so also the input of section k + 1). Holding signals rather than a transposed form's
+/// partial sums lets new coefficients pick up where the old ones were.
+typedef struct {
+    double h[JK_CORRECTION_MAX_SECTIONS + 1][2];
+} History;
+
+struct Correction {
+    _Atomic(JKCorrection *) pending; // the settings in place (owned by the chain)
+    _Atomic uint64_t begun;          // process calls begun and finished (see jk_chain_swap_correction)
+    _Atomic uint64_t finished;
+    uint32_t channels;
+    uint32_t lineLength;             // frames per delay line: the longest delay + 1
+    // Audio thread only.
+    JKCorrection *active;            // the settings last applied
+    int primed;                      // the histories and delay lines hold the audio so far (cleared by bypass)
+    uint32_t bank;                   // which of a channel's two histories the active settings use
+    uint32_t write;                  // where the next frame goes in every delay line
+    History *histories;              // two per channel: the active settings' and, while cross-fading, the new ones'
+    float *lines;                    // per channel: the cascade's output, `lineLength` frames, written at `write`
+};
+
+static Correction *CorrectionMake(uint32_t channels, double sampleRate) {
+    Correction *state = calloc(1, sizeof *state);
+    if (!state) return NULL;
+    state->channels = channels;
+    state->lineLength = (uint32_t)ceil(JK_CORRECTION_MAX_DELAY * sampleRate) + 1;
+    state->histories = calloc((size_t)channels * 2, sizeof *state->histories);
+    state->lines = calloc((size_t)channels * state->lineLength, sizeof *state->lines);
+    if (!state->histories || !state->lines) {
+        free(state->histories);
+        free(state->lines);
+        free(state);
+        return NULL;
+    }
+    atomic_init(&state->pending, NULL);
+    atomic_init(&state->begun, 0);
+    atomic_init(&state->finished, 0);
+    return state;
+}
+
+static void CorrectionFree(Correction *state) {
+    if (!state) return;
+    JKCorrection *pending = atomic_load(&state->pending);
+    if (pending) jk_correction_destroy(pending);
+    free(state->histories);
+    free(state->lines);
+    free(state);
+}
+
+JKCorrection *jk_correction_create(uint32_t channels) {
+    if (channels == 0 || channels > 1024) return NULL;
+    JKCorrection *correction = calloc(1, sizeof *correction + sizeof(CorrectionChannel) * channels);
+    if (!correction) return NULL;
+    correction->channels = channels;
+    correction->preamp = 1;
+    for (uint32_t c = 0; c < channels; c++) correction->channel[c].level = 1;
+    return correction;
+}
+
+void jk_correction_destroy(JKCorrection *correction) { free(correction); }
+
+uint32_t jk_correction_channels(const JKCorrection *correction) { return correction->channels; }
+
+int jk_correction_set_channel(JKCorrection *correction, uint32_t channel, const double *coefficients, uint32_t sections,
+                              uint32_t delayFrames, float level) {
+    if (channel >= correction->channels || sections > JK_CORRECTION_MAX_SECTIONS || (sections > 0 && !coefficients)
+        || !isfinite(level)) return 0;
+    for (uint32_t i = 0; i < sections * 5; i++) if (!isfinite(coefficients[i])) return 0;
+    CorrectionChannel *settings = &correction->channel[channel];
+    settings->sections = sections;
+    if (sections) memcpy(settings->coefficients, coefficients, sizeof(double) * 5 * sections);
+    settings->delay = delayFrames;
+    settings->level = level;
+    return 1;
+}
+
+void jk_correction_set_preamp(JKCorrection *correction, float gain) {
+    if (isfinite(gain)) correction->preamp = gain;
+}
+
+static Correction *CorrectionStage(const JKChain *chain, uint32_t stage) {
+    return stage < chain->count ? chain->stages[stage].correction : NULL;
+}
+
+JKCorrection *jk_chain_swap_correction(JKChain *chain, uint32_t stage, JKCorrection *correction, uint64_t *ticket) {
+    Correction *state = CorrectionStage(chain, stage);
+    *ticket = 0;
+    if (!state) return correction;
+    JKCorrection *old = atomic_exchange(&state->pending, correction);
+    // Process calls begun from here on load the new block (both sides are sequentially consistent). The one running
+    // now may still use the old block, and so may the next (it cross-fades from the old one): once that one has
+    // finished, nothing reaches the old block any more.
+    *ticket = atomic_load(&state->begun) + 1;
+    return old;
+}
+
+int jk_chain_is_done_with_correction(const JKChain *chain, uint32_t stage, uint64_t ticket) {
+    Correction *state = CorrectionStage(chain, stage);
+    return !state || atomic_load(&state->finished) >= ticket;
+}
+
+uint32_t jk_chain_correction_max_delay(const JKChain *chain, uint32_t stage) {
+    Correction *state = CorrectionStage(chain, stage);
+    return state ? state->lineLength - 1 : 0;
+}
+
+/// While bypassed the stage takes up new settings straight away (so swapped-out blocks can be freed) and starts
+/// afresh when it is turned back on.
+static void CorrectionBypassed(Correction *state) {
+    atomic_fetch_add(&state->begun, 1);
+    state->active = atomic_load(&state->pending);
+    state->primed = 0;
+    atomic_fetch_add_explicit(&state->finished, 1, memory_order_release);
+}
+
+/// A channel's settings in a block, or NULL when it passes through.
+static inline const CorrectionChannel *Settings(const JKCorrection *block, uint32_t channel) {
+    return block && channel < block->channels ? &block->channel[channel] : NULL;
+}
+
+/// Runs one sample through a cascade, updating its history.
+static inline double Cascade(const CorrectionChannel *settings, History *history, double x) {
+    uint32_t sections = settings ? settings->sections : 0;
+    double v = x;
+    for (uint32_t k = 0; k < sections; k++) {
+        const double *b = settings->coefficients[k];
+        double *in = history->h[k], *out = history->h[k + 1];
+        double y = b[0] * v + b[1] * in[0] + b[2] * in[1] - b[3] * out[0] - b[4] * out[1];
+        in[1] = in[0];
+        in[0] = v;
+        v = y;
+    }
+    double *last = history->h[sections];
+    last[1] = last[0];
+    last[0] = v;
+    return v;
+}
+
+/// Gives new settings a history to start from: the same input, and the old cascade's signals for its sections (its
+/// last section's output for the new last section).
+static void HandOver(const History *from, uint32_t fromSections, History *to, uint32_t toSections) {
+    to->h[0][0] = from->h[0][0];
+    to->h[0][1] = from->h[0][1];
+    for (uint32_t k = 1; k <= toSections; k++) {
+        uint32_t source = k == toSections ? fromSections : (k < fromSections ? k : fromSections);
+        to->h[k][0] = from->h[source][0];
+        to->h[k][1] = from->h[source][1];
+    }
+}
+
+/// Keeps decaying histories out of subnormal numbers.
+static void Flush(History *history, uint32_t sections) {
+    for (uint32_t k = 0; k <= sections; k++) {
+        for (int i = 0; i < 2; i++) if (fabs(history->h[k][i]) < 1e-30) history->h[k][i] = 0;
+    }
+}
+
+static void Correct(Correction *state, float *const *channels, uint32_t count, uint32_t frames) {
+    atomic_fetch_add(&state->begun, 1);  // sequentially consistent: see jk_chain_swap_correction
+    JKCorrection *next = atomic_load(&state->pending);
+    JKCorrection *previous = state->active;
+    int fading = 0;
+    if (!state->primed) {
+        memset(state->histories, 0, sizeof *state->histories * (size_t)state->channels * 2);
+        memset(state->lines, 0, sizeof *state->lines * (size_t)state->channels * state->lineLength);
+        state->write = 0;
+        state->primed = 1;
+        previous = next;
+    } else if (next != previous) {
+        fading = 1;
+    }
+    uint32_t length = state->lineLength, maxDelay = length - 1;
+    uint32_t oldBank = state->bank, newBank = fading ? 1 - state->bank : state->bank;
+    float oldPreamp = previous ? previous->preamp : 1, newPreamp = next ? next->preamp : 1;
+    float step = 1.0f / (float)frames;
+    for (uint32_t c = 0; c < count; c++) {
+        const CorrectionChannel *from = Settings(previous, c), *to = Settings(next, c);
+        History *oldHistory = &state->histories[c * 2 + oldBank], *newHistory = &state->histories[c * 2 + newBank];
+        float *line = state->lines + (size_t)c * length;
+        float *samples = channels[c];
+        uint32_t write = state->write;
+        if (!from && !to) {
+            // Passes through untouched; the input is kept so settings that come later start from it.
+            if (fading) *newHistory = *oldHistory;
+            for (uint32_t f = 0; f < frames; f++) {
+                float x = samples[f];
+                newHistory->h[0][1] = newHistory->h[0][0];
+                newHistory->h[0][0] = x;
+                line[write] = x;
+                write = write + 1 == length ? 0 : write + 1;
+            }
+            continue;
+        }
+        uint32_t newDelay = to ? (to->delay < maxDelay ? to->delay : maxDelay) : 0;
+        float newGain = to ? to->level * newPreamp : 1;
+        if (!fading) {
+            for (uint32_t f = 0; f < frames; f++) {
+                line[write] = (float)Cascade(to, newHistory, samples[f]);
+                uint32_t read = write >= newDelay ? write - newDelay : write + length - newDelay;
+                samples[f] = line[read] * newGain;
+                write = write + 1 == length ? 0 : write + 1;
+            }
+            Flush(newHistory, to ? to->sections : 0);
+            continue;
+        }
+        // Cross-fade over this buffer: both cascades run, their blend goes into the delay line, and the line is read
+        // at both delays and gains, blended the same way.
+        uint32_t oldDelay = from ? (from->delay < maxDelay ? from->delay : maxDelay) : 0;
+        float oldGain = from ? from->level * oldPreamp : 1;
+        HandOver(oldHistory, from ? from->sections : 0, newHistory, to ? to->sections : 0);
+        for (uint32_t f = 0; f < frames; f++) {
+            float weight = (float)(f + 1) * step;
+            double x = samples[f];
+            double a = Cascade(from, oldHistory, x), b = Cascade(to, newHistory, x);
+            line[write] = (float)(a + (b - a) * weight);
+            uint32_t oldRead = write >= oldDelay ? write - oldDelay : write + length - oldDelay;
+            uint32_t newRead = write >= newDelay ? write - newDelay : write + length - newDelay;
+            float before = line[oldRead] * oldGain, after = line[newRead] * newGain;
+            samples[f] = before + (after - before) * weight;
+            write = write + 1 == length ? 0 : write + 1;
+        }
+        Flush(newHistory, to ? to->sections : 0);
+    }
+    state->write = (uint32_t)(((uint64_t)state->write + frames) % length);
+    if (fading) {
+        // Channels the chain has but wasn't given this time keep their history across the bank switch.
+        for (uint32_t c = count; c < state->channels; c++) state->histories[c * 2 + newBank] = state->histories[c * 2 + oldBank];
+    }
+    state->bank = newBank;
+    state->active = next;
+    atomic_fetch_add_explicit(&state->finished, 1, memory_order_release);
 }
 
 // MARK: Audio Units

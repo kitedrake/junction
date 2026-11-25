@@ -28,6 +28,13 @@ without your voice chat, step by step.
   levels after the chain and the delay it adds (also counted in the destination's delay), and each effect's CPU share
   and delay while it runs. On the canvas, a node with effects lists them in a row under its channels; clicking one
   bypasses it or turns it back on.
+- **Calibration** (outputs only): makes headphones sound flat, or follow a curve you like, with a parametric EQ preset
+  loaded from a text file (**Load EQ Preset…**; the usual "Preamp: …" and "Filter 1: ON PK Fc … Gain … Q …" lines).
+  The inspector shows the preset's name, what kind it is, its date and the device it was made for, and its curve on
+  a 20 Hz–20 kHz graph; **Amount** scales the correction and **Export EQ Preset…** saves it as text again. It warns
+  when the output now plays on another device than the profile's (Default Output follows Sound settings). The
+  correction is a cascade of minimum-phase filters, so it adds no delay. Everything runs inside Junction: nothing is
+  downloaded or bundled.
 - **Audio Unit plugins**: **Add Effect › Audio Unit…** lists every effect Audio Unit installed on the Mac by maker,
   with a search field. A plugin opens its own window (**Open Window**) in the process that routes, runs in a process
   of its own where macOS allows it, and is saved with the setup, settings made in its window included. One that keeps
@@ -256,9 +263,10 @@ Three parts (five with the helpers):
    don't rebuild anything; adding or removing cables rebuilds only the sinks they touch. A rebuilt sink is built next to the running one, then the two cross-fade over 25 ms, so edits don't
    leave a gap or click. When apps start or quit, taps are updated in place.
    **Effects** (`Effects.swift`, `JunctionEffects.c`): a chain is an ordered list of stages for a fixed number of
-   non-interleaved channels. Gain, pan (a balance), mono and a noise gate are built into the kernel; the high-pass
-   filter (AUHighPass), equalizer (AUNBandEQ, three bands), compressor (AUDynamicsProcessor) and limiter
-   (AUPeakLimiter) are Apple's Audio Units, created and initialised on the router's queue (non-interleaved float at
+   non-interleaved channels. Gain, pan (a balance), mono, a noise gate and Calibration's correction (see below) are
+   built into the kernel; the high-pass filter (AUHighPass), equalizer (AUNBandEQ, three bands), compressor
+   (AUDynamicsProcessor) and limiter (AUPeakLimiter) are Apple's Audio Units, created and initialised on the router's
+   queue (non-interleaved float at
    the sink's rate, `MaximumFramesPerSlice` 4096, input callback and buffers made there) and rendered by the kernel
    with `AudioUnitRender`. A slot without effects passes its channels through without a copy. Bypass and the built-in
    effects' parameters are atomics; Audio Unit parameters go through `AudioUnitSetParameter`. Any other change builds
@@ -266,6 +274,15 @@ Three parts (five with the helpers):
    began before the swap has finished (counted by the IOProc), or once the IOProc is gone. Units live in a pool keyed
    by effect (before or after the mix), so a rebuilt sink and a new chain reuse them with their state; a unit two
    sinks reach during a cross-fade is rendered by one at a time (a try-lock; the other passes the audio through).
+   **Calibration** (`CalibrationEffect.swift`, the correction stage in `JunctionEffects.c`): per channel, a cascade
+   of up to 32 biquads in direct form I with double-precision state, then a delay of up to 50 ms (its buffer is made
+   with the chain), the channel's level and the preamp. Its settings are an immutable block of coefficients made for
+   the chain's sample rate on the router's queue whenever the profile or Amount changes (Amount scales the filters'
+   gains in dB, and the preamp with them), swapped in with one atomic exchange without rebuilding the sink; the
+   audio thread runs the old and new settings side by side for one buffer and cross-fades between them, the new
+   filters starting from the old ones' signals. An old block is freed once a cycle that began after the swap has
+   finished. A profile with one channel corrects every channel; one with several (speakers) corrects that many and
+   the rest pass through; without a profile everything passes through. The stage reports no delay of its own.
    Each chain's `kAudioUnitProperty_Latency` is added to the sink's delay estimate and shown on its node. Meters on
    sources and sinks are taken after their effects. Effects run wherever routing runs (Junction Helper or the app).
    **Plugins** (`Plugins.swift`, `PluginWindows.swift`): the picker lists `kAudioUnitType_Effect` components from
@@ -317,13 +334,15 @@ Three parts (five with the helpers):
    administrator prompt when the daemon isn't approved or can't be reached, but not when it refuses (a driver whose
    signature doesn't check out is reported, not installed another way).
 
-The graph is saved to `~/Library/Application Support/Junction/graph.json` (schema 4: nodes belong to a device's
+The graph is saved to `~/Library/Application Support/Junction/graph.json` (schema 5: nodes belong to a device's
 canvas, receiving nodes can set a buffer size and sample-rate conversion, named scenes are kept in `scenes`, and a
 source can be an app through a virtual device, `appThroughDevice`, which older files can't contain; nodes keep their
 effect chains in `effects`: each effect's four-character `type`, `subtype` and `manufacturer`, `bypass`, the
 `parameters` set in Junction, and an Audio Unit's `state`, its `kAudioUnitProperty_ClassInfo` as a base64 binary
 property list, restored when its unit is made; a plugin also keeps its `name` and `vendor`, so it can be named while
-missing; codes with bytes that aren't printable are written as `0x` and eight hex digits). A schema 1 file from the
+missing; codes with bytes that aren't printable are written as `0x` and eight hex digits; a Calibration effect keeps
+its `calibration` profile: name, kind, date, device, per-channel filters, delay and level, preamp, target, limits and
+measured curves; new in schema 5, so schema 4 files load unchanged with none). A schema 1 file from the
 shared-canvas versions is converted on load: each node moves to the canvas of the device it was wired to (unwired
 ones to the first device), and cables between devices are dropped. Schema 2 files load with automatic buffer sizes;
 schema 2 and 3 files get sample-rate conversion set to Automatic and start with no scenes and no effects (a schema 4
@@ -373,7 +392,12 @@ address and undefined-behaviour sanitizers with random buffer sizes, stalls on e
 rates, then swaps effect chains (random built-in effects, before and after the mix) from one thread while another
 renders through them, so a chain freed too early shows up as a use-after-free. The engine tests drive chains with a
 fake effect (order, bypass, swapping while rendering, no allocation on the rendering thread, counted through
-libmalloc's logging hook) and render Apple's four units, which needs no permission. The plugin tests use Apple's
+libmalloc's logging hook) and render Apple's four units, which needs no permission. Calibration's tests compare the
+correction stage's response (an impulse through the kernel, read at the grid's frequencies) with the profile's
+computed curve within 0.1 dB at 44.1, 48 and 96 kHz, at several Amounts and with low, high-Q filters at 96 kHz; check
+the delay and level sample by sample, that extra channels are left exactly as they were, that settings switched every
+buffer don't step, that changing them doesn't allocate on the audio thread, and the profile through `graph.json` and
+schema 4 files. The stress test also swaps correction blocks while another thread renders through them. The plugin tests use Apple's
 units as stand-ins for third-party ones: the picker's list (AUDelay among the installed effects) and its search, a
 setting made directly on AUDelay surviving its state through `graph.json`, a missing component left out of its chain
 with its state kept, overloads counted per sink and stalls per stage (a fake effect that sleeps through its buffer),
@@ -396,8 +420,9 @@ records its input, and restores the device list. It needs microphone permission 
 `--device-test` checks that Core Audio follows the driver (a temporary device appears, is renamed, changes channels
 and rate, reports a rate set from outside, disappears and returns); it opens no audio and needs no permission.
 
-**Speaker and headphone calibration** is in progress: nothing in the app uses it yet. So far JunctionCore has the
-maths, without device access (`Calibration*.swift`): an exponential sine sweep (20 Hz to 20 kHz or 0.45 × the rate)
+**Speaker and headphone calibration** is in progress: the Calibration effect runs profiles and loads headphone EQ
+presets; measuring speakers in the app isn't there yet. JunctionCore has the maths, without device access
+(`Calibration*.swift`): an exponential sine sweep (20 Hz to 20 kHz or 0.45 × the rate)
 with its regularised inverse and deconvolution to an impulse response, arrival-time detection, the response on a
 fixed 240-point log grid through a frequency-dependent window, 1/3-, 1/6- and 1/12-octave smoothing, level-matched
 power averaging of listening positions, microphone calibration files and measurement text exports, a target (flat,
@@ -510,6 +535,12 @@ system-audio permissions and **Install Driver…** with the first one.
   apart from it. Plugin windows open only while the plugin runs, and settings changed in a window
   just before Junction quits may be lost (they are read every 2 s). Music effects (`aumf`) and instruments aren't
   listed. Overload counts are Junction's own measurement of its rendering, not Core Audio's overload notifications.
+- Calibration hasn't been heard through real devices yet. Its filters are minimum phase only (peaking and shelving
+  biquads): they correct level, not timing, so a room's reflections and a speaker's phase aren't straightened. A
+  profile belongs to the device it was made for: on another one (or when Default Output moves) it still runs, with a
+  warning. A preset's filters at or above the output's Nyquist frequency are left out, and only the first 32 per
+  channel run. An EQ preset export holds one channel's filters and the preamp (delays and levels aren't part of the
+  format).
 - MIDI control hasn't been tried with real controllers yet: CoreMIDI input (plugging in, Bluetooth and network
   sessions, sources coming and going) is unverified; message handling, learn, pick-up, saving and the helper's
   side are tested with recorded MIDI bytes. Only MIDI 1.0 messages are read (a MIDI 2.0 controller works in its

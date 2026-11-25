@@ -303,6 +303,57 @@ final class EffectTests: XCTestCase {
         XCTAssertGreaterThan(allocations, 0)
     }
 
+    func testRenderingCalibrationDoesNotAllocate() throws {
+        guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "malloc_logger") else {
+            return XCTFail("libmalloc's logging hook isn't there")
+        }
+        let hook = symbol.assumingMemoryBound(to: Optional<MallocLogger>.self)
+        // A Calibration stage after the mix whose settings change every cycle (each change cross-fades): the blocks are
+        // made beforehand, as the router makes them on its own queue.
+        let renderer = try stereoRenderer()
+        defer { jk_renderer_destroy(renderer) }
+        let chain = try XCTUnwrap(jk_chain_create(2, 48_000, 1))
+        defer { jk_chain_destroy(chain) }
+        let stage = UInt32(jk_chain_add(chain, JK_EFFECT_CORRECTION))
+        _ = swap(renderer, JK_OUTPUT_CHAIN, chain)
+        defer { _ = swap(renderer, JK_OUTPUT_CHAIN, nil) }
+        let profile = CalibrationProfile(name: "Desk", kind: .speakers, channels: [
+            CalibrationChannel(filters: (0..<32).map { CalibrationFilter(.peaking, frequency: 40 * pow(1.2, Double($0)), gain: -3, q: 2) },
+                               delay: 0.01, level: -1),
+            CalibrationChannel(filters: [CalibrationFilter(.lowShelf, frequency: 80, gain: 4)], delay: 0, level: 0),
+        ], preamp: -4)
+        let blocks = try (0..<200).map { cycle in
+            try XCTUnwrap(CalibrationKernel.block(profile, amount: Double(cycle % 3) / 2, channels: 2, sampleRate: 48_000,
+                                                  maxDelayFrames: Int(jk_chain_correction_max_delay(chain, stage))))
+        }
+        var handedBack: [OpaquePointer] = []
+        handedBack.reserveCapacity(blocks.count + 1)
+        defer { handedBack.forEach { jk_correction_destroy($0) } }
+        let input = Buffers(streams: [2], frames: 512), output = Buffers(streams: [2], frames: 512)
+        let time = UnsafeMutablePointer<AudioTimeStamp>.allocate(capacity: 1)
+        time.initialize(to: AudioTimeStamp())
+        defer { time.deallocate() }
+        let inList = input.list.unsafePointer, outList = output.list.unsafeMutablePointer
+        let client = UnsafeMutableRawPointer(renderer)
+        _ = jk_renderer_ioproc(0, time, inList, time, outList, time, client)  // warmed up
+
+        let previous = hook.pointee
+        allocations = 0
+        watchedThread = pthread_self()
+        hook.pointee = countAllocations
+        var cycle = 0, ticket: UInt64 = 0
+        while cycle < blocks.count {
+            if let old = jk_chain_swap_correction(chain, stage, blocks[cycle], &ticket) { handedBack.append(old) }
+            jk_chain_set_bypass(chain, stage, Int32(cycle % 50 == 49 ? 1 : 0))
+            _ = jk_renderer_ioproc(0, time, inList, time, outList, time, client)
+            cycle += 1
+        }
+        hook.pointee = previous
+        watchedThread = nil
+        XCTAssertEqual(allocations, 0, "no allocation on the audio thread")
+        XCTAssertEqual(handedBack.count, blocks.count - 1)
+    }
+
     // MARK: Apple's units
 
     private func renderSine(through chain: LiveChain, frequency: Double, buffers: Int = 40) throws -> (peak: Float, finite: Bool) {

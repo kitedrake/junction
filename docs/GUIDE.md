@@ -299,6 +299,34 @@ the inspector.
 Under each effect the box shows what it costs while it runs: how much of the Mac's processor it uses ("CPU 1.2 %"),
 the delay it adds, and "own process" for a plugin macOS runs on its own.
 
+### Calibration (headphones)
+
+**Calibration** makes headphones (or speakers) sound flat, or follow a curve you prefer. It is offered under **Add
+Effect** on outputs only: headphones, speakers, an interface's playback channels and **Default Output**.
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="screenshots/calibration-light.png">
+  <img src="screenshots/calibration-dark.png" alt="Calibration on the headphones: an EQ preset's name and curve, Amount at 80 %, and the Load and Export EQ Preset buttons">
+</picture>
+
+1. Select the output in the canvas and choose **Add Effect › Calibration**. Until a correction is loaded it lets the
+   sound through unchanged.
+2. Click **Load EQ Preset…** and pick a parametric EQ preset for your headphone model: a text file with a line such as
+   `Preamp: -6.2 dB` and lines such as `Filter 1: ON PK Fc 105 Hz Gain 5.8 dB Q 0.70`. Peaking (PK) and shelving
+   (LS, HS, LSC, HSC) filters are read; a file with other filter types is refused and says which line. The preset is
+   kept with your setup, so you don't need the file afterwards.
+3. The box shows the preset's name, that it's for headphones, the date you loaded it and the device it was loaded
+   for, and a graph of the correction from 20 Hz to 20 kHz. **Amount** sets how much of it you hear: 100 % is the
+   whole correction, 50 % half of every boost and cut, 0 % none.
+
+A correction is made for one device. When the output plays on another one (for example **Default Output** after you
+pick other headphones in Sound settings), the box warns you; load the preset for those headphones instead. **Export
+EQ Preset…** saves the correction (at full amount) as a text file in the same format, to use elsewhere or keep. A
+speaker correction with different filters per channel asks which channel to export.
+
+Calibration adds no delay, works on every channel of the output (a correction made per channel works on those
+channels and leaves the others alone), and is switched off, moved and controlled by MIDI like any other effect.
+
 ### Audio Unit plugins
 
 Any effect Audio Unit installed on your Mac (from another maker, or one of Apple's not listed above) can join a chain.

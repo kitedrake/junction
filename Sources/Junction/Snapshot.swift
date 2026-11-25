@@ -22,6 +22,26 @@ enum Demo {
     static let missingPlugin = Effect(type: "aufx", subtype: "vrdr", manufacturer: "Exmp", state: Data([0x62, 0x70, 0x6C, 0x69]),
                                       name: "Vocal Rider", vendor: "Example Audio")
 
+    /// A made-up parametric EQ preset for the headphones, as Load EQ Preset… makes it, at 80 %.
+    static var calibration: Effect {
+        let preset = ParametricPreset(preamp: -6.2, filters: [
+            CalibrationFilter(.lowShelf, frequency: 105, gain: 5.8, q: 0.7),
+            CalibrationFilter(.peaking, frequency: 210, gain: -2.4, q: 0.9),
+            CalibrationFilter(.peaking, frequency: 1_350, gain: 1.6, q: 1.8),
+            CalibrationFilter(.peaking, frequency: 3_200, gain: -4.1, q: 3.5),
+            CalibrationFilter(.peaking, frequency: 5_600, gain: 2.3, q: 4),
+            CalibrationFilter(.highShelf, frequency: 9_500, gain: -3, q: 0.7),
+        ])
+        var profile = CalibrationProfile(name: "Over-Ear Reference", preset: preset)
+        profile.date = Date(timeIntervalSinceReferenceDate: 815_000_000)
+        profile.deviceUID = "demo.headphones"
+        profile.deviceName = "AirPods Pro"
+        var effect = Effect(.calibration)
+        effect.calibration = profile
+        effect.set(EffectKind.calibration.parameters[0], 80)
+        return effect
+    }
+
     /// The made-up MIDI controller the mappings were learned from.
     static let midiController = "Desk Controller"
 
@@ -199,6 +219,15 @@ enum Snapshot {
                 model.selection = .node(mic.id)
             }
             await both("effects")
+            // Calibration on the headphones: a made-up EQ preset, its curve and Amount (taken out again afterwards).
+            if let phones = model.canvasNodes.first(where: { model.isOutputNode($0) }),
+               let index = model.graph.nodes.firstIndex(where: { $0.id == phones.id }) {
+                let saved = model.graph
+                model.graph.nodes[index].effects.append(Demo.calibration)
+                model.selection = .node(phones.id)
+                await both("calibration")
+                model.graph = saved
+            }
             // MIDI learn waiting for a control for the mic's mute.
             if let mic = model.canvasNodes.first(where: { !$0.effects.isEmpty && $0.kind == .defaultInput }) {
                 model.setDemoMIDI(learning: .nodeMute(mic.id), sources: [Demo.midiController])

@@ -105,12 +105,14 @@ public struct CalibrationBiquad: Hashable, Sendable {
         (self.b0, self.b1, self.b2, self.a1, self.a2) = (b0, b1, b2, a1, a2)
     }
 
-    /// The magnitude response in dB at a frequency: |B(e^iω)|² / |A(e^iω)|².
+    /// The magnitude response in dB at a frequency: |B(e^iω)|² / |A(e^iω)|², in the cookbook's form with
+    /// φ = sin²(ω/2), which keeps its precision for low frequencies and high Qs (expanding it in cos ω loses tenths of
+    /// a dB there to cancellation).
     public func gain(at frequency: Double, sampleRate: Double) -> Double {
-        let w = 2 * Double.pi * frequency / sampleRate
-        let (c1, c2) = (cos(w), cos(2 * w))
-        let numerator = b0 * b0 + b1 * b1 + b2 * b2 + 2 * (b0 * b1 + b1 * b2) * c1 + 2 * b0 * b2 * c2
-        let denominator = 1 + a1 * a1 + a2 * a2 + 2 * (a1 + a1 * a2) * c1 + 2 * a2 * c2
+        let s = sin(Double.pi * frequency / sampleRate)
+        let phi = s * s
+        let numerator = pow((b0 + b1 + b2) / 2, 2) - phi * (4 * b0 * b2 * (1 - phi) + b1 * (b0 + b2))
+        let denominator = pow((1 + a1 + a2) / 2, 2) - phi * (4 * a2 * (1 - phi) + a1 * (1 + a2))
         return 10 * log10(max(numerator, 1e-300) / max(denominator, 1e-300))
     }
 

@@ -184,7 +184,7 @@ final class PlannerTests: XCTestCase {
     }
 
     func testSchema3FilesTurnOnConversion() throws {
-        // A schema 3 file has no rateConversion: it loads as Automatic and is saved as schema 4.
+        // A schema 3 file has no rateConversion: it loads as Automatic and is saved as the current schema.
         var graph = Graph()
         let device = Templates.streamWithoutChat(&graph, excluding: [])
         let sinkIndex = try XCTUnwrap(graph.nodes.firstIndex { $0.kind == .virtualDevice(device.id) })
@@ -207,7 +207,7 @@ final class PlannerTests: XCTestCase {
         let store = Store(folder: folder)
         try old.write(to: store.graphURL)
         let loaded = try XCTUnwrap(store.load())
-        XCTAssertEqual(loaded.schema, 4)
+        XCTAssertEqual(loaded.schema, Graph.currentSchema)
         XCTAssertTrue(loaded.nodes.allSatisfy { $0.rateConversion == .automatic })
         XCTAssertEqual(loaded.nodes[sinkIndex].bufferFrames, 256, "schema 3 settings are kept")
         XCTAssertEqual(loaded.cables, graph.cables)

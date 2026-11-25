@@ -122,12 +122,14 @@ typedef struct JKUnit JKUnit;
 /// - pan: 0 = position, -1 (left) … 1 (right); even channels count as left, odd ones as right (a balance).
 /// - mono: none; every channel gets the average of all of them.
 /// - gate: 0 = threshold (linear peak level), 1 = release in seconds. Opens in 1 ms and holds for 50 ms.
+/// - correction: none; its settings are a JKCorrection block (see jk_chain_swap_correction).
 typedef enum {
     JK_EFFECT_CUSTOM = 0,
     JK_EFFECT_GAIN = 1,
     JK_EFFECT_PAN = 2,
     JK_EFFECT_MONO = 3,
     JK_EFFECT_GATE = 4,
+    JK_EFFECT_CORRECTION = 5,
 } JKEffectKind;
 
 #define JK_EFFECT_MAX_PARAMETERS 4
@@ -159,6 +161,46 @@ float jk_chain_parameter(const JKChain *_Nonnull chain, uint32_t stage, uint32_t
 /// Runs every stage that isn't bypassed, in order, on `channelCount` channels (at most the chain's). Audio thread.
 void jk_chain_process(JKChain *_Nonnull chain, float *_Nonnull const *_Nonnull channels, uint32_t channelCount,
                       uint32_t frames);
+
+// MARK: Correction
+
+/// A correction stage (JK_EFFECT_CORRECTION, the Calibration effect) runs, per channel, a cascade of biquads (double
+/// precision state), then a delay, then the channel's level and the preamp. It adds no delay of its own: a channel's
+/// delay lines it up with the others. Its delay lines are made with the stage (`JK_CORRECTION_MAX_DELAY` at the
+/// chain's rate). Its settings are an immutable JKCorrection block, built off the audio thread and swapped in with one
+/// atomic exchange; the audio thread cross-fades from the old settings to the new ones over one buffer. Channels
+/// beyond the block's (and every channel while there is no block) pass through untouched.
+#define JK_CORRECTION_MAX_SECTIONS 32
+/// Seconds: the longest delay a channel can have.
+#define JK_CORRECTION_MAX_DELAY 0.05
+
+typedef struct JKCorrection JKCorrection;
+
+/// A block of settings for `channels` channels, each passing its audio through until set. Returns NULL for no
+/// channels or when memory runs out.
+JKCorrection *_Nullable jk_correction_create(uint32_t channels);
+/// Frees a block: one never handed to a chain, or one a chain handed back once it is done with it.
+void jk_correction_destroy(JKCorrection *_Nonnull correction);
+uint32_t jk_correction_channels(const JKCorrection *_Nonnull correction);
+/// Sets a channel: `sections` biquads (at most JK_CORRECTION_MAX_SECTIONS), each five coefficients b0, b1, b2, a1, a2
+/// normalised so a0 = 1; a delay in frames (clamped to the stage's longest); and a linear level. Returns 0 for a
+/// channel or section count out of range, or coefficients that aren't finite. Only before the block is handed over.
+int jk_correction_set_channel(JKCorrection *_Nonnull correction, uint32_t channel,
+                              const double *_Nullable coefficients, uint32_t sections, uint32_t delayFrames,
+                              float level);
+/// The linear gain every corrected channel gets. Only before the block is handed over.
+void jk_correction_set_preamp(JKCorrection *_Nonnull correction, float gain);
+
+/// Puts `correction` (or NULL to pass everything through) into a correction stage and returns the block it replaces
+/// (NULL if none), which the audio thread may still be reading: free it once `jk_chain_is_done_with_correction` says
+/// so, or once nothing renders the chain any more. The chain owns the block in place and frees it with itself. A
+/// stage that isn't a correction hands `correction` straight back. Any thread but the audio thread.
+JKCorrection *_Nullable jk_chain_swap_correction(JKChain *_Nonnull chain, uint32_t stage,
+                                                 JKCorrection *_Nullable correction, uint64_t *_Nonnull ticket);
+/// Whether the audio thread can no longer reach the block swapped out with `ticket`.
+int jk_chain_is_done_with_correction(const JKChain *_Nonnull chain, uint32_t stage, uint64_t ticket);
+/// Frames of delay a correction stage can hold per channel (0 for other stages).
+uint32_t jk_chain_correction_max_delay(const JKChain *_Nonnull chain, uint32_t stage);
 
 // MARK: Timing
 
