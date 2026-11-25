@@ -69,9 +69,10 @@ if { [ -n "$feed" ] && [ -z "$key" ]; } || { [ -z "$feed" ] && [ -n "$key" ]; };
   exit 1
 fi
 # SwiftPM sandboxes its manifest builds; inside another sandbox (Nightshift's checks, for example) that fails with
-# "sandbox_apply: Operation not permitted", so turn SwiftPM's own sandbox off there.
+# "sandbox_apply: Operation not permitted", so turn SwiftPM's own sandbox off there. Such a sandbox usually has no
+# network either, so use the packages SwiftPM already has cached (--skip-update) instead of fetching updates first.
 spm_flags=""
-if ! /usr/bin/sandbox-exec -p '(version 1)(allow default)' /usr/bin/true 2>/dev/null; then spm_flags="--disable-sandbox"; fi
+if ! /usr/bin/sandbox-exec -p '(version 1)(allow default)' /usr/bin/true 2>/dev/null; then spm_flags="--disable-sandbox --skip-update"; fi
 grep -q "#define kDriverVersion \"$driver_version\"" Driver/JunctionDriver.c \
   || { echo "kDriverVersion in Driver/JunctionDriver.c doesn't match Driver/VERSION ($driver_version)" >&2; exit 1; }
 
