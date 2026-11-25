@@ -396,6 +396,16 @@ records its input, and restores the device list. It needs microphone permission 
 `--device-test` checks that Core Audio follows the driver (a temporary device appears, is renamed, changes channels
 and rate, reports a rate set from outside, disappears and returns); it opens no audio and needs no permission.
 
+**Speaker and headphone calibration** is in progress: nothing in the app uses it yet. So far JunctionCore has the
+maths, without device access (`Calibration*.swift`): an exponential sine sweep (20 Hz to 20 kHz or 0.45 × the rate)
+with its regularised inverse and deconvolution to an impulse response, arrival-time detection, the response on a
+fixed 240-point log grid through a frequency-dependent window, 1/3-, 1/6- and 1/12-octave smoothing, level-matched
+power averaging of listening positions, microphone calibration files and measurement text exports, a target (flat,
+tilt, shelves), a fitter (peaking and shelving filters within boost and cut limits, narrow deep dips left alone, a
+preamp keeping the curve at or below 0 dB, per-channel delay and level), cookbook biquad coefficients for any rate,
+parametric EQ preset import and export, and `CalibrationProfile`. The tests use simulated rooms (known filters, delay,
+noise, clock drift).
+
 `build.sh` always puts Junction Helper and its launch agent into Junction.app; `ROUTING_HELPER` decides whether the
 app registers and uses it (`JunctionRoutingHelper` in its Info.plist): `1` routes in the helper, `0` inside the app.
 It defaults to `0` in every build, release builds included, until the helper has been tried on a real Mac.
