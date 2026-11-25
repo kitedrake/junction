@@ -150,6 +150,17 @@ public final class RoutingClient: NSObject, RoutingAppXPC, @unchecked Sendable {
 
     public func requestMicrophone() { send(.requestMicrophone) { _ in } }
 
+    /// Stops sinks in the helper while the app measures a device they use; `done` runs (on the callback queue) once
+    /// they have stopped, or once the helper couldn't be asked.
+    public func hold(_ sinks: Set<UUID>, done: @escaping @Sendable () -> Void) {
+        let callbackQueue = callbackQueue
+        let once = Once()
+        send(.hold(sinks)) { _ in once.run { callbackQueue.async { done() } } }
+        if lock.withLock({ isFinished || connection == nil }) { once.run { callbackQueue.async { done() } } }
+    }
+
+    public func resume(_ sinks: Set<UUID>) { send(.resume(sinks)) { _ in } }
+
     /// Starts MIDI learn for a target in the helper (nil stops it); what it learns comes back as a `.midi` notice.
     public func learnMIDI(_ target: MIDITarget?) { send(.learnMIDI(target)) { _ in } }
 
@@ -233,6 +244,16 @@ public final class RoutingClient: NSObject, RoutingAppXPC, @unchecked Sendable {
     public func receive(_ notice: Data) {
         guard let notice = try? RoutingXPC.decode(RoutingNotice.self, from: notice) else { return }
         deliver(.notice(notice))
+    }
+
+    /// Runs a closure the first time only.
+    private final class Once: @unchecked Sendable {
+        private let lock = NSLock()
+        private var ran = false
+        func run(_ body: () -> Void) {
+            guard lock.withLock({ () -> Bool in defer { ran = true }; return !ran }) else { return }
+            body()
+        }
     }
 
     /// The connection keeps its exported object alive; this keeps it from keeping the client alive too.

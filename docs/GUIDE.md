@@ -299,6 +299,92 @@ the inspector.
 Under each effect the box shows what it costs while it runs: how much of the Mac's processor it uses ("CPU 1.2 %"),
 the delay it adds, and "own process" for a plugin macOS runs on its own.
 
+### Calibrating speakers and headphones
+
+**Calibration** makes speakers or headphones sound flat, or follow a curve you prefer. It is offered under **Add
+Effect** on outputs only: headphones, speakers, an interface's playback channels and **Default Output**. Speakers are
+measured in your room with a measurement microphone; headphones use a parametric EQ preset for your model. Everything
+happens inside Junction: nothing is downloaded.
+
+#### Speakers
+
+You need a measurement microphone (one made for measuring, ideally with its own calibration file) on a stand or
+something steady, and a quiet room.
+
+1. Right-click the speakers' output in the canvas and choose **Calibrate Speakers…** (or click it in the Calibration
+   effect's box in the inspector). A Calibration effect is added if the output has none.
+2. **Setup**: choose the microphone and, for an interface, the input it's plugged into. Click **Load…** beside
+   **Calibration file** and pick the text file that came with your microphone (frequency and dB lines); without one,
+   the microphone's own response is measured too, which matters most in the deep bass and the treble. Choose the
+   speakers to measure (named as the output names its channels, such as **Left and Right**) and how many listening
+   positions to measure (1 to 9; 7 is a good balance). Pause music, videos and calls: anything else playing ends up in
+   the measurement. Click **Continue**; the first time, macOS asks whether Junction may use the microphone.
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="screenshots/calibrate-setup-light.png">
+  <img src="screenshots/calibrate-setup-dark.png" alt="Calibrate Speakers, Setup: the microphone, its input and calibration file, the speakers to measure, seven listening positions and a reminder to pause other audio">
+</picture>
+
+3. **Measure**: Junction first plays a soft hiss on the first speaker and checks what the microphone hears. It needs
+   the sound well above the room's noise and the microphone not overloaded; if not, it says what to change (turn the
+   speakers or the microphone's gain up or down, make the room quieter) and **Check Again** tries again. While it
+   measures, Junction stops its own routing to these speakers and from the microphone, and starts it again afterwards.
+4. Put the microphone where your head is when you listen, at ear height, and click **Measure Position 1**. Each
+   speaker plays a rising tone in turn; keep quiet and still. Then move the microphone to the next spot on the
+   diagram, within about 30 cm of the first and at the same height, and measure again until every position is done.
+   **Redo Last** measures the last position again (if something made a noise), and **Drop** leaves out any position.
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="screenshots/calibrate-measuring-light.png">
+  <img src="screenshots/calibrate-measuring-dark.png" alt="Calibrate Speakers, Measure: the level check passed, three of seven positions measured, and a diagram of the listening positions around the first">
+</picture>
+
+5. **Results**: click **See Results**. For each speaker the graph shows the measured average (**Show each position**
+   adds every position's measurement), the target, the correction and the result it should give. Change the target's
+   **Tilt** (a gentle downward tilt often sounds more natural in a room), **Bass** and **Treble**, which frequencies are
+   corrected (**From** the speaker's own limit or a frequency you pick, **Up to** a frequency), the **Most boost**, the
+   number of **Filters**, and **Line up speakers** (delays the nearer speakers and lowers the louder ones so all arrive
+   together, equally loud). Every change fits the correction again at once, from the measurements already made.
+6. While the results show you hear the correction. Switch **Before/After** to compare: **Before** turns the correction
+   off and plays at the same loudness, so neither sounds better just for being louder.
+7. Click **Save**. The correction goes into the output's Calibration effect, with its measurements; **Edit › Undo**
+   takes it back. Later, **Adjust…** in the effect's box opens the results again to change the target or limits
+   without measuring.
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="screenshots/calibrate-results-light.png">
+  <img src="screenshots/calibrate-results-dark.png" alt="Calibrate Speakers, Results: the measured average, target, correction and predicted result for the left speaker, with the target, range, boost, filter and alignment controls and the Before/After switch">
+</picture>
+
+A correction fixes how loud each frequency is, not echoes: a room's reflections, and deep narrow dips where sound
+cancels itself at your listening spot, can't be fixed with EQ (Junction leaves those dips alone rather than boosting
+them). A correction belongs to the speakers, room and listening spot it was measured in.
+
+#### Headphones
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="screenshots/calibration-light.png">
+  <img src="screenshots/calibration-dark.png" alt="Calibration on the headphones: an EQ preset's name and curve, Amount at 80 %, and the Load and Export EQ Preset buttons">
+</picture>
+
+1. Select the output in the canvas and choose **Add Effect › Calibration**. Until a correction is loaded it lets the
+   sound through unchanged.
+2. Click **Load EQ Preset…** and pick a parametric EQ preset for your headphone model: a text file with a line such as
+   `Preamp: -6.2 dB` and lines such as `Filter 1: ON PK Fc 105 Hz Gain 5.8 dB Q 0.70`. Peaking (PK) and shelving
+   (LS, HS, LSC, HSC) filters are read; a file with other filter types is refused and says which line. The preset is
+   kept with your setup, so you don't need the file afterwards.
+3. The box shows the preset's name, that it's for headphones, the date you loaded it and the device it was loaded
+   for, and a graph of the correction from 20 Hz to 20 kHz. **Amount** sets how much of it you hear: 100 % is the
+   whole correction, 50 % half of every boost and cut, 0 % none.
+
+A correction is made for one device. When the output plays on another one (for example **Default Output** after you
+pick other headphones in Sound settings), the box warns you; load the preset for those headphones (or measure those speakers) instead. **Export
+EQ Preset…** saves the correction (at full amount) as a text file in the same format, to use elsewhere or keep. A
+speaker correction with different filters per channel asks which channel to export.
+
+Calibration adds no delay, works on every channel of the output (a correction made per channel works on those
+channels and leaves the others alone), and is switched off, moved and controlled by MIDI like any other effect.
+
 ### Audio Unit plugins
 
 Any effect Audio Unit installed on your Mac (from another maker, or one of Apple's not listed above) can join a chain.
@@ -559,7 +645,8 @@ macOS asks for two permissions the first time Junction needs them. They belong t
 **Junction**, or **Junction Helper** when routing runs in the background (see section 13). The prompts and banners
 say which.
 
-- **Microphone**: to read any input, including Junction's own virtual devices.
+- **Microphone**: to read any input, including Junction's own virtual devices. Calibrating speakers asks for it
+  for **Junction** itself, also when Junction Helper routes.
 - **System Audio Recording**: for System Audio and app nodes.
 
 If you said no:

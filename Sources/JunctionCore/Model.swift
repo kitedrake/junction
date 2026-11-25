@@ -286,8 +286,9 @@ public struct Graph: Codable, Equatable, Sendable {
     /// codes, bypass, parameters and Audio Unit state; absent in older files, which means none), and MIDI mappings
     /// (`midi`: each one's control, how its values are read, and the cable, node, effect, device or scene it drives;
     /// absent in older files, which means none), and headphone monitors (`monitors`: per virtual device, its output,
-    /// level, mute and a level per source; absent in older files, which means none).
-    public static let currentSchema = 4
+    /// level, mute and a level per source; absent in older files, which means none). 5: the Calibration effect keeps
+    /// its correction in `Effect.calibration` (absent until one is loaded); schema 4 files load unchanged.
+    public static let currentSchema = 5
     public var schema = Graph.currentSchema
     public var virtualDevices: [VirtualDevice] = []
     public var nodes: [Node] = []
@@ -366,7 +367,8 @@ public struct Graph: Codable, Equatable, Sendable {
     /// sets the device options for files from before they existed, then tidies the canvases. Scenes and MIDI mappings
     /// are new in schema 4: older files have none, scenes naming deleted devices lose those parts, and mappings whose
     /// target is gone are dropped. So are monitors: older files have none, a deleted device's monitor goes, a device
-    /// keeps one at most, and solo/listen starts off.
+    /// keeps one at most, and solo/listen starts off. Schema 5 adds Calibration's profiles, which a schema 4 file can't
+    /// have: any there (from a development build) are dropped and the rest of the file is kept as it is.
     public mutating func upgrade() {
         if schema < 2 { moveToCanvases() }
         if schema < 4 {
@@ -377,6 +379,7 @@ public struct Graph: Codable, Equatable, Sendable {
             midi = []
             monitors = []
         }
+        if schema < 5 { convertCalibrations() }
         schema = Graph.currentSchema
         tidyCanvases()
         let devices = Set(virtualDevices.map(\.id))
@@ -446,6 +449,17 @@ public struct Graph: Codable, Equatable, Sendable {
     /// build loses what it had, as with its scenes).
     mutating func convertEffects() {
         for index in nodes.indices { nodes[index].effects = [] }
+    }
+
+    /// Schema 4 had no Calibration profiles (nor did the nodes its scenes keep).
+    mutating func convertCalibrations() {
+        func clear(_ nodes: inout [Node]) {
+            for node in nodes.indices {
+                for effect in nodes[node].effects.indices { nodes[node].effects[effect].calibration = nil }
+            }
+        }
+        clear(&nodes)
+        for scene in scenes.indices { clear(&scenes[scene].nodes) }
     }
 
     /// Keeps the canvases consistent: every virtual device has exactly one device node on its own canvas; nodes on no

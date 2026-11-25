@@ -308,6 +308,10 @@ struct RootView: View {
         .sheet(item: $model.pluginPicker) { request in
             PluginPicker(request: request)
         }
+        .sheet(item: Binding(get: { model.speakerCalibration }, set: { if $0 == nil { model.closeSpeakerCalibration() } })) {
+            calibration in
+            CalibrateSpeakersSheet(calibration: calibration)
+        }
         .sheet(isPresented: Binding(get: { model.crashOffer != nil }, set: { if !$0 { model.finishCrashOffer() } })) {
             if let offer = model.crashOffer { CrashReportSheet(offer: offer) }
         }

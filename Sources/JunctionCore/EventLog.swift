@@ -140,7 +140,7 @@ public enum Diagnostics {
             }
             if let frames = sink.bufferFrames { line += ", buffer \(frames)" }
             if let status = statuses?[sink.sinkNode] {
-                line += status.state == .running ? ", running" : ", failed"
+                line += ", \(status.state.rawValue)"
                 if let latency = status.latency { line += String(format: ", about %.1f ms", latency * 1000) }
                 if let message = status.message { line += ": \(message)" }
             }

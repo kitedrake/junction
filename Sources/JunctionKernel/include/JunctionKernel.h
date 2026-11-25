@@ -122,12 +122,14 @@ typedef struct JKUnit JKUnit;
 /// - pan: 0 = position, -1 (left) … 1 (right); even channels count as left, odd ones as right (a balance).
 /// - mono: none; every channel gets the average of all of them.
 /// - gate: 0 = threshold (linear peak level), 1 = release in seconds. Opens in 1 ms and holds for 50 ms.
+/// - correction: none; its settings are a JKCorrection block (see jk_chain_swap_correction).
 typedef enum {
     JK_EFFECT_CUSTOM = 0,
     JK_EFFECT_GAIN = 1,
     JK_EFFECT_PAN = 2,
     JK_EFFECT_MONO = 3,
     JK_EFFECT_GATE = 4,
+    JK_EFFECT_CORRECTION = 5,
 } JKEffectKind;
 
 #define JK_EFFECT_MAX_PARAMETERS 4
@@ -159,6 +161,46 @@ float jk_chain_parameter(const JKChain *_Nonnull chain, uint32_t stage, uint32_t
 /// Runs every stage that isn't bypassed, in order, on `channelCount` channels (at most the chain's). Audio thread.
 void jk_chain_process(JKChain *_Nonnull chain, float *_Nonnull const *_Nonnull channels, uint32_t channelCount,
                       uint32_t frames);
+
+// MARK: Correction
+
+/// A correction stage (JK_EFFECT_CORRECTION, the Calibration effect) runs, per channel, a cascade of biquads (double
+/// precision state), then a delay, then the channel's level and the preamp. It adds no delay of its own: a channel's
+/// delay lines it up with the others. Its delay lines are made with the stage (`JK_CORRECTION_MAX_DELAY` at the
+/// chain's rate). Its settings are an immutable JKCorrection block, built off the audio thread and swapped in with one
+/// atomic exchange; the audio thread cross-fades from the old settings to the new ones over one buffer. Channels
+/// beyond the block's (and every channel while there is no block) pass through untouched.
+#define JK_CORRECTION_MAX_SECTIONS 32
+/// Seconds: the longest delay a channel can have.
+#define JK_CORRECTION_MAX_DELAY 0.05
+
+typedef struct JKCorrection JKCorrection;
+
+/// A block of settings for `channels` channels, each passing its audio through until set. Returns NULL for no
+/// channels or when memory runs out.
+JKCorrection *_Nullable jk_correction_create(uint32_t channels);
+/// Frees a block: one never handed to a chain, or one a chain handed back once it is done with it.
+void jk_correction_destroy(JKCorrection *_Nonnull correction);
+uint32_t jk_correction_channels(const JKCorrection *_Nonnull correction);
+/// Sets a channel: `sections` biquads (at most JK_CORRECTION_MAX_SECTIONS), each five coefficients b0, b1, b2, a1, a2
+/// normalised so a0 = 1; a delay in frames (clamped to the stage's longest); and a linear level. Returns 0 for a
+/// channel or section count out of range, or coefficients that aren't finite. Only before the block is handed over.
+int jk_correction_set_channel(JKCorrection *_Nonnull correction, uint32_t channel,
+                              const double *_Nullable coefficients, uint32_t sections, uint32_t delayFrames,
+                              float level);
+/// The linear gain every corrected channel gets. Only before the block is handed over.
+void jk_correction_set_preamp(JKCorrection *_Nonnull correction, float gain);
+
+/// Puts `correction` (or NULL to pass everything through) into a correction stage and returns the block it replaces
+/// (NULL if none), which the audio thread may still be reading: free it once `jk_chain_is_done_with_correction` says
+/// so, or once nothing renders the chain any more. The chain owns the block in place and frees it with itself. A
+/// stage that isn't a correction hands `correction` straight back. Any thread but the audio thread.
+JKCorrection *_Nullable jk_chain_swap_correction(JKChain *_Nonnull chain, uint32_t stage,
+                                                 JKCorrection *_Nullable correction, uint64_t *_Nonnull ticket);
+/// Whether the audio thread can no longer reach the block swapped out with `ticket`.
+int jk_chain_is_done_with_correction(const JKChain *_Nonnull chain, uint32_t stage, uint64_t ticket);
+/// Frames of delay a correction stage can hold per channel (0 for other stages).
+uint32_t jk_chain_correction_max_delay(const JKChain *_Nonnull chain, uint32_t stage);
 
 // MARK: Timing
 
@@ -278,6 +320,49 @@ OSStatus jk_renderer_ioproc(AudioObjectID device, const AudioTimeStamp *_Nonnull
                             const AudioBufferList *_Nonnull input, const AudioTimeStamp *_Nonnull inputTime,
                             AudioBufferList *_Nonnull output, const AudioTimeStamp *_Nonnull outputTime,
                             void *_Nullable clientData);
+
+// MARK: Measurement
+
+typedef struct JKMeasure JKMeasure;
+
+/// Frames a cancelled take fades out over (within the next IO buffer).
+#define JK_MEASURE_FADE_FRAMES 128
+
+/// Plays a test signal on one output channel and records one microphone channel in step with it, for calibration.
+/// One IOProc runs it (the output device's, or a private aggregate's with the output device as its clock); a control
+/// thread starts and stops takes. `micChannel` counts the IOProc's input channels across its buffers. `capacity` is
+/// the longest take, in frames. Returns NULL if memory runs out or an argument is out of range.
+JKMeasure *_Nullable jk_measure_create(uint32_t micChannel, uint32_t capacity);
+/// Frees it. Only call once the IOProc no longer runs it.
+void jk_measure_destroy(JKMeasure *_Nonnull measure);
+/// Reads the microphone from `converter` (not owned; its channels, starting at `micChannel`) instead of the input
+/// buffers: for a microphone at another rate, whose own IOProc writes the converter. Only call before IO starts.
+void jk_measure_set_converter(JKMeasure *_Nonnull measure, JKConverter *_Nullable converter);
+
+/// Control thread: copies `frames` frames of `signal` to play on output channel `channel` and records as many frames
+/// from the next IO cycle on. Returns 0 (and does nothing) while a take is still playing or fading out, or when the
+/// take is longer than the capacity.
+int jk_measure_start(JKMeasure *_Nonnull measure, const float *_Nonnull signal, uint32_t frames, uint32_t channel);
+/// Control thread, any time: the take stops; the next IO buffer fades out within JK_MEASURE_FADE_FRAMES and is
+/// silent after that. Never blocks.
+void jk_measure_stop(JKMeasure *_Nonnull measure);
+/// After the IOProc has stopped for good: forgets a take that couldn't fade out (the device went away).
+void jk_measure_reset(JKMeasure *_Nonnull measure);
+/// Whether the latest take has recorded all its frames.
+int jk_measure_is_done(const JKMeasure *_Nonnull measure);
+/// Frames recorded so far in the latest take, and the recording (read it once the take is done).
+uint32_t jk_measure_recorded(const JKMeasure *_Nonnull measure);
+const float *_Nonnull jk_measure_recording(const JKMeasure *_Nonnull measure);
+/// IO cycles run so far, and those that came after a gap in the device's sample time (a lost buffer): a take with a
+/// gap is out of step and has to be done again.
+uint64_t jk_measure_cycles(const JKMeasure *_Nonnull measure);
+uint64_t jk_measure_dropouts(const JKMeasure *_Nonnull measure);
+
+/// The AudioDeviceIOProc. Pass the measurement as client data. Outputs silence on every channel but the take's.
+OSStatus jk_measure_ioproc(AudioObjectID device, const AudioTimeStamp *_Nonnull now,
+                           const AudioBufferList *_Nonnull input, const AudioTimeStamp *_Nonnull inputTime,
+                           AudioBufferList *_Nonnull output, const AudioTimeStamp *_Nonnull outputTime,
+                           void *_Nullable clientData);
 
 #ifdef __cplusplus
 }

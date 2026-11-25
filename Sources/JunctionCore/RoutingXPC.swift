@@ -21,7 +21,7 @@ import Security
 
 public enum RoutingXPC {
     /// Bumped when a message changes shape; an app and a helper that disagree don't talk (the app routes itself).
-    public static let protocolVersion = 3
+    public static let protocolVersion = 4
     public static let appBundleIdentifier = "local.junction.app"
     public static let helperBundleIdentifier = "local.junction.helper"
     /// The launchd label and the Mach service the helper listens on.
@@ -93,6 +93,10 @@ public enum RoutingRequest: Codable, Equatable, Sendable {
     case openPluginWindow(effect: UUID, title: String)
     /// MIDI learn: the next suitable message from any controller drives `target` (nil: stop learning).
     case learnMIDI(MIDITarget?)
+    /// Stop these sinks until `resume` (the app measures a device they use); answered once they have stopped. Sinks
+    /// an app holds come back by themselves when it goes away.
+    case hold(Set<UUID>)
+    case resume(Set<UUID>)
 }
 
 /// What the helper knows when an app says hello.

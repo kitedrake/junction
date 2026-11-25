@@ -158,7 +158,7 @@ private struct StripEffects: View {
             }
             .frame(height: StripMetrics.effectsHeight - 20)
             Menu {
-                ForEach(EffectKind.allCases, id: \.self) { kind in
+                ForEach(EffectKind.allCases.filter { $0.isOffered(onOutput: model.isOutputNode(node)) }, id: \.self) { kind in
                     Button(kind.title, systemImage: kind.symbol) { model.addEffect(kind, to: node.id) }
                 }
                 Divider()

@@ -293,7 +293,7 @@ final class MIDITests: XCTestCase {
         try store.save(setup.graph)
         let text = try String(contentsOf: store.graphURL, encoding: .utf8)
         XCTAssertTrue(text.contains("\"midi\""))
-        XCTAssertTrue(text.contains("\"schema\" : 4"))
+        XCTAssertTrue(text.contains("\"schema\" : \(Graph.currentSchema)"))
         let loaded = try XCTUnwrap(store.load())
         XCTAssertEqual(loaded.midi, setup.graph.midi)
         XCTAssertEqual(loaded, setup.graph)

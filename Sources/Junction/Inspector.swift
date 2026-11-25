@@ -466,7 +466,9 @@ private struct EffectsSection: View {
                 HStack {
                     Menu("Add Effect") {
                         Section("Built in") {
-                            ForEach([EffectKind.gain, .pan, .mono, .gate], id: \.self) { kind in
+                            ForEach([EffectKind.gain, .pan, .mono, .gate, .calibration].filter {
+                                $0.isOffered(onOutput: model.isOutputNode(node))
+                            }, id: \.self) { kind in
                                 Button(kind.title, systemImage: kind.symbol) { model.addEffect(kind, to: node.id) }
                             }
                         }
@@ -598,8 +600,122 @@ private struct EffectRow: View {
                     }
                 }
             }
+            if kind == .calibration { CalibrationDetails(node: node, effect: effect) }
         }
         .opacity(effect.bypass ? 0.6 : 1)
+    }
+}
+
+/// Calibration's profile: what it is and what it's for, its curves, and loading and exporting EQ presets.
+private struct CalibrationDetails: View {
+    @Environment(AppModel.self) private var model
+    let node: Node
+    let effect: Effect
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let profile = effect.calibration {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(profile.name).font(.callout.weight(.medium)).lineLimit(1)
+                    Text(details(profile)).font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                let current = model.currentDevice(node)
+                if profile.isForAnotherDevice(than: current?.uid) {
+                    Label(mismatch(profile, current: current?.name), systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                FrequencyResponseGraph(curves: curves(profile))
+            } else {
+                Text("No correction loaded, so the audio passes through. Measure your speakers, or load a parametric EQ preset for your headphones.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                Button("Calibrate Speakers…") { model.calibrateSpeakers(node.id) }
+                    .help("Measures the speakers with a measurement microphone and fits a correction")
+                    .disabled(model.currentDevice(node) == nil)
+                if let profile = effect.calibration, profile.kind == .speakers, profile.canRefit {
+                    Button("Adjust…") { model.adjustCalibration(effect.id, in: node.id) }
+                        .help("Changes the target and limits and fits again from the saved measurements, without measuring")
+                }
+            }
+            .controlSize(.small)
+            HStack {
+                Button("Load EQ Preset…") { model.loadEQPreset(into: effect.id, in: node.id) }
+                    .help("Reads a text file with a Preamp line and Filter lines (peaking and shelving filters)")
+                if let profile = effect.calibration {
+                    if profile.channels.count > 1 {
+                        Menu("Export EQ Preset…") {
+                            ForEach(profile.channels.indices, id: \.self) { channel in
+                                Button("Channel \(channel + 1)…") { model.exportEQPreset(profile, channel: channel) }
+                            }
+                        }
+                        .fixedSize()
+                    } else {
+                        Button("Export EQ Preset…") { model.exportEQPreset(profile) }
+                    }
+                }
+            }
+            .controlSize(.small)
+        }
+    }
+
+    /// "Headphones, from an EQ preset · 25 Nov 2026 · for AirPods Pro".
+    private func details(_ profile: CalibrationProfile) -> String {
+        let kind = switch profile.kind {
+        case .speakers: "Speakers, measured in the room"
+        case .headphones: "Headphones, from an EQ preset"
+        case .imported: "From an imported measurement"
+        }
+        var parts = [kind, profile.date.formatted(date: .abbreviated, time: .omitted)]
+        if let device = profile.deviceName ?? profile.deviceUID { parts.append("for \(device)") }
+        return parts.joined(separator: " · ")
+    }
+
+    private func mismatch(_ profile: CalibrationProfile, current: String?) -> String {
+        let made = profile.deviceName ?? "another device"
+        let now = current ?? "no device"
+        let place = node.kind == .defaultOutput ? "Default Output plays on \(now) now (Sound settings)" : "This output is \(now)"
+        return "Made for \(made). \(place), so the correction may not suit it."
+    }
+
+    /// The correction per channel (at Amount), and for a measured profile each channel's average measurement and,
+    /// for the first channel, the result with the correction.
+    private func curves(_ profile: CalibrationProfile) -> [ResponseCurve] {
+        let amount = effect.value(EffectKind.calibration.parameters[0]) / 100
+        let scaled = profile.scaled(by: amount)
+        let frequencies = CalibrationGrid.frequencies
+        let colors: [Color] = [.accentColor, .orange, .green, .pink]
+        let channels = Set(profile.channels.map(\.filters)).count > 1 || Set(profile.channels.map(\.level)).count > 1
+            ? min(profile.channels.count, colors.count) : 1
+        var curves = (0..<channels).map { channel in
+            ResponseCurve(name: channels == 1 ? "Correction" : "Correction \(channel + 1)", color: colors[channel],
+                          frequencies: frequencies, levels: scaled.curve(channel: channel, sampleRate: 48_000))
+        }
+        let averages = profile.measurements.filter { $0.position == nil }.sorted { $0.channel < $1.channel }.prefix(2)
+        for measurement in averages {
+            curves.append(ResponseCurve(name: averages.count == 1 ? "Measured" : "Measured \(measurement.channel + 1)",
+                                        color: measurement.channel == 0 ? .secondary : .brown,
+                                        frequencies: frequencies, levels: centered(measurement), isDashed: true))
+        }
+        if let first = averages.first {
+            let correction = scaled.curve(channel: first.channel, sampleRate: 48_000)
+            curves.append(ResponseCurve(name: "Result", color: .purple, frequencies: frequencies,
+                                        levels: zip(centered(first), correction).map(+)))
+        }
+        return curves
+    }
+
+    /// A measurement on the grid, moved so its midrange sits at 0 dB (the correction's scale).
+    private func centered(_ measurement: CalibrationMeasurement) -> [Double] {
+        let levels = measurement.curve.resampled().levels
+        let midrange = zip(CalibrationGrid.frequencies, levels).filter { CalibrationAnalysis.midrange.contains($0.0) }.map(\.1)
+        let offset = midrange.isEmpty ? 0 : midrange.reduce(0, +) / Double(midrange.count)
+        return levels.map { $0 - offset }
     }
 }
 
@@ -668,6 +784,7 @@ private struct EffectSlider: View {
         case .hertz: return raw >= 1000 ? (raw / 100).rounded() * 100 : raw.rounded()
         case .seconds: return raw < 0.01 ? (raw * 10_000).rounded() / 10_000 : (raw * 1000).rounded() / 1000
         case .balance: return (raw * 100).rounded() / 100
+        case .percent: return raw.rounded()
         }
     }
 }

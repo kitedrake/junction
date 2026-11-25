@@ -22,6 +22,59 @@ enum Demo {
     static let missingPlugin = Effect(type: "aufx", subtype: "vrdr", manufacturer: "Exmp", state: Data([0x62, 0x70, 0x6C, 0x69]),
                                       name: "Vocal Rider", vendor: "Example Audio")
 
+    /// A made-up parametric EQ preset for the headphones, as Load EQ Preset… makes it, at 80 %.
+    static var calibration: Effect {
+        let preset = ParametricPreset(preamp: -6.2, filters: [
+            CalibrationFilter(.lowShelf, frequency: 105, gain: 5.8, q: 0.7),
+            CalibrationFilter(.peaking, frequency: 210, gain: -2.4, q: 0.9),
+            CalibrationFilter(.peaking, frequency: 1_350, gain: 1.6, q: 1.8),
+            CalibrationFilter(.peaking, frequency: 3_200, gain: -4.1, q: 3.5),
+            CalibrationFilter(.peaking, frequency: 5_600, gain: 2.3, q: 4),
+            CalibrationFilter(.highShelf, frequency: 9_500, gain: -3, q: 0.7),
+        ])
+        var profile = CalibrationProfile(name: "Over-Ear Reference", preset: preset)
+        profile.date = Date(timeIntervalSinceReferenceDate: 815_000_000)
+        profile.deviceUID = "demo.headphones"
+        profile.deviceName = "AirPods Pro"
+        var effect = Effect(.calibration)
+        effect.calibration = profile
+        effect.set(EffectKind.calibration.parameters[0], 80)
+        return effect
+    }
+
+    /// A made-up measurement microphone's calibration file.
+    static var micCalibration: MicCalibration? {
+        try? MicCalibration(name: "Measuring Mic 0012345", text: "\"Sens Factor =-1.4dB\"\n20 -1.8\n50 -0.4\n1000 0\n10000 0.8\n20000 2.1\n")
+    }
+
+    /// What a made-up level check heard.
+    static let levelReading = MeasurementEngine.LevelReading(level: -18, micLevel: -31.4, micPeak: -19.2, noiseFloor: -78.6)
+
+    /// Made-up measurements of the MacBook Pro Speakers at seven positions (one capture per speaker each): small
+    /// speakers that roll off below 90 Hz, a room mode at 120 Hz, a dip at 300 Hz and a little treble lift, changing a
+    /// little from position to position; the right speaker 30 cm farther.
+    static var speakerPositions: [[CalibrationCapture]] {
+        (0..<7).map { position in
+            (0..<2).map { channel in
+                let wobble = Double((position * 7 + channel * 3) % 5) - 2
+                let filters = [
+                    CalibrationFilter(.peaking, frequency: 120 + 4 * wobble, gain: 7 + wobble, q: 4),
+                    CalibrationFilter(.peaking, frequency: 300 - 10 * wobble, gain: -5, q: 2.5),
+                    CalibrationFilter(.peaking, frequency: 2_400, gain: -2.5 + Double(channel), q: 1.2),
+                    CalibrationFilter(.highShelf, frequency: 6_000, gain: 2.5),
+                    CalibrationFilter(.peaking, frequency: 9_000 + 400 * wobble, gain: 0.8 * wobble, q: 6),
+                ]
+                let frequencies = CalibrationGrid.frequencies
+                let levels = zip(frequencies, CalibrationFilter.response(of: filters, preamp: -32 - 1.5 * Double(channel),
+                                                                         sampleRate: 48_000, at: frequencies)).map { hertz, level in
+                    level - (hertz < 90 ? 24 * log2(90 / hertz) : 0) - (hertz > 16_000 ? 12 * log2(hertz / 16_000) : 0)
+                }
+                return CalibrationCapture(curve: CalibrationCurve(levels: levels),
+                                          arrival: 0.0082 + 0.0009 * Double(channel) + 0.0002 * Double(position))
+            }
+        }
+    }
+
     /// The made-up MIDI controller the mappings were learned from.
     static let midiController = "Desk Controller"
 
@@ -199,6 +252,49 @@ enum Snapshot {
                 model.selection = .node(mic.id)
             }
             await both("effects")
+            // Calibration on the headphones: a made-up EQ preset, its curve and Amount (taken out again afterwards).
+            if let phones = model.canvasNodes.first(where: { model.isOutputNode($0) }),
+               let index = model.graph.nodes.firstIndex(where: { $0.id == phones.id }) {
+                let saved = model.graph
+                model.graph.nodes[index].effects.append(Demo.calibration)
+                model.selection = .node(phones.id)
+                await both("calibration")
+                model.graph = saved
+            }
+            // Calibrate Speakers on Default Output (the MacBook Pro Speakers): every page with made-up measurements,
+            // then the results at the window's minimum size (the node and the effect are taken out again afterwards).
+            if let canvas = model.canvas, let first = model.canvasNodes.first(where: { model.isOutputNode($0) }) {
+                let saved = model.graph
+                let speakers = Node(kind: .defaultOutput, x: first.x, y: first.y + 160, canvas: canvas)
+                model.graph.nodes.append(speakers)
+                model.calibrateSpeakers(speakers.id)
+                if let sheet = model.speakerCalibration {
+                    sheet.micUID = "demo.interface"
+                    sheet.micChannel = 1
+                    sheet.setMicCalibration(Demo.micCalibration)
+                    try? await Task.sleep(for: .milliseconds(600))
+                    await both("calibrate-setup", sheet: true)
+                    sheet.showPreview(positions: Array(Demo.speakerPositions.prefix(3)), reading: Demo.levelReading,
+                                      page: .measuring, date: Date(timeIntervalSinceReferenceDate: 815_000_000))
+                    await both("calibrate-measuring", sheet: true)
+                    sheet.showPreview(positions: Demo.speakerPositions, reading: Demo.levelReading, page: .results,
+                                      date: Date(timeIntervalSinceReferenceDate: 815_000_000))
+                    await both("calibrate-results", sheet: true)
+                    sheet.isComparing = true
+                    await both("calibrate-compare", sheet: true)
+                    sheet.isComparing = false
+                    resize(980, 560)
+                    for (appearance, suffix) in [(NSAppearance.Name.aqua, "light"), (.darkAqua, "dark")] {
+                        NSApp.appearance = NSAppearance(named: appearance)
+                        try? await Task.sleep(for: .milliseconds(800))
+                        captureWindowArea(folder, "calibrate-minimum-size-\(suffix)")
+                    }
+                    resize(1440, 810)
+                    model.closeSpeakerCalibration()
+                    try? await Task.sleep(for: .milliseconds(500))
+                }
+                model.graph = saved
+            }
             // MIDI learn waiting for a control for the mic's mute.
             if let mic = model.canvasNodes.first(where: { !$0.effects.isEmpty && $0.kind == .defaultInput }) {
                 model.setDemoMIDI(learning: .nodeMute(mic.id), sources: [Demo.midiController])
@@ -402,6 +498,14 @@ enum Snapshot {
         }
         RunLoop.main.add(timer, forMode: .common)
         menu.popUp(positioning: nil, at: point, in: view)
+    }
+
+    /// The screen where the main window is, its sheet included (a sheet is a window of its own).
+    @MainActor static func captureWindowArea(_ folder: URL, _ name: String) {
+        guard let window = mainWindow, let screen = NSScreen.screens.first else { return }
+        let frame = window.frame
+        let top = screen.frame.height - frame.maxY
+        screencapture(["-x", "-R", "\(Int(frame.minX)),\(Int(top)),\(Int(frame.width)),\(Int(frame.height))"], folder, name)
     }
 
     /// A sheet is a window of its own.

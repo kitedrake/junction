@@ -4,7 +4,8 @@ import JunctionKernel
 
 // Effects on nodes. A source's chain processes its channels before they are mixed into the virtual device; the
 // virtual device's chain processes the mix before it goes into the device; an output's chain processes what it
-// receives. Gain, pan, mono and the noise gate are built into the render kernel; high-pass, EQ, dynamics and the
+// receives. Gain, pan, mono, the noise gate and Calibration (a speaker or headphone correction, on outputs) are built
+// into the render kernel; high-pass, EQ, dynamics and the
 // limiter are Apple's Audio Units, rendered by the kernel through AudioUnitRender. Any other installed effect Audio Unit
 // can be added as a plugin (see Plugins.swift); plugins load out of process where macOS allows it. Everything here
 // that creates or configures a unit runs off the audio thread (the router's queue, or the app for saving a unit's
@@ -12,7 +13,7 @@ import JunctionKernel
 
 /// One effect in a node's chain, as saved: the Audio Unit component it is (built-in effects have codes of their own),
 /// its bypass, the parameters set in Junction and, for Audio Units, the unit's whole state. A plugin also keeps its name
-/// and maker, so it can be named while it isn't installed.
+/// and maker, so it can be named while it isn't installed; Calibration keeps its profile.
 public struct Effect: Codable, Identifiable, Hashable, Sendable {
     public var id: UUID
     /// Four-character component codes: type, subtype, manufacturer.
@@ -28,9 +29,12 @@ public struct Effect: Codable, Identifiable, Hashable, Sendable {
     /// A plugin's name and maker, as the system listed them when it was added (absent for Junction's own effects).
     public var name: String?
     public var vendor: String?
+    /// Calibration's correction (absent until one is loaded: the effect then passes the audio through).
+    public var calibration: CalibrationProfile?
 
     public init(id: UUID = UUID(), type: String, subtype: String, manufacturer: String, bypass: Bool = false,
-                parameters: [String: Double] = [:], state: Data? = nil, name: String? = nil, vendor: String? = nil) {
+                parameters: [String: Double] = [:], state: Data? = nil, name: String? = nil, vendor: String? = nil,
+                calibration: CalibrationProfile? = nil) {
         self.id = id
         self.type = type
         self.subtype = subtype
@@ -40,6 +44,7 @@ public struct Effect: Codable, Identifiable, Hashable, Sendable {
         self.state = state
         self.name = name
         self.vendor = vendor
+        self.calibration = calibration
     }
 
     /// A plugin as the picker lists it.
@@ -93,7 +98,7 @@ public struct Effect: Codable, Identifiable, Hashable, Sendable {
 
 /// The effects Junction offers.
 public enum EffectKind: String, CaseIterable, Sendable {
-    case gain, pan, mono, gate, highPass, equalizer, dynamics, limiter
+    case gain, pan, mono, gate, highPass, equalizer, dynamics, limiter, calibration
 
     public var title: String {
         switch self {
@@ -105,6 +110,7 @@ public enum EffectKind: String, CaseIterable, Sendable {
         case .equalizer: "Equalizer"
         case .dynamics: "Compressor"
         case .limiter: "Limiter"
+        case .calibration: "Calibration"
         }
     }
 
@@ -119,6 +125,7 @@ public enum EffectKind: String, CaseIterable, Sendable {
         case .equalizer: "EQ"
         case .dynamics: "Comp"
         case .limiter: "Limiter"
+        case .calibration: "Cal"
         }
     }
 
@@ -132,11 +139,15 @@ public enum EffectKind: String, CaseIterable, Sendable {
         case .equalizer: "slider.vertical.3"
         case .dynamics: "arrow.down.right.and.arrow.up.left"
         case .limiter: "rectangle.compress.vertical"
+        case .calibration: "tuningfork"
         }
     }
 
     /// Built into the render kernel (no Audio Unit).
     public var isBuiltIn: Bool { kernelKind != nil }
+
+    /// Whether Add Effect offers the kind on a node: Calibration belongs to outputs (one already elsewhere still runs).
+    public func isOffered(onOutput: Bool) -> Bool { self != .calibration || onOutput }
 
     var kernelKind: JKEffectKind? {
         switch self {
@@ -144,6 +155,7 @@ public enum EffectKind: String, CaseIterable, Sendable {
         case .pan: JK_EFFECT_PAN
         case .mono: JK_EFFECT_MONO
         case .gate: JK_EFFECT_GATE
+        case .calibration: JK_EFFECT_CORRECTION
         default: nil
         }
     }
@@ -160,6 +172,7 @@ public enum EffectKind: String, CaseIterable, Sendable {
         case .equalizer: ("aufx", "nbeq", "appl")
         case .dynamics: ("aufx", "dcmp", "appl")
         case .limiter: ("aufx", "lmtr", "appl")
+        case .calibration: (Self.builtInType, "cali", Self.builtInManufacturer)
         }
     }
 
@@ -219,6 +232,7 @@ public enum EffectKind: String, CaseIterable, Sendable {
                              defaultValue: 0.012, unit: .seconds),
              EffectParameter(id: UInt32(kLimiterParam_DecayTime), name: "Release", range: 0.001...0.06,
                              defaultValue: 0.024, unit: .seconds)]
+        case .calibration: [EffectParameter(id: 0, name: "Amount", range: 0...100, defaultValue: 100, unit: .percent)]
         }
     }
 
@@ -241,7 +255,7 @@ public enum EffectKind: String, CaseIterable, Sendable {
 }
 
 public struct EffectParameter: Sendable, Identifiable, Hashable {
-    public enum Unit: Sendable, Hashable { case decibels, hertz, seconds, balance }
+    public enum Unit: Sendable, Hashable { case decibels, hertz, seconds, balance, percent }
 
     public var id: UInt32
     public var name: String
@@ -249,7 +263,7 @@ public struct EffectParameter: Sendable, Identifiable, Hashable {
     public var defaultValue: Double
     public var unit: Unit
 
-    /// "−12.0 dB", "80 Hz", "1.2 kHz", "150 ms", "L 30", "Center".
+    /// "−12.0 dB", "80 Hz", "1.2 kHz", "150 ms", "L 30", "Center", "75 %".
     public func text(_ value: Double) -> String {
         switch unit {
         case .decibels: return Gain.text(value).replacingOccurrences(of: "−∞ dB", with: String(format: "%.1f dB", value))
@@ -258,6 +272,7 @@ public struct EffectParameter: Sendable, Identifiable, Hashable {
         case .balance:
             let percent = Int((abs(value) * 100).rounded())
             return percent == 0 ? "Center" : (value < 0 ? "L \(percent)" : "R \(percent)")
+        case .percent: return "\(Int(value.rounded())) %"
         }
     }
 
@@ -556,11 +571,22 @@ final class LiveChain {
     let stages: [Int32?]
     let effects: [Effect]
     let latency: TimeInterval
+    /// The rate the chain runs at (Calibration's coefficients are made for it).
+    let sampleRate: Double
+    /// What each Calibration stage was last given, and blocks it handed back that the audio thread may still read.
+    private var corrections: [Int32: CorrectionKey] = [:]
+    private var retiredCorrections: [(stage: Int32, block: OpaquePointer, ticket: UInt64)] = []
+
+    private struct CorrectionKey: Equatable {
+        var profile: CalibrationProfile?
+        var amount: Double
+    }
 
     /// Builds a chain for `channels` channels, or nil when no effect in it could be made.
     init?(_ effects: [Effect], position: ChainPosition, channels: Int, sampleRate: Double, pool: EffectPool) {
+        let sampleRate = sampleRate > 0 ? sampleRate : 48_000
         guard !effects.isEmpty, channels > 0,
-              let chain = jk_chain_create(UInt32(channels), sampleRate > 0 ? sampleRate : 48_000, UInt32(effects.count))
+              let chain = jk_chain_create(UInt32(channels), sampleRate, UInt32(effects.count))
         else { return nil }
         var units: [EffectUnit] = [], stages: [Int32?] = []
         var latency: TimeInterval = 0
@@ -586,10 +612,14 @@ final class LiveChain {
         self.stages = stages
         self.effects = effects
         self.latency = latency
+        self.sampleRate = sampleRate
         update(effects, pool: nil, position: position)
     }
 
-    deinit { jk_chain_destroy(pointer) }
+    deinit {
+        jk_chain_destroy(pointer)
+        retiredCorrections.forEach { jk_correction_destroy($0.block) }
+    }
 
     /// Whether `effects` can be applied to this chain without building another (the same effects in the same order).
     func fits(_ effects: [Effect]) -> Bool {
@@ -630,12 +660,43 @@ final class LiveChain {
                 for (index, value) in Self.kernelParameters(kind, effect).enumerated() {
                     jk_chain_set_parameter(pointer, UInt32(stage), UInt32(index), value)
                 }
+                if kind == .calibration { correct(stage, effect) }
             } else if unitIndex < units.count {
                 units[unitIndex].apply(effect)
                 unitIndex += 1
             }
         }
+        freeRetiredCorrections()
     }
+
+    /// Gives a Calibration stage coefficients for the chain's rate when its profile or Amount changed: a new block,
+    /// which the kernel cross-fades to over one buffer.
+    private func correct(_ stage: Int32, _ effect: Effect) {
+        let key = CorrectionKey(profile: effect.calibration, amount: effect.value(EffectKind.calibration.parameters[0]))
+        guard corrections[stage] != key else { return }
+        let block = key.profile.flatMap {
+            CalibrationKernel.block($0, amount: key.amount / 100, channels: Int(jk_chain_channels(pointer)),
+                                    sampleRate: sampleRate,
+                                    maxDelayFrames: Int(jk_chain_correction_max_delay(pointer, UInt32(stage))))
+        }
+        var ticket: UInt64 = 0
+        if let old = jk_chain_swap_correction(pointer, UInt32(stage), block, &ticket) {
+            retiredCorrections.append((stage, old, ticket))
+        }
+        corrections[stage] = key
+    }
+
+    /// Frees blocks the audio thread can no longer reach (the rest go with the chain).
+    private func freeRetiredCorrections() {
+        retiredCorrections.removeAll { retired in
+            guard jk_chain_is_done_with_correction(pointer, UInt32(retired.stage), retired.ticket) != 0 else { return false }
+            jk_correction_destroy(retired.block)
+            return true
+        }
+    }
+
+    /// Blocks handed back and not yet freed, for tests.
+    var retiredCorrectionCount: Int { retiredCorrections.count }
 
     /// A built-in effect's settings as the kernel takes them (linear levels, seconds).
     static func kernelParameters(_ kind: EffectKind, _ effect: Effect) -> [Float] {

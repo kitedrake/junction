@@ -23,6 +23,14 @@ private final class FakeRouter: SinkRouting, @unchecked Sendable {
     func processesChanged() { record("processes") }
     func takeMeters() -> [PortKey: Float] { lock.withLock { meters } }
 
+    /// What measurements asked to hold and resume, in order.
+    private var _holds: [Set<UUID>] = []
+    private var _resumes: [Set<UUID>] = []
+    var holds: [Set<UUID>] { lock.withLock { _holds } }
+    var resumes: [Set<UUID>] { lock.withLock { _resumes } }
+    func hold(_ sinks: Set<UUID>) { lock.withLock { _holds.append(sinks) } }
+    func resume(_ sinks: Set<UUID>) { lock.withLock { _resumes.append(sinks) } }
+
     /// Plugins it runs (their windows open), and who hears their states.
     var runningEffects: Set<UUID> = []
     private var stateHandler: (@Sendable (UUID, Data) -> Void)?
@@ -146,7 +154,8 @@ final class RoutingServiceTests: XCTestCase {
         let requests: [RoutingRequest] = [.hello(protocolVersion: RoutingXPC.protocolVersion, appVersion: "1.2", keepRouting: true),
                                           .graph(graph), .rebuildAll, .requestMicrophone, .keepRouting(false), .goodbye,
                                           .openPluginWindow(effect: node, title: "Space Reverb · Microphone"),
-                                          .learnMIDI(.cableLevel(node)), .learnMIDI(.scene(sink)), .learnMIDI(nil)]
+                                          .learnMIDI(.cableLevel(node)), .learnMIDI(.scene(sink)), .learnMIDI(nil),
+                                          .hold([sink, node]), .hold([]), .resume([sink])]
         var withControllers = state
         withControllers.midiSources = ["Desk Controller", "Pads"]
         let replies: [RoutingReply] = [.welcome(state), .welcome(withControllers), .done, .refused("no"), .outdated("old")]
@@ -164,6 +173,7 @@ final class RoutingServiceTests: XCTestCase {
                    .learned(MIDIMapping(target: .effectBypass(node), trigger: .note(channel: 9, number: 36), controller: "Pads")),
                    .learned(MIDIMapping(target: .cableLevel(node), trigger: .controller(channel: 0, number: 7), mode: .relativeSigned))]),
             .midiSources(["Desk Controller"]), .midiSources([]),
+            .statuses([sink: SinkStatus(state: .held, message: "Paused while Junction measures a device it uses.")]),
         ]
         for request in requests {
             XCTAssertEqual(try RoutingXPC.decode(RoutingRequest.self, from: RoutingXPC.encode(request)), request)
@@ -342,6 +352,48 @@ final class RoutingServiceTests: XCTestCase {
         client.dropConnection()  // no goodbye, as when the app crashes
         waitUntil("the app to count as gone") { idle.value == 1 }
         XCTAssertTrue(router.calls.contains("stop"))
+    }
+
+    // MARK: Measuring
+
+    func testAMeasurementHoldsAndResumesExactlyTheAffectedSinksOverXPC() throws {
+        makeService()
+        let (client, heard) = makeClient()
+        waitUntil("hello") { heard.welcome != nil }
+        let (plan, affected) = MeasuringSetup.plan()
+        let device = SimulatedMeasurementDevice(rooms: [[.init(filters: [], level: -10, delay: 100), nil]])
+        let configuration = MeasurementEngine.Configuration(outputUID: MeasuringSetup.speakers.uid, outputName: "Desk Speakers",
+                                                            micUID: MeasuringSetup.mic.uid, micName: "Measuring Mic",
+                                                            micChannel: 1, channels: 1)
+        let engine = MeasurementEngine(configuration: configuration, plan: plan, device: device, routing: client)
+        try engine.start()
+        XCTAssertEqual(router.holds, [affected], "held before the devices opened")
+        XCTAssertEqual(device.opens, 1)
+        XCTAssertEqual(service.queue.sync { service.heldSinks }, affected)
+        try engine.checkLevel()
+        XCTAssertTrue(router.resumes.isEmpty)
+        engine.finish()
+        waitUntil("the resume") { router.resumes.count == 1 }
+        XCTAssertEqual(router.resumes, [affected])
+        XCTAssertEqual(service.queue.sync { service.heldSinks }, [])
+        client.goodbye()
+        XCTAssertEqual(router.resumes.count, 1, "nothing left to resume")
+    }
+
+    func testSinksAnAppHeldComeBackWhenItGoesAway() {
+        makeService()
+        let (client, heard) = makeClient()
+        waitUntil("hello") { heard.welcome != nil }
+        let sinks: Set<UUID> = [UUID(), UUID()]
+        let held = expectation(description: "held")
+        client.hold(sinks) { held.fulfill() }
+        wait(for: [held], timeout: 5)
+        XCTAssertEqual(router.holds, [sinks])
+        client.dropConnection()  // the app crashed mid-measurement
+        waitUntil("the held sinks to come back") { router.resumes == [sinks] }
+        // A request from someone who hasn't said hello is refused.
+        let refused = service.queue.sync { service.handle(.hold(sinks), from: NSXPCConnection(serviceName: "nobody")) }
+        XCTAssertEqual(refused, .refused("Say hello first."))
     }
 
     func testRoutesTheSavedSetupAtLaunchWhenKeepingRouting() {
