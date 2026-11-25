@@ -1,5 +1,5 @@
-// Draws the Junction app icon (1024×1024 PNG): two cables meeting at a gold junction and leaving as one, into a
-// plug, on an indigo tile. Run by icon/make-icns.sh.
+// Draws the Junction app icon (1024×1024 PNG): two paper strips folding together under a gold kite and leaving as
+// one, into a plug, on a cream paper tile. Run by icon/make-icns.sh.
 import AppKit
 
 let size: CGFloat = 1024
@@ -12,86 +12,136 @@ let cg = context.cgContext
 let space = CGColorSpaceCreateDeviceRGB()
 
 // MARK: Family style
-// The sibling apps' icon scripts share this part word for word: a solid colour tile shaded slightly lighter at the
-// top and one bold cream symbol with a gold accent. Only `tile` and the symbol differ between apps. Change all of them
-// together.
+// The sibling apps' icon scripts share this part word for word: one glyph folded from paper in the app's own ink, a
+// few flat facets lit from the top left, on a cream paper tile, with a gold accent. Only `ink` and the symbol differ
+// between apps. Change all of them together.
 
-func rgb(_ hex: UInt32, alpha: CGFloat = 1) -> CGColor {
+func rgb(_ hex: UInt32) -> CGColor {
     CGColor(red: CGFloat((hex >> 16) & 0xff) / 255, green: CGFloat((hex >> 8) & 0xff) / 255,
-            blue: CGFloat(hex & 0xff) / 255, alpha: alpha)
+            blue: CGFloat(hex & 0xff) / 255, alpha: 1)
+}
+/// `a` moved `t` of the way towards `b`.
+func blend(_ a: CGColor, _ b: CGColor, _ t: CGFloat) -> CGColor {
+    let x = a.components!, y = b.components!
+    return CGColor(red: x[0] + (y[0] - x[0]) * t, green: x[1] + (y[1] - x[1]) * t, blue: x[2] + (y[2] - x[2]) * t, alpha: 1)
 }
 /// `hex` moved `amount` of the way towards white (positive) or black (negative).
 func shade(_ hex: UInt32, _ amount: CGFloat) -> CGColor {
-    let c = rgb(hex).components!
-    let target: CGFloat = amount > 0 ? 1 : 0
-    let t = abs(amount)
-    return CGColor(red: c[0] + (target - c[0]) * t, green: c[1] + (target - c[1]) * t, blue: c[2] + (target - c[2]) * t, alpha: 1)
+    blend(rgb(hex), rgb(amount > 0 ? 0xffffff : 0x000000), abs(amount))
 }
-let cream = rgb(0xf6f0e4)
-let gold = rgb(0xe2b552)
-let tile: UInt32 = 0x353f7a  // indigo
+let paper: UInt32 = 0xf6f0e4
+let gold: UInt32 = 0xd9a23c
+let ink: UInt32 = 0x353f7a  // indigo
+// Each colour in three tones: facets facing the light, across it, and away from it.
+let light = shade(ink, 0.16), mid = rgb(ink), dark = shade(ink, -0.26)
+let goldLight = shade(gold, 0.18), goldMid = rgb(gold), goldDark = shade(gold, -0.24)
+let cream = rgb(paper), creamShade = shade(paper, -0.12)
 
-// The tile, on the macOS icon grid: inset from the canvas, with rounded corners and a drop shadow.
+// The tile, on the macOS icon grid: cream paper inset from the canvas, with rounded corners and a drop shadow.
 let inset: CGFloat = 100
 let shape = CGPath(roundedRect: CGRect(x: inset, y: inset, width: size - 2 * inset, height: size - 2 * inset),
                    cornerWidth: 185, cornerHeight: 185, transform: nil)
 cg.saveGState()
-cg.setShadow(offset: CGSize(width: 0, height: -12), blur: 28, color: CGColor(gray: 0, alpha: 0.35))
-cg.addPath(shape); cg.setFillColor(rgb(tile)); cg.fillPath()
+cg.setShadow(offset: CGSize(width: 0, height: -12), blur: 28, color: CGColor(gray: 0, alpha: 0.32))
+cg.addPath(shape); cg.setFillColor(cream); cg.fillPath()
 cg.restoreGState()
 cg.saveGState()
 cg.addPath(shape); cg.clip()
-let tileShade = CGGradient(colorsSpace: space, colors: [shade(tile, 0.10), rgb(tile), shade(tile, -0.10)] as CFArray,
-                           locations: [0, 0.5, 1])!
+let tileShade = CGGradient(colorsSpace: space, colors: [shade(paper, 0.55), cream, shade(paper, -0.06)] as CFArray,
+                           locations: [0, 0.55, 1])!
 cg.drawLinearGradient(tileShade, start: CGPoint(x: 0, y: size - inset), end: CGPoint(x: 0, y: inset), options: [])
 cg.restoreGState()
 
-/// Draws `body` with a soft shadow under it, so the symbol sits just above the tile.
+/// Draws `body` with a soft shadow under it, so the paper sits just above the tile.
 func raised(_ body: () -> Void) {
     cg.saveGState()
-    cg.setShadow(offset: CGSize(width: 0, height: -8), blur: 18, color: CGColor(gray: 0, alpha: 0.18))
+    cg.setShadow(offset: CGSize(width: 0, height: -10), blur: 22, color: CGColor(gray: 0, alpha: 0.22))
     cg.beginTransparencyLayer(auxiliaryInfo: nil)
     body()
     cg.endTransparencyLayer()
     cg.restoreGState()
 }
 
+/// Fills one flat facet. The thin stroke in the same colour closes the seams between neighbouring facets.
+func facet(_ color: CGColor, _ points: [CGPoint]) {
+    cg.move(to: points[0])
+    for point in points.dropFirst() { cg.addLine(to: point) }
+    cg.closePath()
+    cg.setFillColor(color); cg.setStrokeColor(color); cg.setLineWidth(1.5); cg.setLineJoin(.round)
+    cg.drawPath(using: .fillStroke)
+}
+func facet(_ color: CGColor, _ points: [(CGFloat, CGFloat)]) { facet(color, points.map { CGPoint(x: $0.0, y: $0.1) }) }
+
+/// The tone of a facet that faces `angle` (radians, 0 = right): `lit` facing the top left, `unlit` the bottom right.
+func tone(_ angle: CGFloat, _ lit: CGColor, _ unlit: CGColor) -> CGColor {
+    blend(unlit, lit, (cos(angle - 3 * .pi / 4) + 1) / 2)
+}
+
+/// A paper strip `width` across, folded along `points`: each straight run is one facet, the creases are mitred, and the
+/// runs take `tones` in turn.
+func strip(_ points: [CGPoint], width: CGFloat, tones: [CGColor]) {
+    let n = points.count
+    let dirs = (0..<n - 1).map { i -> CGPoint in
+        let dx = points[i + 1].x - points[i].x, dy = points[i + 1].y - points[i].y, l = hypot(dx, dy)
+        return CGPoint(x: dx / l, y: dy / l)
+    }
+    var left: [CGPoint] = [], right: [CGPoint] = []
+    for i in 0..<n {
+        let a = dirs[max(i - 1, 0)], b = dirs[min(i, n - 2)]
+        let na = CGPoint(x: -a.y, y: a.x), nb = CGPoint(x: -b.y, y: b.x)
+        let mx = na.x + nb.x, my = na.y + nb.y, ml = hypot(mx, my)
+        let length = width / 2 / ((mx * na.x + my * na.y) / ml)
+        left.append(CGPoint(x: points[i].x + mx / ml * length, y: points[i].y + my / ml * length))
+        right.append(CGPoint(x: points[i].x - mx / ml * length, y: points[i].y - my / ml * length))
+    }
+    for i in 0..<n - 1 { facet(tones[i % tones.count], [left[i], left[i + 1], right[i + 1], right[i]]) }
+}
+
+/// A four-pointed gold star folded from paper: each point is two facets meeting along its spine.
+func sparkle(_ center: CGPoint, _ radius: CGFloat) {
+    for k in 0..<4 {
+        let a = CGFloat(k) * .pi / 2 + .pi / 2
+        let tip = CGPoint(x: center.x + cos(a) * radius, y: center.y + sin(a) * radius)
+        for side: CGFloat in [-1, 1] {
+            let s = a + side * .pi / 4
+            let corner = CGPoint(x: center.x + cos(s) * radius * 0.3, y: center.y + sin(s) * radius * 0.3)
+            facet(tone(a + side * .pi / 2, goldLight, goldDark), [center, tip, corner])
+        }
+    }
+}
+
 // MARK: Symbol
 
-// Two cables come in from the left edge, meet at a gold junction and leave to the right as one, ending in a plug.
-let upper: CGFloat = 640, lower: CGFloat = 384, mid = size / 2
-let junction = CGPoint(x: 540, y: mid)
-let cableWidth: CGFloat = 40
+// Two paper strips come in from the left edge, fold towards each other and meet under a gold kite; one strip leaves to
+// the right and ends in a jack plug.
+let mid0 = size / 2
+let joint = CGPoint(x: 476, y: mid0)
+let band: CGFloat = 78
 
 cg.saveGState()
-cg.addPath(shape); cg.clip()  // the incoming cables run off the tile's edge
+cg.addPath(shape); cg.clip()  // the incoming strips run off the tile's edge
 raised {
-    cg.setStrokeColor(cream); cg.setLineWidth(cableWidth); cg.setLineCap(.round)
-    for y in [upper, lower] {
-        cg.move(to: CGPoint(x: 60, y: y))
-        cg.addLine(to: CGPoint(x: 250, y: y))
-        cg.addCurve(to: junction, control1: CGPoint(x: 400, y: y), control2: CGPoint(x: 410, y: mid))
-        cg.strokePath()
-        // A connector sleeve where each cable enters, with one groove.
-        let sleeve = CGRect(x: 40, y: y - 34, width: 220, height: 68)
-        cg.addPath(CGPath(roundedRect: sleeve, cornerWidth: 22, cornerHeight: 22, transform: nil))
-        cg.setFillColor(cream); cg.fillPath()
-        cg.setFillColor(rgb(tile)); cg.fill(CGRect(x: 196, y: y - 34, width: 12, height: 68))
-    }
-    // The single cable out, into a jack plug: body, collar, shaft and tip.
-    cg.move(to: junction); cg.addLine(to: CGPoint(x: 680, y: mid)); cg.strokePath()
-    cg.addPath(CGPath(roundedRect: CGRect(x: 660, y: mid - 40, width: 112, height: 80), cornerWidth: 22, cornerHeight: 22,
-                      transform: nil))
-    cg.setFillColor(cream); cg.fillPath()
-    cg.fill(CGRect(x: 772, y: mid - 26, width: 22, height: 52))
-    cg.addPath(CGPath(roundedRect: CGRect(x: 790, y: mid - 18, width: 86, height: 36), cornerWidth: 18, cornerHeight: 18,
-                      transform: nil))
-    cg.fillPath()
-    cg.setFillColor(rgb(tile)); cg.fill(CGRect(x: 840, y: mid - 18, width: 8, height: 36))
+    strip([CGPoint(x: 40, y: 694), CGPoint(x: 296, y: 694), joint], width: band, tones: [mid, light])
+    strip([CGPoint(x: 40, y: 330), CGPoint(x: 296, y: 330), joint], width: band, tones: [mid, dark])
+    strip([joint, CGPoint(x: 640, y: mid0)], width: band, tones: [mid])
 
-    let r: CGFloat = 62
-    cg.addEllipse(in: CGRect(x: junction.x - r, y: junction.y - r, width: 2 * r, height: 2 * r))
-    cg.setFillColor(gold); cg.fillPath()
+    // The plug: a body, a collar, the shaft with one groove, and the tip; each lit on top and shaded below.
+    facet(light, [(624, mid0 + 38), (650, mid0 + 64), (750, mid0 + 64), (776, mid0 + 38)])
+    facet(mid, [(624, mid0 + 38), (776, mid0 + 38), (776, mid0 - 38), (624, mid0 - 38)])
+    facet(dark, [(624, mid0 - 38), (776, mid0 - 38), (750, mid0 - 64), (650, mid0 - 64)])
+    facet(dark, [(776, mid0 + 36), (806, mid0 + 36), (806, mid0 - 36), (776, mid0 - 36)])
+    facet(light, [(806, mid0 + 22), (874, mid0 + 22), (874, mid0), (806, mid0)])
+    facet(mid, [(806, mid0), (874, mid0), (874, mid0 - 22), (806, mid0 - 22)])
+    facet(dark, [(838, mid0 + 22), (848, mid0 + 22), (848, mid0 - 22), (838, mid0 - 22)])
+    facet(light, [(874, mid0 + 22), (904, mid0), (874, mid0)])
+    facet(mid, [(874, mid0), (904, mid0), (874, mid0 - 22)])
+
+    // The gold kite where the strips meet, folded along both spars.
+    let k = joint, w: CGFloat = 86, h: CGFloat = 84
+    facet(goldLight, [(k.x - w, k.y), (k.x, k.y + h), (k.x, k.y)])
+    facet(goldMid, [(k.x, k.y), (k.x, k.y + h), (k.x + w, k.y)])
+    facet(goldMid, [(k.x - w, k.y), (k.x, k.y), (k.x, k.y - h)])
+    facet(goldDark, [(k.x, k.y), (k.x + w, k.y), (k.x, k.y - h)])
 }
 cg.restoreGState()
 
