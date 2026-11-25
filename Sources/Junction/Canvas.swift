@@ -864,6 +864,10 @@ struct NodeCard: View {
                 Button("Disconnect") { model.disconnectAll(node.id) }
                     .disabled(linked.isEmpty)
             }
+            if model.isOutputNode(node) {
+                Button("Calibrate Speakers…") { model.calibrateSpeakers(node.id) }
+                    .disabled(model.currentDevice(node) == nil)
+            }
             Divider()
             if !model.isDeviceNode(node) {
                 // On a node outside the selection these act on that node alone.

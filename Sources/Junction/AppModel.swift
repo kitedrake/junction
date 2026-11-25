@@ -62,6 +62,8 @@ final class AppModel {
     var sceneNaming: SceneNaming?
     /// The node the plugin picker adds an Audio Unit to (the sheet is open while set).
     var pluginPicker: PluginPickerRequest?
+    /// The Calibrate Speakers sheet (open while set).
+    var speakerCalibration: SpeakerCalibration?
     /// The installed effect Audio Units, read when the picker opens (made-up ones in snapshot mode).
     private(set) var plugins: [PluginInfo] = []
     /// Effects offered for bypass that the user chose to keep running.
@@ -137,6 +139,8 @@ final class AppModel {
     @ObservationIgnored private var restartTask: Task<Void, Never>?
     @ObservationIgnored private var lastCoreAudioRestart: Date?
     @ObservationIgnored private var saveTask: Task<Void, Never>?
+    /// What the Calibrate Speakers sheet plays in an output's Calibration effect without saving it (see `heardGraph`).
+    @ObservationIgnored private var calibrationAudition: (node: UUID, effect: UUID, profile: CalibrationProfile)?
     /// Nodes being dragged on the canvas (see `dragNodes`).
     @ObservationIgnored let nodeDrag = NodeDrag()
     /// Fader moves not in `graph` yet (see `moveFader`).
@@ -1207,8 +1211,15 @@ final class AppModel {
         return value
     }
 
-    /// The graph as it is heard: `graph` with the faders that are moving.
-    private var heardGraph: Graph { faderMoves.isEmpty ? graph : faderMoves.applied(to: graph) }
+    /// The graph as it is heard: `graph` with the faders that are moving, and the correction the Calibrate Speakers
+    /// sheet is playing.
+    private var heardGraph: Graph {
+        var heard = faderMoves.isEmpty ? graph : faderMoves.applied(to: graph)
+        if let audition = calibrationAudition, let index = heard.nodes.firstIndex(where: { $0.id == audition.node }) {
+            heard.nodes[index].setCalibration(audition.profile, effect: audition.effect)
+        }
+        return heard
+    }
 
     /// Writes the faders' moves to the graph: MIDI's directly, the others as one undo step.
     private func commitFaders() {
@@ -1455,6 +1466,55 @@ final class AppModel {
         case .notDetermined: AVCaptureDevice.requestAccess(for: .audio, completionHandler: done)
         default: done(false)
         }
+    }
+
+    /// Calibrate Speakers…: opens the sheet for an output, adding a Calibration effect first when it has none.
+    func calibrateSpeakers(_ id: UUID) {
+        guard let node = node(id), isOutputNode(node) else { return }
+        guard let device = currentDevice(node) else {
+            alert = "This output isn't playing on a device right now, so there is nothing to measure."
+            return
+        }
+        var effect = node.calibrationEffect?.id
+        if effect == nil {
+            updateNode(id, "Add Calibration") { effect = $0.setCalibration(nil) }
+            endEditing()
+        }
+        guard let effect else { return }
+        let microphones = inventory.inputDevices.map {
+            SpeakerCalibration.Microphone(uid: $0.uid, name: $0.name, channels: $0.inputChannels)
+        }
+        let channels = inventory.device(device.uid)?.outputChannels ?? info.ports(node).inputs
+        let names = info.channelLabels(node, outputs: false)
+        speakerCalibration = SpeakerCalibration(
+            node: id, effect: effect, outputUID: device.uid, outputName: device.name,
+            channelNames: Array((names + (names.count..<max(names.count, channels)).map { "\($0 + 1)" }).prefix(channels)),
+            microphones: microphones, defaultMicUID: inventory.defaultInputUID, host: self)
+    }
+
+    /// Adjust…: the results of a measured profile, refitted from its saved measurements without measuring.
+    func adjustCalibration(_ effect: UUID, in id: UUID) {
+        guard let node = node(id), let profile = node.effects.first(where: { $0.id == effect })?.calibration,
+              profile.canRefit else { return }
+        speakerCalibration = SpeakerCalibration(adjusting: profile, node: id, effect: effect,
+                                                channelNames: info.channelLabels(node, outputs: false), host: self)
+    }
+
+    /// Cancel: stops a measurement, and the output plays what is saved again.
+    func closeSpeakerCalibration() {
+        speakerCalibration?.cancel()
+        speakerCalibration = nil
+    }
+
+    /// Opens a microphone calibration file for the Calibrate Speakers sheet.
+    func chooseMicCalibration(for calibration: SpeakerCalibration) {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.plainText, .text]
+        panel.allowsOtherFileTypes = true
+        panel.message = "Choose your measurement microphone's calibration file: a text file of frequency and dB lines."
+        panel.prompt = "Load"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        calibration.loadMicCalibration(url)
     }
 
     /// The delay a node's effects add where it runs (from the routing's status), or nil when it isn't running.
@@ -1996,4 +2056,24 @@ final class AppModel {
 
     var runningSinkCount: Int { statuses.values.filter { $0.state == .running }.count }
     var failingSinkCount: Int { statuses.values.filter { $0.state == .failed }.count }
+}
+
+extension AppModel: SpeakerCalibrationHost {
+    func requestMicrophone() async -> Bool {
+        await withCheckedContinuation { continuation in
+            requestMicrophoneForMeasuring { continuation.resume(returning: $0) }
+        }
+    }
+
+    /// Heard at once, where routing runs; not an edit, and gone when the sheet closes.
+    func audition(_ profile: CalibrationProfile?, node: UUID, effect: UUID) {
+        calibrationAudition = profile.map { (node, effect, $0) }
+        replan()
+    }
+
+    func save(_ profile: CalibrationProfile, node: UUID, effect: UUID) {
+        updateNode(node, "Calibrate Speakers") { $0.setCalibration(profile, effect: effect) }
+        endEditing()
+        speakerCalibration = nil
+    }
 }

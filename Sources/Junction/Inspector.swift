@@ -629,11 +629,21 @@ private struct CalibrationDetails: View {
                 }
                 FrequencyResponseGraph(curves: curves(profile))
             } else {
-                Text("No correction loaded, so the audio passes through. Load a parametric EQ preset for your headphones.")
+                Text("No correction loaded, so the audio passes through. Measure your speakers, or load a parametric EQ preset for your headphones.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            HStack {
+                Button("Calibrate Speakers…") { model.calibrateSpeakers(node.id) }
+                    .help("Measures the speakers with a measurement microphone and fits a correction")
+                    .disabled(model.currentDevice(node) == nil)
+                if let profile = effect.calibration, profile.kind == .speakers, profile.canRefit {
+                    Button("Adjust…") { model.adjustCalibration(effect.id, in: node.id) }
+                        .help("Changes the target and limits and fits again from the saved measurements, without measuring")
+                }
+            }
+            .controlSize(.small)
             HStack {
                 Button("Load EQ Preset…") { model.loadEQPreset(into: effect.id, in: node.id) }
                     .help("Reads a text file with a Preamp line and Filter lines (peaking and shelving filters)")

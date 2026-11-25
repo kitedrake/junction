@@ -142,6 +142,13 @@ public final class MeasurementEngine: @unchecked Sendable {
         public var micPeak: Double
         public var noiseFloor: Double
         public var snr: Double { micLevel - noiseFloor }
+
+        public init(level: Double, micLevel: Double, micPeak: Double, noiseFloor: Double) {
+            self.level = level
+            self.micLevel = micLevel
+            self.micPeak = micPeak
+            self.noiseFloor = noiseFloor
+        }
     }
 
     /// dB the test signal must stand above the room's noise.

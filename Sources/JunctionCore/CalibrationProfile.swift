@@ -32,11 +32,15 @@ public struct CalibrationProfile: Codable, Hashable, Identifiable, Sendable {
     public var micCalibration: String?
     /// Measured curves on `CalibrationGrid`: every channel at every position, and each channel's average.
     public var measurements: [CalibrationMeasurement]
+    /// A measured profile's arrivals and whether the channels are lined up (absent for other profiles, and in
+    /// profiles saved before it was kept: refitting then lines the channels up from their delays).
+    public var alignment: CalibrationAlignment?
 
     public init(id: UUID = UUID(), name: String, kind: Kind, date: Date = Date(), deviceUID: String? = nil,
                 deviceName: String? = nil, channels: [CalibrationChannel], preamp: Double,
                 target: CalibrationTarget = .flat, limits: CalibrationLimits = CalibrationLimits(),
-                micCalibration: String? = nil, measurements: [CalibrationMeasurement] = []) {
+                micCalibration: String? = nil, measurements: [CalibrationMeasurement] = [],
+                alignment: CalibrationAlignment? = nil) {
         self.id = id
         self.name = name
         self.kind = kind
@@ -49,6 +53,7 @@ public struct CalibrationProfile: Codable, Hashable, Identifiable, Sendable {
         self.limits = limits
         self.micCalibration = micCalibration
         self.measurements = measurements
+        self.alignment = alignment
     }
 
     /// The correction for an output channel (the single entry, or the last one for channels beyond the list).
@@ -81,34 +86,68 @@ public struct CalibrationProfile: Codable, Hashable, Identifiable, Sendable {
     }
 
     /// A speaker profile from sweeps: `captures[channel][position]`, the first position being the listening position
-    /// the channels' delays are lined up for. Each channel's positions are averaged, smoothed and fitted; the louder
-    /// channels are brought down to the quietest and the nearer ones delayed to the farthest.
+    /// the channels' delays are lined up for. Each channel's positions are averaged, smoothed and fitted; with
+    /// `alignsSpeakers` the louder channels are brought down to the quietest and the nearer ones delayed to the
+    /// farthest. The fit is made from the curves as saved, so `refitted` with the same settings gives the same profile.
     public static func speakers(name: String, deviceUID: String? = nil, deviceName: String? = nil,
                                 captures: [[CalibrationCapture]], target: CalibrationTarget = .flat,
                                 limits: CalibrationLimits = CalibrationLimits(), smoothing: CalibrationSmoothing = .twelfth,
-                                micCalibration: String? = nil, sampleRate: Double, date: Date = Date()) -> CalibrationProfile {
+                                alignsSpeakers: Bool = true, micCalibration: String? = nil, sampleRate: Double,
+                                date: Date = Date()) -> CalibrationProfile {
         var measurements: [CalibrationMeasurement] = []
-        var fits: [CalibrationFit] = []
         for (channel, positions) in captures.enumerated() {
             let curves = positions.map { $0.curve.resampled() }
             for (position, curve) in curves.enumerated() {
                 measurements.append(CalibrationMeasurement(channel: channel, position: position, curve: curve))
             }
-            let average = CalibrationAnalysis.average(curves)
-            measurements.append(CalibrationMeasurement(channel: channel, position: nil, curve: average))
-            fits.append(CalibrationFitter.fit(average.smoothed(smoothing), target: target, limits: limits,
-                                              sampleRate: sampleRate))
+            measurements.append(CalibrationMeasurement(channel: channel, position: nil,
+                                                       curve: CalibrationAnalysis.average(curves)))
         }
-        let alignment = CalibrationFitter.alignment(arrivals: captures.map { $0.first?.arrival ?? 0 },
-                                                    levels: fits.map(\.offset))
-        let channels = zip(fits, alignment).map { fit, alignment in
-            CalibrationChannel(filters: fit.filters, delay: alignment.delay, level: alignment.level)
+        let measured = CalibrationProfile(name: name, kind: .speakers, date: date, deviceUID: deviceUID,
+                                          deviceName: deviceName, channels: [], preamp: 0, micCalibration: micCalibration,
+                                          measurements: measurements,
+                                          alignment: CalibrationAlignment(arrivals: captures.map { $0.first?.arrival ?? 0 },
+                                                                          isOn: alignsSpeakers))
+        return measured.refitted(target: target, limits: limits, alignsSpeakers: alignsSpeakers, smoothing: smoothing,
+                                 sampleRate: sampleRate)
+    }
+
+    /// The channels the saved measurements cover, in order.
+    public var measuredChannels: [Int] { Array(Set(measurements.map(\.channel))).sorted() }
+
+    /// A channel's saved average (or, without one, the average of its saved positions).
+    public func averageMeasurement(channel: Int) -> CalibrationCurve? {
+        if let average = measurements.first(where: { $0.channel == channel && $0.position == nil }) { return average.curve }
+        let positions = measurements.filter { $0.channel == channel && $0.position != nil }.map(\.curve)
+        return positions.isEmpty ? nil : CalibrationAnalysis.average(positions)
+    }
+
+    /// Whether the profile can be fitted again from what it keeps (a measured one).
+    public var canRefit: Bool { !measuredChannels.isEmpty }
+
+    /// The profile fitted again from its saved measurements, without measuring: new filters, preamp, delays and
+    /// levels for a target and limits; everything else (name, device, curves) kept. Without arrivals saved, the
+    /// channels' delays stand in for them. Unchanged when it has no measurements.
+    public func refitted(target: CalibrationTarget, limits: CalibrationLimits, alignsSpeakers: Bool,
+                         smoothing: CalibrationSmoothing = .twelfth, sampleRate: Double = 48_000) -> CalibrationProfile {
+        let averages = measuredChannels.compactMap { averageMeasurement(channel: $0) }
+        guard !averages.isEmpty else { return self }
+        let fits = averages.map {
+            CalibrationFitter.fit($0.smoothed(smoothing), target: target, limits: limits, sampleRate: sampleRate)
         }
-        return CalibrationProfile(name: name, kind: .speakers, date: date, deviceUID: deviceUID, deviceName: deviceName,
-                                  channels: channels,
-                                  preamp: CalibrationFitter.preamp(for: fits.map(\.filters), sampleRate: sampleRate),
-                                  target: target, limits: limits, micCalibration: micCalibration,
-                                  measurements: measurements)
+        let arrivals = alignment.map(\.arrivals).flatMap { $0.count == fits.count ? $0 : nil }
+            ?? fits.indices.map { -self.channel($0).delay }
+        let aligned = CalibrationFitter.alignment(arrivals: arrivals, levels: fits.map(\.offset))
+        var profile = self
+        profile.channels = zip(fits, aligned).map { fit, alignment in
+            alignsSpeakers ? CalibrationChannel(filters: fit.filters, delay: alignment.delay, level: alignment.level)
+                : CalibrationChannel(filters: fit.filters)
+        }
+        profile.preamp = CalibrationFitter.preamp(for: fits.map(\.filters), sampleRate: sampleRate)
+        profile.target = target
+        profile.limits = limits
+        profile.alignment = CalibrationAlignment(arrivals: arrivals, isOn: alignsSpeakers)
+        return profile
     }
 
     /// A profile fitted to a measurement imported from a text export (one set of filters for every channel).
@@ -121,6 +160,20 @@ public struct CalibrationProfile: Codable, Hashable, Identifiable, Sendable {
                                   preamp: CalibrationFitter.preamp(for: [fit.filters], sampleRate: sampleRate),
                                   target: target, limits: limits,
                                   measurements: [CalibrationMeasurement(channel: 0, position: nil, curve: curve)])
+    }
+}
+
+/// When each measured channel's sound arrived at the listening position, kept so the channels can be lined up again
+/// when a profile is refitted.
+public struct CalibrationAlignment: Codable, Hashable, Sendable {
+    /// Seconds, per channel.
+    public var arrivals: [Double]
+    /// Whether the channels' delays and levels line them up (off: every channel plays as it is).
+    public var isOn: Bool
+
+    public init(arrivals: [Double], isOn: Bool = true) {
+        self.arrivals = arrivals
+        self.isOn = isOn
     }
 }
 

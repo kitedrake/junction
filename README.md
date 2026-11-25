@@ -28,7 +28,18 @@ without your voice chat, step by step.
   levels after the chain and the delay it adds (also counted in the destination's delay), and each effect's CPU share
   and delay while it runs. On the canvas, a node with effects lists them in a row under its channels; clicking one
   bypasses it or turns it back on.
-- **Calibration** (outputs only): makes headphones sound flat, or follow a curve you like, with a parametric EQ preset
+- **Calibration** (outputs only): makes speakers or headphones sound flat, or follow a curve you like. Speakers are
+  measured in the room: **Calibrate Speakers…** (in the Calibration inspector, or the output's context menu, which adds
+  the effect if there is none) opens a guided sheet. Pick the measurement microphone, its input channel and its
+  calibration file (or go on without one, with a note on what that costs in accuracy) and the speakers to measure,
+  named as the output names its channels; after a level check, Junction plays a sine sweep on each speaker at 1 to 9
+  listening positions (7 by default: ear height where you sit first, then within about 30 cm), with a diagram of
+  where to put the microphone, progress, **Redo Last** and dropping a position. The results show, per speaker, the
+  average and each position, the target, the correction and the predicted result; tilt, bass and treble shelves, the
+  correction range, the most boost, the number of filters and lining the speakers up (delay and level) refit at once
+  from the saved measurements, and a **Before/After** switch compares with the correction off at matched loudness.
+  **Save** puts the profile into the effect (undoable); **Adjust…** reopens the results later without measuring.
+  Headphones use a parametric EQ preset
   loaded from a text file (**Load EQ Preset…**; the usual "Preamp: …" and "Filter 1: ON PK Fc … Gain … Q …" lines).
   The inspector shows the preset's name, what kind it is, its date and the device it was made for, and its curve on
   a 20 Hz–20 kHz graph; **Amount** scales the correction and **Export EQ Preset…** saves it as text again. It warns
@@ -342,8 +353,9 @@ effect chains in `effects`: each effect's four-character `type`, `subtype` and `
 `parameters` set in Junction, and an Audio Unit's `state`, its `kAudioUnitProperty_ClassInfo` as a base64 binary
 property list, restored when its unit is made; a plugin also keeps its `name` and `vendor`, so it can be named while
 missing; codes with bytes that aren't printable are written as `0x` and eight hex digits; a Calibration effect keeps
-its `calibration` profile: name, kind, date, device, per-channel filters, delay and level, preamp, target, limits and
-measured curves; new in schema 5, so schema 4 files load unchanged with none). A schema 1 file from the
+its `calibration` profile: name, kind, date, device, per-channel filters, delay and level, preamp, target, limits,
+measured curves and, for measured speakers, `alignment` (each channel's arrival and whether the channels are lined
+up; optional, so profiles without it still load and refit from their delays); new in schema 5, so schema 4 files load unchanged with none). A schema 1 file from the
 shared-canvas versions is converted on load: each node moves to the canvas of the device it was wired to (unwired
 ones to the first device), and cables between devices are dropped. Schema 2 files load with automatic buffer sizes;
 schema 2 and 3 files get sample-rate conversion set to Automatic and start with no scenes and no effects (a schema 4
@@ -422,8 +434,8 @@ records its input, and restores the device list. It needs microphone permission 
 `--device-test` checks that Core Audio follows the driver (a temporary device appears, is renamed, changes channels
 and rate, reports a rate set from outside, disappears and returns); it opens no audio and needs no permission.
 
-**Speaker and headphone calibration** is in progress: the Calibration effect runs profiles and loads headphone EQ
-presets; JunctionCore can measure speakers, but the app doesn't offer it yet. JunctionCore has the maths, without device access
+**Speaker and headphone calibration**: the Calibration effect runs profiles, loads headphone EQ presets and measures
+speakers through the Calibrate Speakers sheet. JunctionCore has the maths, without device access
 (`Calibration*.swift`): an exponential sine sweep (20 Hz to 20 kHz or 0.45 × the rate)
 with its regularised inverse and deconvolution to an impulse response, arrival-time detection, the response on a
 fixed 240-point log grid through a frequency-dependent window, 1/3-, 1/6- and 1/12-octave smoothing, level-matched
@@ -448,6 +460,17 @@ noise, clipping, lost buffers and a microphone that disappears): a three-positio
 within the maths' tolerances, each error says what went wrong, cancelling frees everything, and the held sinks are
 exactly the affected ones, in the router and through the helper's XPC protocol. Measuring needs Junction's own
 Microphone permission, asked with the usual prompt.
+
+The Calibrate Speakers sheet's model (`SpeakerCalibration.swift`, in JunctionCore so it can be tested without a
+window; the sheet is `CalibrateSpeakersSheet.swift`) runs the engine's blocking steps on another thread and keeps
+each position's captures itself, so a position can be redone or dropped. Results are fitted from the curves as they
+are saved with the profile (`CalibrationProfile.refitted`), so every change of the controls, and **Adjust…** on a
+saved profile, refits without measuring, and refitting with the same settings gives the same profile. While the
+results show, the app plays the fitted correction in the effect without editing the setup (it is added to the graph
+that is heard, as a moving fader is); the before/after switch plays the correction off with only its average level
+change over 100 Hz–10 kHz made up, and **Save** is one undo step. The sheet's tests drive it with the simulated
+devices: the pages in order, redoing and dropping positions, refitting from the saved measurements, saving and
+undoing, Adjust… without measuring and the comparison's level.
 
 `build.sh` always puts Junction Helper and its launch agent into Junction.app; `ROUTING_HELPER` decides whether the
 app registers and uses it (`JunctionRoutingHelper` in its Info.plist): `1` routes in the helper, `0` inside the app.
@@ -553,9 +576,12 @@ system-audio permissions and **Install Driver…** with the first one.
   apart from it. Plugin windows open only while the plugin runs, and settings changed in a window
   just before Junction quits may be lost (they are read every 2 s). Music effects (`aumf`) and instruments aren't
   listed. Overload counts are Junction's own measurement of its rendering, not Core Audio's overload notifications.
-- Measuring speakers hasn't been tried with real hardware: the private aggregate device, drift compensation, the
+- Measuring speakers is untried with real hardware: the private aggregate device, drift compensation, the
   sample-rate converter path, the Microphone prompt and real rooms are unverified; only the simulated device layer is
-  tested, and the app doesn't offer measuring yet. A sink added while a measurement runs isn't held.
+  tested. A sink added while a measurement runs isn't held. Accurate results need a measurement microphone with its
+  calibration file; without the file, or with another microphone, the microphone's own response is in the result.
+  EQ can't fix room nulls or reflections: deep narrow dips are left alone rather than boosted, and only level is
+  corrected, not timing. A profile belongs to the device it was measured on (and the room and listening spot).
 - Calibration hasn't been heard through real devices yet. Its filters are minimum phase only (peaking and shelving
   biquads): they correct level, not timing, so a room's reflections and a speaker's phase aren't straightened. A
   profile belongs to the device it was made for: on another one (or when Default Output moves) it still runs, with a

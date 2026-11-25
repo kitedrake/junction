@@ -26,10 +26,49 @@ extension CalibrationProfile {
         channels.count == 1 ? outputChannels : min(channels.count, outputChannels)
     }
 
+    /// Where the correction's average level change is taken (dB averaged over the grid's points in it): the band
+    /// most of what is heard lies in.
+    public static let comparisonRange: ClosedRange<Double> = 100...10_000
+
+    /// The correction's average level change in dB over `comparisonRange`, across the corrected channels: filters,
+    /// preamp and channel levels (usually negative, as the preamp makes room for the boosts).
+    public func averageLevelChange(sampleRate: Double = 48_000) -> Double {
+        let frequencies = CalibrationGrid.frequencies.filter(Self.comparisonRange.contains)
+        let means = (0..<max(1, channels.count)).map { channel in
+            curve(channel: channel, sampleRate: sampleRate, at: frequencies).reduce(0, +) / Double(max(1, frequencies.count))
+        }
+        return means.reduce(0, +) / Double(means.count)
+    }
+
+    /// What a before/after comparison plays for "before": the correction off (no filters, delays or channel levels),
+    /// with only its average level change made up, so neither side sounds better for being louder.
+    public func comparison(sampleRate: Double = 48_000) -> CalibrationProfile {
+        var before = self
+        before.channels = channels.map { _ in CalibrationChannel(filters: []) }
+        before.preamp = averageLevelChange(sampleRate: sampleRate)
+        return before
+    }
+
     /// Whether the profile was made for another device than `uid` (one not tied to a device fits any).
     public func isForAnotherDevice(than uid: String?) -> Bool {
         guard let deviceUID else { return false }
         return deviceUID != uid
+    }
+}
+
+extension Node {
+    /// The node's first Calibration effect.
+    public var calibrationEffect: Effect? { effects.first { $0.kind == .calibration } }
+
+    /// Puts a profile into the node's Calibration effect `effect`, or into its first one, adding one at the end of
+    /// the chain when it has none. Returns the effect's id.
+    @discardableResult
+    public mutating func setCalibration(_ profile: CalibrationProfile?, effect: UUID? = nil) -> UUID {
+        let index = effects.firstIndex { $0.id == effect && $0.kind == .calibration }
+            ?? effects.firstIndex { $0.kind == .calibration }
+            ?? { effects.append(Effect(.calibration)); return effects.count - 1 }()
+        effects[index].calibration = profile
+        return effects[index].id
     }
 }
 

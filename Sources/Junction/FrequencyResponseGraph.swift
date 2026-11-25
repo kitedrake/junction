@@ -10,6 +10,8 @@ struct ResponseCurve: Identifiable {
     var levels: [Double]
     /// Drawn dashed (a target, or a curve for reference).
     var isDashed = false
+    /// Thinner and fainter: one of many (a single measurement behind its average).
+    var isFaint = false
 
     var id: String { name }
 }
@@ -33,7 +35,8 @@ struct FrequencyResponseGraph: View {
                     LineMark(x: .value("Frequency", point.0), y: .value("Level", min(max(point.1, range.lowerBound), range.upperBound)),
                              series: .value("Curve", curve.name))
                         .foregroundStyle(by: .value("Curve", curve.name))
-                        .lineStyle(StrokeStyle(lineWidth: 1.5, dash: curve.isDashed ? [4, 3] : []))
+                        .lineStyle(StrokeStyle(lineWidth: curve.isFaint ? 0.75 : 1.5, dash: curve.isDashed ? [4, 3] : []))
+                        .opacity(curve.isFaint ? 0.45 : 1)
                         .interpolationMethod(.monotone)
                 }
             }
