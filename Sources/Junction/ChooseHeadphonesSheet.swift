@@ -249,8 +249,11 @@ struct LibraryProjectCredit: View {
     var body: some View {
         HStack(spacing: 8) {
             if let url = HeadphoneLibrary.logoURL, let logo = NSImage(contentsOf: url) {
+                // The logo is black on transparent: drawn in the text colour, so it reads in dark mode too.
                 Image(nsImage: logo)
+                    .renderingMode(.template)
                     .resizable()
+                    .foregroundStyle(.primary)
                     .aspectRatio(contentMode: .fit)
                     .frame(height: 16)
                     .accessibilityLabel(HeadphoneLibrary.projectName)
@@ -278,12 +281,16 @@ struct LibraryStatus: View {
         VStack(alignment: compact ? .trailing : .leading, spacing: 4) {
             HStack(spacing: 8) {
                 if compact {
-                    Text(store.status)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .help(store.status)
+                    VStack(alignment: .trailing, spacing: 0) {
+                        ForEach(store.statusLines, id: \.self) { line in
+                            Text(line).lineLimit(1)
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+                    .help(store.status)
+                    .accessibilityElement(children: .combine)
                 }
                 if store.isUpdating {
                     ProgressView().controlSize(.small)

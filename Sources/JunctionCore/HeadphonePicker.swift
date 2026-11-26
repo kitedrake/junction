@@ -101,14 +101,22 @@ public final class HeadphoneLibraryStore {
 
     /// "Bundled with Junction · 26 Nov 2026" or "Downloaded 3 Dec 2026", then the counts: what Settings and the sheet
     /// show.
-    public var status: String {
+    public var status: String { statusLines.joined(separator: " · ") }
+
+    /// `status` in two lines for narrow places such as the sheet: which copy and its date, then the counts (one line
+    /// while the library is being read or can't be).
+    public var statusLines: [String] {
         guard let summary = library?.summary else {
-            return loadProblem ?? "Reading the headphone library…"
+            return [loadProblem ?? "Reading the headphone library…"]
         }
-        return Self.status(summary)
+        return Self.statusLines(summary)
     }
 
     public static func status(_ summary: HeadphoneLibrary.Summary) -> String {
+        statusLines(summary).joined(separator: " · ")
+    }
+
+    public static func statusLines(_ summary: HeadphoneLibrary.Summary) -> [String] {
         let date = summary.date.map { $0.formatted(date: .abbreviated, time: .omitted) }
         let source = switch summary.source {
         case .bundled: date.map { "Bundled with Junction, from \($0)" } ?? "Bundled with Junction"
@@ -117,8 +125,8 @@ public final class HeadphoneLibraryStore {
         func count(_ number: Int, _ one: String, _ many: String) -> String {
             "\(number.formatted()) \(number == 1 ? one : many)"
         }
-        return "\(source) · \(count(summary.products, "headphone model", "headphone models")) · "
-            + count(summary.presets, "preset", "presets")
+        return [source, "\(count(summary.products, "headphone model", "headphone models")) · "
+            + count(summary.presets, "preset", "presets")]
     }
 }
 

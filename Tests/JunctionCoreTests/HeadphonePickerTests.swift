@@ -247,6 +247,8 @@ final class HeadphonePickerTests: XCTestCase {
         await store.load()
         let date = HeadphoneLibrary.bundledDate.formatted(date: .abbreviated, time: .omitted)
         XCTAssertEqual(store.status, "Bundled with Junction, from \(date) · 3 headphone models · 5 presets")
+        // The sheet's two lines: which copy, then the counts.
+        XCTAssertEqual(store.statusLines, ["Bundled with Junction, from \(date)", "3 headphone models · 5 presets"])
         var summary = Self.library.summary
         summary.source = .downloaded
         summary.date = nil
@@ -259,6 +261,7 @@ final class HeadphonePickerTests: XCTestCase {
         await failing.load()
         XCTAssertNil(failing.library)
         XCTAssertEqual(failing.status, "The headphone library “database_v1.jsonl.lzma” isn't there.")
+        XCTAssertEqual(failing.statusLines, ["The headphone library “database_v1.jsonl.lzma” isn't there."])
     }
 
     /// A made-up download with `count` models.

@@ -280,7 +280,15 @@ extension Demo {
 
 /// Development aid: `JUNCTION_SNAPSHOT=<folder>` loads the demo setup, saves PNGs of the main states, each as
 /// `<state>-light.png` and `<state>-dark.png`, into the folder and quits. Needs Screen Recording permission for the terminal that launches it.
+/// `JUNCTION_SNAPSHOT_ONLY=<name>,<name>…` saves only the states whose names start with one of those (for example
+/// `headphones,settings`), which takes seconds instead of minutes.
 enum Snapshot {
+    /// Whether this run saves the state `name` (every state unless `JUNCTION_SNAPSHOT_ONLY` lists others).
+    static func wanted(_ name: String) -> Bool {
+        guard let only = ProcessInfo.processInfo.environment["JUNCTION_SNAPSHOT_ONLY"], !only.isEmpty else { return true }
+        return only.split(separator: ",").contains { name.hasPrefix($0.trimmingCharacters(in: .whitespaces)) }
+    }
+
     @MainActor static func runIfRequested(_ model: AppModel) {
         guard let folder = ProcessInfo.processInfo.environment["JUNCTION_SNAPSHOT"].map({ URL(fileURLWithPath: $0, isDirectory: true) })
         else { return }
@@ -289,6 +297,7 @@ enum Snapshot {
             try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             /// Saves the current state in both appearances (light first, dark last, so the next state starts dark).
             @MainActor func both(_ name: String, sheet: Bool = false) async {
+                guard wanted(name) else { return }
                 for (appearance, suffix) in [(NSAppearance.Name.aqua, "light"), (.darkAqua, "dark")] {
                     NSApp.appearance = NSAppearance(named: appearance)
                     try? await Task.sleep(for: .milliseconds(800))
@@ -338,7 +347,8 @@ enum Snapshot {
                     if let second = picker.chosen?.presets.dropFirst().first { picker.setCompared(second.id, true) }
                     await both("headphones-presets", sheet: true)
                     resize(980, 560)
-                    for (appearance, suffix) in [(NSAppearance.Name.aqua, "light"), (.darkAqua, "dark")] {
+                    for (appearance, suffix) in [(NSAppearance.Name.aqua, "light"), (.darkAqua, "dark")]
+                    where wanted("headphones-minimum-size") {
                         NSApp.appearance = NSAppearance(named: appearance)
                         try? await Task.sleep(for: .milliseconds(800))
                         captureWindowArea(folder, "headphones-minimum-size-\(suffix)")
@@ -377,7 +387,8 @@ enum Snapshot {
                     await both("calibrate-compare", sheet: true)
                     sheet.isComparing = false
                     resize(980, 560)
-                    for (appearance, suffix) in [(NSAppearance.Name.aqua, "light"), (.darkAqua, "dark")] {
+                    for (appearance, suffix) in [(NSAppearance.Name.aqua, "light"), (.darkAqua, "dark")]
+                    where wanted("calibrate-minimum-size") {
                         NSApp.appearance = NSAppearance(named: appearance)
                         try? await Task.sleep(for: .milliseconds(800))
                         captureWindowArea(folder, "calibrate-minimum-size-\(suffix)")
@@ -444,7 +455,7 @@ enum Snapshot {
                 model.showCanvas(first)
             }
             // The Routing menu open on its scenes (the sidebar lists them too).
-            for (appearance, suffix) in [(NSAppearance.Name.aqua, "light"), (.darkAqua, "dark")] {
+            for (appearance, suffix) in [(NSAppearance.Name.aqua, "light"), (.darkAqua, "dark")] where wanted("scene-menu") {
                 NSApp.appearance = NSAppearance(named: appearance)
                 try? await Task.sleep(for: .milliseconds(800))
                 captureMenu("Routing", folder, "scene-menu-\(suffix)")
@@ -496,7 +507,7 @@ enum Snapshot {
                                   prepare: { model.showsAcknowledgements = true },
                                   finish: { model.showsAcknowledgements = false })
 
-            if let routing = NSApp.mainMenu?.items.first(where: { $0.title == "Routing" })?.submenu,
+            if wanted("log"), let routing = NSApp.mainMenu?.items.first(where: { $0.title == "Routing" })?.submenu,
                let index = routing.items.firstIndex(where: { $0.title == "Show Routing Log" }) {
                 routing.performActionForItem(at: index)
                 try? await Task.sleep(for: .milliseconds(800))
@@ -508,7 +519,7 @@ enum Snapshot {
                     screencapture(["-x", "-o", "-l", "\(log.windowNumber)"], folder, "log-\(suffix)")
                 }
                 log.close()
-            } else {
+            } else if wanted("log") {
                 FileHandle.standardError.write(Data("Couldn't open the Routing Log for a screenshot.\n".utf8))
             }
             NSApp.windows.first { $0.isVisible && $0.contentView != nil }?.makeKeyAndOrderFront(nil)
@@ -541,6 +552,7 @@ enum Snapshot {
     /// `<name>-light.png` and `<name>-dark.png`, and closes it.
     @MainActor static func captureSettings(_ folder: URL, _ name: String, sheet: Bool = false,
                                            prepare: () -> Void = {}, finish: () -> Void = {}) async {
+        guard wanted(name) else { return }
         if let appMenu = NSApp.mainMenu?.items.first?.submenu,
            let index = appMenu.items.firstIndex(where: { $0.title.hasPrefix("Settings") }) {
             appMenu.performActionForItem(at: index)
