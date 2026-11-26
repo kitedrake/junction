@@ -68,7 +68,7 @@ if { [ -n "$feed" ] && [ -z "$key" ]; } || { [ -z "$feed" ] && [ -n "$key" ]; };
   echo "Set both UPDATE_FEED_URL and UPDATE_PUBLIC_KEY, or neither." >&2
   exit 1
 fi
-# SwiftPM sandboxes its manifest builds; inside another sandbox (Nightshift's checks, for example) that fails with
+# SwiftPM sandboxes its manifest builds; inside another sandbox (an automated check runner's, for example) that fails with
 # "sandbox_apply: Operation not permitted", so turn SwiftPM's own sandbox off there. Such a sandbox usually has no
 # network either, so use the packages SwiftPM already has cached (--skip-update) instead of fetching updates first.
 spm_flags=""

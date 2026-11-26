@@ -186,8 +186,7 @@ menu on the canvas, sends just that to the monitor, without changing the device'
   <img src="docs/screenshots/mixer-dark.png" alt="The Stream Mix mixer: strips for System Audio, the microphone, Music through DJ Deck, the device and the headphones, with the microphone soloed on the monitor">
 </picture>
 
-*Screenshots made with Junction's snapshot mode on a made-up set of devices (see Development); GitHub shows the
-light or dark set to match your theme.*
+*Screenshots show a made-up set of devices; GitHub shows the light or dark set to match your theme.*
 
 Junction is open source under the GNU General Public License, version 3 or later (`LICENSE`). Copyright (C) 2026 omso.
 
@@ -391,14 +390,7 @@ build/Junction.app/Contents/MacOS/Junction --list        # driver status, device
 build/Junction.app/Contents/MacOS/Junction --diagnose [file]   # bug report: versions, devices, plan, events, setup
 build/Junction.app/Contents/MacOS/Junction --loopback-test   # with the driver installed: tone in, tone out
 build/Junction.app/Contents/MacOS/Junction --device-test     # with the driver installed: add, rename, reshape, remove
-JUNCTION_SNAPSHOT=/tmp/shots build/Junction.app/Contents/MacOS/Junction   # demo screenshots, light and dark
 ```
-
-Snapshot mode needs Screen Recording permission for the terminal that starts it, and its window must stay in front
-while it runs: an inactive window is captured with greyed-out controls. It shares its preferences with the Junction
-installed on the Mac (window places and sizes, canvas or mixer): it puts back whatever it changed when it finishes, but
-not if it is stopped early. Menus follow the system's appearance in both
-versions. It doesn't run inside Nightshift's sandbox.
 
 The kernel stress test (`Tests/KernelHarness/stress.c`) runs the sample-rate converter and the renderer under
 address and undefined-behaviour sanitizers with random buffer sizes, stalls on either side and every pair of common
