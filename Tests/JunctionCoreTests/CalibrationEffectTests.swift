@@ -128,6 +128,23 @@ final class CalibrationEffectTests: XCTestCase {
         }
     }
 
+    func testLowPassRunsInTheCorrectionStage() throws {
+        var profile = headphones()
+        profile.channels[0].filters.append(CalibrationFilter(.lowPass, frequency: 12_000, gain: 0))
+        for sampleRate in [44_100.0, 48_000, 96_000] {
+            try assertMatchesCurve(profile, amount: 100, sampleRate: sampleRate, length: 16_384)
+        }
+        try assertMatchesCurve(profile, amount: 50, sampleRate: 48_000, length: 16_384)
+        // A low-pass has no gain for Amount to scale: it runs whole until Amount is 0, which switches it off.
+        XCTAssertEqual(profile.scaled(by: 0.5).channels[0].filters.last, CalibrationFilter(.lowPass, frequency: 12_000, gain: 0))
+        XCTAssertEqual(profile.scaled(by: 0).channels[0].filters.last?.isOn, false)
+        XCTAssertTrue(profile.scaled(by: 0).curve(channel: 0, sampleRate: 48_000).allSatisfy { abs($0) < 1e-9 })
+        try assertMatchesCurve(profile, amount: 0, sampleRate: 48_000, length: 16_384)
+        // The kernel gets one more section for it, at rates that carry it.
+        XCTAssertEqual(profile.coefficients(channel: 0, sampleRate: 48_000).count, headphones().coefficients(channel: 0, sampleRate: 48_000).count + 1)
+        XCTAssertEqual(profile.coefficients(channel: 0, sampleRate: 22_050).count, headphones().coefficients(channel: 0, sampleRate: 22_050).count)
+    }
+
     func testAmountScalesTheFiltersGains() throws {
         let profile = headphones()
         let half = profile.scaled(by: 0.5)
@@ -340,7 +357,7 @@ final class CalibrationEffectTests: XCTestCase {
         let store = Store(folder: folder)
         try store.save(graph)
         let text = try String(contentsOf: store.graphURL, encoding: .utf8)
-        XCTAssertTrue(text.contains("\"schema\" : 5"))
+        XCTAssertTrue(text.contains("\"schema\" : \(Graph.currentSchema)"))
         XCTAssertTrue(text.contains("\"calibration\""))
         let loaded = try XCTUnwrap(store.load())
         XCTAssertEqual(loaded.node(output.id)?.effects, output.effects)
@@ -365,7 +382,7 @@ final class CalibrationEffectTests: XCTestCase {
         let store = Store(folder: folder)
         try old.write(to: store.graphURL)
         var loaded = try XCTUnwrap(store.load())
-        XCTAssertEqual(loaded.schema, 5)
+        XCTAssertEqual(loaded.schema, Graph.currentSchema)
         loaded.schema = 4
         XCTAssertEqual(loaded, graph, "nothing else changes")
         XCTAssertEqual(try encoder.encode(loaded), old)
@@ -380,7 +397,7 @@ final class CalibrationEffectTests: XCTestCase {
         XCTAssertNil(effect.calibration)
         XCTAssertEqual(effect.value(EffectKind.calibration.parameters[0]), 40)
         XCTAssertTrue(development.scenes[0].nodes.flatMap(\.effects).allSatisfy { $0.calibration == nil })
-        XCTAssertEqual(development.schema, 5)
+        XCTAssertEqual(development.schema, Graph.currentSchema)
     }
 
     func testRunnerRebuildsCoefficientsWithoutRebuildingTheSink() throws {

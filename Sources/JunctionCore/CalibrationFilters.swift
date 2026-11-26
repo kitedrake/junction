@@ -1,18 +1,21 @@
 import Foundation
 
-// The correction's filters: peaking and shelving biquads from Robert Bristow-Johnson's "Cookbook formulae for audio EQ
-// biquad filter coefficients" (published as W3C's Audio EQ Cookbook). They are minimum phase, so the correction adds no
-// delay. A filter is kept by type, frequency, gain and Q, and its coefficients are worked out for whatever rate the
+// The correction's filters: peaking, shelving and low-pass biquads from Robert Bristow-Johnson's "Cookbook formulae for
+// audio EQ biquad filter coefficients" (published as W3C's Audio EQ Cookbook). They are minimum phase, so the correction
+// adds no delay. A filter is kept by type, frequency, gain and Q, and its coefficients are worked out for whatever rate the
 // output runs at.
 
 /// One correction filter, as saved and as a parametric EQ preset lists it.
 public struct CalibrationFilter: Codable, Hashable, Sendable {
     public enum Kind: String, Codable, CaseIterable, Sendable {
         case peaking, lowShelf, highShelf
+        /// A second-order low-pass (12 dB per octave); its gain isn't used.
+        case lowPass
     }
 
     public var kind: Kind
-    /// Hz: a peak's centre, a shelf's midpoint (where it reaches half its gain in dB).
+    /// Hz: a peak's centre, a shelf's midpoint (where it reaches half its gain in dB), a low-pass's cutoff (−3 dB at
+    /// Q 0.707).
     public var frequency: Double
     public var gain: Double
     public var q: Double
@@ -72,6 +75,9 @@ public struct CalibrationFilter: Codable, Hashable, Sendable {
             a0 = (a + 1) - (a - 1) * cosine + root
             a1 = 2 * ((a - 1) - (a + 1) * cosine)
             a2 = (a + 1) - (a - 1) * cosine - root
+        case .lowPass:
+            (b0, b1, b2) = ((1 - cosine) / 2, 1 - cosine, (1 - cosine) / 2)
+            (a0, a1, a2) = (1 + alpha, -2 * cosine, 1 - alpha)
         }
         return CalibrationBiquad(b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a1: a1 / a0, a2: a2 / a0)
     }

@@ -1,0 +1,21 @@
+{"type":"vendor","id":"acme","data":{"name":"Acmé Audio","logo":"assets/acme.png","blurb":"Made up for tests."}}
+{"type":"eq","id":"acme:studio_one::tuner_one_flat","data":{"author":"Tuner One","details":"Measured by Bench A","link":"https://example.com/studio-one","type":"parametric_eq","rating":5,"parameters":{"gain_db":-6.5,"bands":[{"type":"peak_dip","frequency":170,"gain_db":-1.9,"q":1.47},{"type":"low_shelf","frequency":105,"gain_db":5.5,"q":0.7},{"type":"high_shelf","frequency":10000,"gain_db":-2.2,"q":0.6},{"type":"low_pass","frequency":15000,"slope":12}]},"product_id":"acme::studio_one"}}
+{"type":"product","id":"acme::studio_one","data":{"name":"Studio One","type":"headphones","subtype":"over_the_ear","vendor_id":"acme","line_art_svg":"assets/one.svg"}}
+{"type":"product","id":"acme::studio_bud","data":{"name":"Studio Bud","type":"headphones","subtype":"in_ear","vendor_id":"acme"}}
+{"type":"eq","id":"acme:studio_bud::tuner_two_band_pass","data":{"author":"Tuner Two","details":"Target B","type":"parametric_eq","parameters":{"gain_db":-3,"bands":[{"type":"peak_dip","frequency":3000,"gain_db":-4,"q":2},{"type":"band_pass","frequency":1000,"q":1}]},"product_id":"acme::studio_bud"}}
+{"type":"eq","id":"acme:studio_bud::tuner_two_fine","data":{"author":"Tuner Two","details":"Target A","type":"parametric_eq","parameters":{"gain_db":1.5,"bands":[{"type":"peak_dip","frequency":3000,"gain_db":-4,"q":2},{"type":"low_pass","frequency":12000,"q":0.5}]},"product_id":"acme::studio_bud"}}
+{"type":"eq","id":"acme:studio_bud::tuner_two_steep","data":{"author":"Tuner Two","details":"Target C","type":"parametric_eq","parameters":{"gain_db":-2,"bands":[{"type":"low_pass","frequency":9000,"slope":24}]},"product_id":"acme::studio_bud"}}
+{"type":"eq","id":"acme:studio_bud::tuner_two_graphic","data":{"author":"Tuner Two","details":"Target D","type":"graphic_eq","parameters":{"gain_db":0,"bands":[]},"product_id":"acme::studio_bud"}}
+{"type":"brand_story","id":"acme","data":{"text":"An entry type Junction doesn't know."}}
+
+{"type":"vendor","id":"broken"
+[1, 2, 3]
+{"type":"vendor","id":"nameless","data":{"logo":"assets/x.png"}}
+{"type":"product","id":"ghost::phantom","data":{"name":"Phantom","type":"headphones","subtype":"in_ear","vendor_id":"ghost"}}
+{"type":"eq","id":"ghost:phantom::tuner_one","data":{"author":"Tuner One","details":"Target A","type":"parametric_eq","parameters":{"gain_db":-1,"bands":[{"type":"peak_dip","frequency":100,"gain_db":-1,"q":1}]},"product_id":"ghost::phantom"}}
+{"type":"eq","id":"acme:nothing::tuner_one","data":{"author":"Tuner One","details":"Target A","type":"parametric_eq","parameters":{"gain_db":-1,"bands":[{"type":"peak_dip","frequency":100,"gain_db":-1,"q":1}]},"product_id":"acme::nothing"}}
+{"type":"vendor","id":"zenith","data":{"name":"Zenith"}}
+{"type":"product","id":"zenith::one","data":{"name":"One","type":"headphones","subtype":"earbuds","vendor_id":"zenith"}}
+{"type":"product","id":"zenith::studio_tribute","data":{"name":"Studio Tribute","type":"headphones","subtype":"on_ear","vendor_id":"zenith"}}
+{"type":"product","id":"zenith::earphone_7","data":{"name":"Earphone 7","type":"headphones","subtype":"neckband","vendor_id":"zenith"}}
+{"type":"eq","id":"zenith:one::tuner_three","data":{"author":"Tuner Three","details":"Measured by Bench B","type":"parametric_eq","parameters":{"gain_db":-4,"bands":[{"type":"peak_dip","frequency":60,"gain_db":3,"q":0.8},{"type":"high_shelf","frequency":8000,"gain_db":2}]},"product_id":"zenith::one"}}

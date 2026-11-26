@@ -8,14 +8,18 @@ import JunctionKernel
 
 extension CalibrationProfile {
     /// The profile at `amount` (0…1): every filter's gain, and the preamp that makes room for them, scaled in dB.
-    /// Channels' delays and levels stay as they are.
+    /// A low-pass has no gain to scale: it runs whole above 0 and is switched off at 0. Channels' delays and levels
+    /// stay as they are.
     public func scaled(by amount: Double) -> CalibrationProfile {
         let amount = min(max(amount, 0), 1)
         guard amount != 1 else { return self }
         var scaled = self
         scaled.preamp = preamp * amount
         for c in scaled.channels.indices {
-            for f in scaled.channels[c].filters.indices { scaled.channels[c].filters[f].gain *= amount }
+            for f in scaled.channels[c].filters.indices {
+                scaled.channels[c].filters[f].gain *= amount
+                if amount == 0, scaled.channels[c].filters[f].kind == .lowPass { scaled.channels[c].filters[f].isOn = false }
+            }
         }
         return scaled
     }

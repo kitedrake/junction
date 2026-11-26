@@ -163,6 +163,8 @@ cp Resources/local.junction.driverd.plist "$app/Contents/Library/LaunchDaemons/l
 crash=""
 if [ -n "$crash_url" ]; then crash="<key>JunctionCrashReportURL</key><string>$crash_url</string>"; fi
 cp scripts/install-driver.sh scripts/uninstall-driver.sh "$app/Contents/Resources/"
+# The headphone library: the bundled copy of the open headphone EQ database, with its licences, logo and SOURCE.md.
+ditto Resources/HeadphoneLibrary "$app/Contents/Resources/HeadphoneLibrary"
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

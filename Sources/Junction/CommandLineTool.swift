@@ -20,7 +20,7 @@ enum CommandLineTool {
               --diagnose [file] A report for bug reports: versions, devices, apps, the routing plan, recent routing
                                 events and the saved setup (it names your devices and apps). No audio is opened.
               --self-test [dir] Checks the bundled driver, routing helper and driver installer, the planner, the mixing
-                                kernel and its effects, the plugin list, both helpers' XPC messages, crash reports and saving (no audio; nothing is
+                                kernel and its effects, the plugin list, both helpers' XPC messages, crash reports, the headphone library and saving (no audio; nothing is
                                 installed, registered or launched).
               --loopback-test   With the driver installed: plays a tone into a temporary virtual device and checks
                                 it comes back out. Needs microphone permission for the calling app (e.g. Terminal).
@@ -202,6 +202,28 @@ enum CommandLineTool {
                                        file: URL(fileURLWithPath: "Junction-2026-01-01-000000.ips"), modified: Date())
         check(crash.map { CrashReports.compose(diagnostic: "diagnostic\n", crashes: [$0]).contains("==== Crash log: Junction-") } ?? false,
               "a crash log is recognised and goes into the report")
+
+        // The headphone library: the bundled database loads with brands, models and presets, and its licences and
+        // logo are there for the credits.
+        if let url = HeadphoneLibrary.bundledDatabaseURL,
+           let library = try? HeadphoneLibrary(contentsOf: url, source: .bundled, date: HeadphoneLibrary.bundledDate) {
+            let summary = library.summary
+            check(summary.brands > 0 && summary.products > 0 && summary.presets > summary.unavailablePresets,
+                  "headphone library loads (\(summary.brands) brands, \(summary.products) models, \(summary.presets) presets, "
+                  + "\(summary.unavailablePresets) unavailable, \(summary.unreadableLines) unreadable lines)")
+            let model = library.models.first { $0.presets.contains(where: \.isAvailable) }
+            let profile = model.flatMap { model in
+                model.presets.first(where: \.isAvailable).flatMap { try? CalibrationProfile.headphones(model, preset: $0) }
+            }
+            check(profile?.library != nil, "a library preset becomes a credited headphone profile")
+        } else {
+            check(false, "headphone library bundled and readable (Contents/Resources/HeadphoneLibrary/database_v1.jsonl.lzma)")
+        }
+        let libraryFolder = HeadphoneLibrary.bundledFolder
+        let credits = ["LICENSE.md", "THIRD_PARTY_LICENSES.md", "opra_logo.png"].filter { name in
+            libraryFolder.map { !FileManager.default.fileExists(atPath: $0.appendingPathComponent(name).path) } ?? true
+        }
+        check(credits.isEmpty, "headphone library's licences and logo bundled" + (credits.isEmpty ? "" : " (missing: \(credits))"))
 
         // Planning: "stream without chat" lays out as expected.
         var graph = Graph()
