@@ -284,18 +284,25 @@ final class HeadphoneLibraryTests: XCTestCase {
         XCTAssertEqual(loaded, graph, "nothing else changes")
         XCTAssertEqual(try encoder.encode(loaded), old)
 
-        // A schema 5 file from a development build with library credits keeps its profiles, without the credits.
+        XCTAssertFalse(String(decoding: old, as: UTF8.self).contains("adjustment"))
+
+        // A schema 5 file from a development build with library credits and adjustments keeps its profiles, without
+        // them.
         var development = graph
         let credit = HeadphoneLibraryCredit(presetID: "acme:studio_one::tuner_one_flat", author: "Tuner One",
                                             details: "Target A")
+        let adjustment = CalibrationTarget(tilt: -0.5, lowShelf: .init(frequency: 105, gain: 3))
         let last = development.nodes.count - 1
         development.nodes[last].effects[1].calibration?.library = credit
+        development.nodes[last].effects[1].calibration?.adjustment = adjustment
         development.scenes = [RoutingScene(name: "Streaming", capturing: development)]
         XCTAssertEqual(development.scenes[0].nodes.last?.effects[1].calibration?.library, credit)
+        XCTAssertEqual(development.scenes[0].nodes.last?.effects[1].calibration?.adjustment, adjustment)
         development.upgrade()
         XCTAssertEqual(development.schema, 6)
         XCTAssertEqual(development.node(output.id)?.calibrationEffect?.calibration, profile)
         XCTAssertTrue(development.scenes[0].nodes.flatMap(\.effects).allSatisfy { $0.calibration?.library == nil })
+        XCTAssertTrue(development.scenes[0].nodes.flatMap(\.effects).allSatisfy { $0.calibration?.adjustment == nil })
         XCTAssertEqual(development.scenes[0].nodes.last?.effects[1].calibration, profile)
     }
 }

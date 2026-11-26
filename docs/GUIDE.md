@@ -380,9 +380,24 @@ them). A correction belongs to the speakers, room and listening spot it was meas
    whole correction, 50 % half of every boost and cut, 0 % none. A low-pass filter has no boost or cut to scale: it
    stays whole above 0 %.
 
+**Adjust** (under the graph, for headphone presets from the library or a file) changes the sound on top of the
+preset with the same controls as the speaker results' target: **Tilt** in dB per octave about 1 kHz (negative is
+warmer, positive brighter), **Bass** and **Treble** shelves with their gain and the frequency they turn at. The
+preset's own filters stay as they are; your changes are added as extra filters, and the preamp comes down if they
+boost more than it leaves room for. The graph then shows the **Preset**, the **Adjustment** and the **Total**, and
+**Amount** scales all of it. Each change is one **Edit › Undo** step, and **Reset** takes them off so the preset
+plays exactly as it came. Choosing another preset starts again without adjustments. A preset with more than 25
+filters leaves no room for them in the correction's 32, and the box says so.
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="screenshots/calibration-adjusted-light.png">
+  <img src="screenshots/calibration-adjusted-dark.png" alt="Calibration on the headphones with Adjust: a warmer tilt, more bass and less treble, the graph showing the preset, the adjustment and the total">
+</picture>
+
 A correction is made for one device. When the output plays on another one (for example **Default Output** after you
 pick other headphones in Sound settings), the box warns you; load the preset for those headphones (or measure those speakers) instead. **Export
-EQ Preset…** saves the correction (at full amount) as a text file in the same format, to use elsewhere or keep. A
+EQ Preset…** saves the correction (at full amount, with any adjustments as extra filters after the preset's) as a
+text file in the same format, to use elsewhere or keep. A
 speaker correction with different filters per channel asks which channel to export.
 
 Calibration adds no delay, works on every channel of the output (a correction made per channel works on those

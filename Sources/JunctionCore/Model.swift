@@ -289,7 +289,9 @@ public struct Graph: Codable, Equatable, Sendable {
     /// level, mute and a level per source; absent in older files, which means none). 5: the Calibration effect keeps
     /// its correction in `Effect.calibration` (absent until one is loaded); schema 4 files load unchanged. 6: a profile
     /// loaded from the headphone library keeps its credits (`CalibrationProfile.library`: the preset's id, author,
-    /// details and link; absent for other profiles), and filters can be low-passes; schema 5 files load unchanged.
+    /// details and link; absent for other profiles), a headphone profile keeps its tilt and shelves on top of the
+    /// preset (`CalibrationProfile.adjustment`; absent when there are none), and filters can be low-passes; schema 5
+    /// files load unchanged.
     public static let currentSchema = 6
     public var schema = Graph.currentSchema
     public var virtualDevices: [VirtualDevice] = []
@@ -371,7 +373,8 @@ public struct Graph: Codable, Equatable, Sendable {
     /// target is gone are dropped. So are monitors: older files have none, a deleted device's monitor goes, a device
     /// keeps one at most, and solo/listen starts off. Schema 5 adds Calibration's profiles, which a schema 4 file can't
     /// have: any there (from a development build) are dropped and the rest of the file is kept as it is. Schema 6 adds
-    /// library credits to profiles, which a schema 5 file can't have either: any there are dropped the same way.
+    /// library credits and adjustments to profiles, which a schema 5 file can't have either: any there are dropped the
+    /// same way.
     public mutating func upgrade() {
         if schema < 2 { moveToCanvases() }
         if schema < 4 {
@@ -466,11 +469,14 @@ public struct Graph: Codable, Equatable, Sendable {
         for scene in scenes.indices { clear(&scenes[scene].nodes) }
     }
 
-    /// Schema 5 profiles had no library credits (nor did the nodes its scenes keep); the profiles stay.
+    /// Schema 5 profiles had no library credits or adjustments (nor did the nodes its scenes keep); the profiles stay.
     mutating func convertLibraryCredits() {
         func clear(_ nodes: inout [Node]) {
             for node in nodes.indices {
-                for effect in nodes[node].effects.indices { nodes[node].effects[effect].calibration?.library = nil }
+                for effect in nodes[node].effects.indices {
+                    nodes[node].effects[effect].calibration?.library = nil
+                    nodes[node].effects[effect].calibration?.adjustment = nil
+                }
             }
         }
         clear(&nodes)

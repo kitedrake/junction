@@ -37,12 +37,16 @@ public struct CalibrationProfile: Codable, Hashable, Identifiable, Sendable {
     public var alignment: CalibrationAlignment?
     /// For a preset from the headphone library: where it came from and who made it (absent for other profiles).
     public var library: HeadphoneLibraryCredit?
+    /// A headphone profile's tilt and shelves on top of its preset, played as extra filters after the preset's (absent
+    /// when there are none; see `HeadphoneAdjustment.swift`).
+    public var adjustment: CalibrationTarget?
 
     public init(id: UUID = UUID(), name: String, kind: Kind, date: Date = Date(), deviceUID: String? = nil,
                 deviceName: String? = nil, channels: [CalibrationChannel], preamp: Double,
                 target: CalibrationTarget = .flat, limits: CalibrationLimits = CalibrationLimits(),
                 micCalibration: String? = nil, measurements: [CalibrationMeasurement] = [],
-                alignment: CalibrationAlignment? = nil, library: HeadphoneLibraryCredit? = nil) {
+                alignment: CalibrationAlignment? = nil, library: HeadphoneLibraryCredit? = nil,
+                adjustment: CalibrationTarget? = nil) {
         self.id = id
         self.name = name
         self.kind = kind
@@ -57,6 +61,7 @@ public struct CalibrationProfile: Codable, Hashable, Identifiable, Sendable {
         self.measurements = measurements
         self.alignment = alignment
         self.library = library
+        self.adjustment = adjustment
     }
 
     /// The correction for an output channel (the single entry, or the last one for channels beyond the list).
@@ -64,17 +69,17 @@ public struct CalibrationProfile: Codable, Hashable, Identifiable, Sendable {
         channels.isEmpty ? CalibrationChannel(filters: []) : channels[max(0, min(index, channels.count - 1))]
     }
 
-    /// An output channel's biquads at a sample rate (filters the rate can't carry are dropped).
+    /// An output channel's biquads at a sample rate, the adjustment's included (filters the rate can't carry are
+    /// dropped).
     public func coefficients(channel index: Int, sampleRate: Double) -> [CalibrationBiquad] {
-        channel(index).filters.compactMap { $0.coefficients(sampleRate: sampleRate) }
+        playedFilters(channel: index).compactMap { $0.coefficients(sampleRate: sampleRate) }
     }
 
-    /// An output channel's combined curve in dB: filters, preamp and level.
+    /// An output channel's combined curve in dB as it plays: filters (the adjustment's included), preamp and level.
     public func curve(channel index: Int, sampleRate: Double,
                       at frequencies: [Double] = CalibrationGrid.frequencies) -> [Double] {
-        let channel = channel(index)
-        return CalibrationFilter.response(of: channel.filters, preamp: preamp + channel.level, sampleRate: sampleRate,
-                                          at: frequencies)
+        CalibrationFilter.response(of: playedFilters(channel: index), preamp: playedPreamp + channel(index).level,
+                                   sampleRate: sampleRate, at: frequencies)
     }
 
     /// A headphone profile from a parametric EQ preset (one set of filters for every channel).
@@ -83,9 +88,10 @@ public struct CalibrationProfile: Codable, Hashable, Identifiable, Sendable {
                   preamp: min(0, preset.preamp))
     }
 
-    /// The preset for one channel's filters and the preamp (delay and level aren't part of the format).
+    /// The preset for one channel's filters and the preamp as they play, the adjustment's filters after the preset's
+    /// (delay and level aren't part of the format).
     public func preset(channel index: Int = 0) -> ParametricPreset {
-        ParametricPreset(preamp: preamp, filters: channel(index).filters)
+        ParametricPreset(preamp: playedPreamp, filters: playedFilters(channel: index))
     }
 
     /// A speaker profile from sweeps: `captures[channel][position]`, the first position being the listening position

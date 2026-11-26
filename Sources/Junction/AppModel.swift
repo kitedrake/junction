@@ -1449,7 +1449,18 @@ final class AppModel {
         endEditing()
     }
 
-    /// Saves one channel's filters and the preamp as a parametric EQ preset (delays and levels aren't part of it).
+    /// Changes the tilt, bass and treble on top of a headphone preset (nil, or none: the preset as it came).
+    func setHeadphoneAdjustment(_ adjustment: CalibrationTarget?, effect: UUID, in node: UUID) {
+        updateNode(node, adjustment == nil ? "Reset Headphone Adjustment" : "Adjust Headphones") { node in
+            guard let index = node.effects.firstIndex(where: { $0.id == effect }),
+                  let profile = node.effects[index].calibration else { return }
+            node.effects[index].calibration = profile.adjusted(adjustment)
+        }
+        endEditing()
+    }
+
+    /// Saves one channel's filters and the preamp as a parametric EQ preset, the adjustment's filters after the
+    /// preset's (delays and levels aren't part of it).
     func exportEQPreset(_ profile: CalibrationProfile, channel: Int = 0) {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.plainText]

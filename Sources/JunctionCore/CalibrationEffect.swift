@@ -7,14 +7,15 @@ import JunctionKernel
 // buffer, so neither clicks and the sink isn't rebuilt.
 
 extension CalibrationProfile {
-    /// The profile at `amount` (0…1): every filter's gain, and the preamp that makes room for them, scaled in dB.
-    /// A low-pass has no gain to scale: it runs whole above 0 and is switched off at 0. Channels' delays and levels
-    /// stay as they are.
+    /// The profile at `amount` (0…1): every filter's gain, the adjustment's tilt and shelves, and the preamp that makes
+    /// room for them, scaled in dB. A low-pass has no gain to scale: it runs whole above 0 and is switched off at 0.
+    /// Channels' delays and levels stay as they are.
     public func scaled(by amount: Double) -> CalibrationProfile {
         let amount = min(max(amount, 0), 1)
         guard amount != 1 else { return self }
         var scaled = self
         scaled.preamp = preamp * amount
+        scaled.adjustment = adjustment?.scaled(by: amount)
         for c in scaled.channels.indices {
             for f in scaled.channels[c].filters.indices {
                 scaled.channels[c].filters[f].gain *= amount
@@ -49,6 +50,7 @@ extension CalibrationProfile {
     public func comparison(sampleRate: Double = 48_000) -> CalibrationProfile {
         var before = self
         before.channels = channels.map { _ in CalibrationChannel(filters: []) }
+        before.adjustment = nil
         before.preamp = averageLevelChange(sampleRate: sampleRate)
         return before
     }
@@ -78,7 +80,7 @@ extension Node {
 
 enum CalibrationKernel {
     /// A kernel block (JKCorrection) for `channels` output channels at `sampleRate`, at `amount` (0…1): each corrected
-    /// channel's biquads (the first JK_CORRECTION_MAX_SECTIONS the rate can carry), its delay in frames (at most
+    /// channel's biquads, the adjustment's included (the first JK_CORRECTION_MAX_SECTIONS the rate can carry), its delay in frames (at most
     /// `maxDelayFrames`) and level, and the preamp. Nil when memory runs out. The caller hands it to a chain or frees it.
     static func block(_ profile: CalibrationProfile, amount: Double, channels: Int, sampleRate: Double,
                       maxDelayFrames: Int) -> OpaquePointer? {
@@ -95,7 +97,7 @@ enum CalibrationKernel {
                 jk_correction_set_channel(block, UInt32(c), nil, 0, UInt32(delay), level)  // unusable filters: none
             }
         }
-        jk_correction_set_preamp(block, Float(pow(10, profile.preamp / 20)))
+        jk_correction_set_preamp(block, Float(pow(10, profile.playedPreamp / 20)))
         return block
     }
 }

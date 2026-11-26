@@ -42,6 +42,15 @@ enum Demo {
         return effect
     }
 
+    /// The same preset with a warmer tilt, more bass and a little less treble on top.
+    static var adjustedCalibration: Effect {
+        var effect = calibration
+        effect.calibration = effect.calibration?.adjusted(
+            CalibrationTarget(tilt: -0.5, lowShelf: .init(frequency: 80, gain: 3),
+                              highShelf: .init(frequency: CalibrationTarget.defaultTrebleFrequency, gain: -1.5)))
+        return effect
+    }
+
     /// A made-up headphone library (made-up brands, models and authors, in the database's format), dated like the
     /// bundled copy. Update Library fails at once: snapshot mode never downloads.
     @MainActor static var headphoneLibrary: HeadphoneLibraryStore {
@@ -306,6 +315,11 @@ enum Snapshot {
                 model.graph.nodes[index].effects.append(Demo.calibration)
                 model.selection = .node(phones.id)
                 await both("calibration")
+                // The same preset with tilt, bass and treble on top: the preset, the adjustment and the total.
+                if let effect = model.graph.nodes[index].effects.lastIndex(where: { $0.kind == .calibration }) {
+                    model.graph.nodes[index].effects[effect].calibration = Demo.adjustedCalibration.calibration
+                    await both("calibration-adjusted")
+                }
                 model.graph = saved
             }
             // Choose Headphones on the headphones (which have no Calibration yet), in the made-up library: search

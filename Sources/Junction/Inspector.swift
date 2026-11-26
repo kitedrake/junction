@@ -629,6 +629,7 @@ private struct CalibrationDetails: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 FrequencyResponseGraph(curves: curves(profile))
+                if profile.isAdjustable { HeadphoneAdjustments(profile: profile, node: node.id, effect: effect.id) }
             } else {
                 Text("No correction loaded, so the audio passes through. Measure your speakers, or choose your headphones for a ready-made EQ preset.")
                     .font(.caption)
@@ -690,11 +691,20 @@ private struct CalibrationDetails: View {
     }
 
     /// The correction per channel (at Amount), and for a measured profile each channel's average measurement and,
-    /// for the first channel, the result with the correction.
+    /// for the first channel, the result with the correction. An adjusted headphone preset shows the preset, the
+    /// adjustment and their total instead.
     private func curves(_ profile: CalibrationProfile) -> [ResponseCurve] {
         let amount = effect.value(EffectKind.calibration.parameters[0]) / 100
         let scaled = profile.scaled(by: amount)
         let frequencies = CalibrationGrid.frequencies
+        if !profile.adjustmentFilters.isEmpty {
+            return [ResponseCurve(name: "Preset", color: .secondary, frequencies: frequencies,
+                                  levels: scaled.presetCurve(channel: 0, sampleRate: 48_000), isDashed: true),
+                    ResponseCurve(name: "Adjustment", color: .orange, frequencies: frequencies,
+                                  levels: scaled.adjustmentCurve(sampleRate: 48_000), isDashed: true),
+                    ResponseCurve(name: "Total", color: .accentColor, frequencies: frequencies,
+                                  levels: scaled.curve(channel: 0, sampleRate: 48_000))]
+        }
         let colors: [Color] = [.accentColor, .orange, .green, .pink]
         let channels = Set(profile.channels.map(\.filters)).count > 1 || Set(profile.channels.map(\.level)).count > 1
             ? min(profile.channels.count, colors.count) : 1
@@ -722,6 +732,81 @@ private struct CalibrationDetails: View {
         let midrange = zip(CalibrationGrid.frequencies, levels).filter { CalibrationAnalysis.midrange.contains($0.0) }.map(\.1)
         let offset = midrange.isEmpty ? 0 : midrange.reduce(0, +) / Double(midrange.count)
         return levels.map { $0 - offset }
+    }
+}
+
+/// Tilt, bass and treble on top of a headphone preset, as the speaker sheet's target has them, plus each shelf's
+/// frequency. Each change is one undo step (a slider when let go); Reset puts the preset back as it came.
+private struct HeadphoneAdjustments: View {
+    @Environment(AppModel.self) private var model
+    let profile: CalibrationProfile
+    let node: UUID
+    let effect: UUID
+
+    private static let bassChoices: [Double] = [60, 80, 105, 150, 200, 300]
+    private static let trebleChoices: [Double] = [3_000, 5_000, 8_000, 10_000, 12_000]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Adjust").font(.callout.weight(.medium))
+                Spacer()
+                Button("Reset") { model.setHeadphoneAdjustment(nil, effect: effect, in: node) }
+                    .disabled(profile.adjustment == nil)
+                    .help("Takes the tilt, bass and treble off, so the preset plays exactly as it came")
+            }
+            if profile.adjustmentFits {
+                SettingSlider(name: "Tilt", value: binding(\.tilt), range: SpeakerCalibrationSettings.tiltRange, step: 0.1,
+                              format: "%+.1f dB/oct")
+                    .help("Tilts the sound about 1 kHz: negative is warmer, positive brighter")
+                shelf("Bass", \.lowShelf, default: CalibrationTarget.defaultBassFrequency, choices: Self.bassChoices)
+                shelf("Treble", \.highShelf, default: CalibrationTarget.defaultTrebleFrequency, choices: Self.trebleChoices)
+            } else {
+                Text("The preset uses \(profile.presetSections) of the \(CalibrationLimits.maximumFilters) filters, which leaves no room for a tilt and shelves.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .controlSize(.small)
+    }
+
+    private var adjustment: CalibrationTarget { profile.adjustment ?? .flat }
+
+    private func shelf(_ name: String, _ path: WritableKeyPath<CalibrationTarget, CalibrationTarget.Shelf?>,
+                       default frequency: Double, choices: [Double]) -> some View {
+        let current = adjustment[keyPath: path] ?? CalibrationTarget.Shelf(frequency: frequency, gain: 0)
+        return VStack(alignment: .leading, spacing: 2) {
+            SettingSlider(name: name, value: Binding(get: { current.gain }, set: { gain in
+                var shelf = current
+                shelf.gain = gain
+                set(path, shelf)
+            }), range: SpeakerCalibrationSettings.shelfRange, step: 0.5, format: "%+.1f dB")
+            Picker("\(name) shelf at", selection: Binding(get: { current.frequency }, set: { hertz in
+                var shelf = current
+                shelf.frequency = hertz
+                set(path, shelf)
+            })) {
+                ForEach(Array(Set(choices + [current.frequency])).sorted(), id: \.self) { hertz in
+                    Text(hertz >= 1000 ? String(format: "%g kHz", hertz / 1000) : "\(Int(hertz)) Hz").tag(hertz)
+                }
+            }
+            .disabled(current.gain == 0)
+        }
+    }
+
+    private func binding(_ path: WritableKeyPath<CalibrationTarget, Double>) -> Binding<Double> {
+        Binding(get: { adjustment[keyPath: path] }, set: { value in
+            var changed = adjustment
+            changed[keyPath: path] = value
+            model.setHeadphoneAdjustment(changed, effect: effect, in: node)
+        })
+    }
+
+    private func set(_ path: WritableKeyPath<CalibrationTarget, CalibrationTarget.Shelf?>, _ shelf: CalibrationTarget.Shelf) {
+        var changed = adjustment
+        changed[keyPath: path] = shelf
+        model.setHeadphoneAdjustment(changed, effect: effect, in: node)
     }
 }
 

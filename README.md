@@ -43,7 +43,11 @@ without your voice chat, step by step.
   loaded from a text file (**Load EQ Preset…**; the usual "Preamp: …" and "Filter 1: ON PK Fc … Gain … Q …" lines,
   with peaking, shelving and 12 dB/octave low-pass filters).
   The inspector shows the preset's name, what kind it is, its date and the device it was made for, and its curve on
-  a 20 Hz–20 kHz graph; **Amount** scales the correction and **Export EQ Preset…** saves it as text again. It warns
+  a 20 Hz–20 kHz graph; **Amount** scales the correction and **Export EQ Preset…** saves it as text again. A
+  headphone preset can be adjusted there with the speaker results' target controls (tilt about 1 kHz, bass and treble
+  shelves with frequency and gain), played as extra filters on top of the preset's own; the graph shows the preset,
+  the adjustment and the total, Amount scales all of it, the export includes it and **Reset** brings back the preset
+  as it came. It warns
   when the output now plays on another device than the profile's (Default Output follows Sound settings). The
   correction is a cascade of minimum-phase filters, so it adds no delay. Everything runs inside Junction: the only
   download is the headphone library's, when you ask for it.
@@ -363,7 +367,9 @@ property list, restored when its unit is made; a plugin also keeps its `name` an
 missing; codes with bytes that aren't printable are written as `0x` and eight hex digits; a Calibration effect keeps
 its `calibration` profile: name, kind, date, device, per-channel filters, delay and level, preamp, target, limits,
 measured curves and, for measured speakers, `alignment` (each channel's arrival and whether the channels are lined
-up; optional, so profiles without it still load and refit from their delays); new in schema 5, so schema 4 files load unchanged with none). A schema 1 file from the
+up; optional, so profiles without it still load and refit from their delays); new in schema 5, so schema 4 files load unchanged with none).
+Schema 6 adds, both optional, a library preset's `library` credit and a headphone profile's `adjustment` (tilt and
+shelves on top of the preset); schema 5 files load unchanged, and any a development build wrote there are dropped. A schema 1 file from the
 shared-canvas versions is converted on load: each node moves to the canvas of the device it was wired to (unwired
 ones to the first device), and cables between devices are dropped. Schema 2 files load with automatic buffer sizes;
 schema 2 and 3 files get sample-rate conversion set to Automatic and start with no scenes and no effects (a schema 4
@@ -454,7 +460,12 @@ A preset's bands become Calibration filters (peaking, shelves with their Q, 12 d
 type Junction doesn't have is listed as unavailable with the reason and never half loaded. The index is built once,
 off the main thread; search ignores case, accents and spacing, ranks prefix matches first and filters by the styles
 the data has (over-ear, in-ear, earbuds…). A preset becomes a headphone `CalibrationProfile` named after the brand and
-model that keeps the preset's id, author, details and link (`library`, new in graph.json schema 6). The tests use
+model that keeps the preset's id, author, details and link (`library`, new in graph.json schema 6).
+`HeadphoneAdjustment.swift` adds a headphone profile's tilt and shelves on top of its preset (`adjustment`, a
+`CalibrationTarget`, also new in schema 6): extra cookbook shelves after the preset's filters (the tilt as five
+shelves two octaves apart, within about 0.3 dB per dB/octave of a straight slope from 20 Hz to 20 kHz), at most seven
+sections, played only when they fit beside the preset in the correction stage's 32, with the preamp lowered when they
+need more room. Amount scales the adjustment's gains with the preset's, and exports write its filters too. The tests use
 made-up JSON Lines fixtures and the bundled file itself, and `--self-test` checks the bundled copy loads.
 
 The library updates only on request: `HeadphoneLibraryCache` (`HeadphoneLibraryUpdate.swift`) downloads the database
