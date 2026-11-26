@@ -449,6 +449,18 @@ the data has (over-ear, in-ear, earbuds…). A preset becomes a headphone `Calib
 model that keeps the preset's id, author, details and link (`library`, new in graph.json schema 6). The tests use
 made-up JSON Lines fixtures and the bundled file itself, and `--self-test` checks the bundled copy loads.
 
+The library updates only on request: `HeadphoneLibraryCache` (`HeadphoneLibraryUpdate.swift`) downloads the database
+from the project's mirror through a transport protocol (URLSession in the app) into a temporary file in
+`~/Library/Application Support/Junction/HeadphoneLibrary`. It keeps the download only if it ends with a complete line,
+nearly every line parses, it lists at least 1,000 models and 1,000 presets, and it is at least half the bundled
+copy's uncompressed size. The database then goes in under its SHA-256, and `library.json` (its date, size and
+SHA-256) is replaced by a rename, so a failed or cancelled update leaves the current copy as it was.
+`HeadphoneLibrary.loadPreferred` uses the downloaded copy when its file matches its record and passes the same checks,
+otherwise the bundled one, and `summary` says which, with its date and counts. The tests use a fake transport and
+temporary folders. To refresh the bundled copy, run `sh scripts/update-headphone-library.sh`: it downloads the mirror's
+file, checks every line parses, compresses it with `compression_tool` and updates `SOURCE.md`, then lists the
+constants and test counts to update.
+
 The measurement engine (`Measurement.swift`) runs in the app's own process behind a device protocol: a noise-floor
 check, a level check with pink noise on one channel (it reports the microphone's level and refuses a clipping input,
 lowering the level 6 dB, no signal, or less than 30 dB above the noise; the sweeps play at the level it checked), then
@@ -593,6 +605,9 @@ system-audio permissions and **Install Driver…** with the first one.
   channel run. An EQ preset export holds one channel's filters and the preamp (delays and levels aren't part of the
   format). A low-pass has no gain for **Amount** to scale: it runs whole at any Amount above 0 %. Presets with other
   filter types (steeper low-passes, high-passes, band-passes) aren't read.
+- The headphone library updates only when asked: Junction never checks for a newer database by itself. Downloading
+  hasn't been tried against the real mirror in tests (they use a fake transport), so the mirror's responses, slow or
+  interrupted connections and proxies are unverified.
 - MIDI control hasn't been tried with real controllers yet: CoreMIDI input (plugging in, Bluetooth and network
   sessions, sources coming and going) is unverified; message handling, learn, pick-up, saving and the helper's
   side are tested with recorded MIDI bytes. Only MIDI 1.0 messages are read (a MIDI 2.0 controller works in its

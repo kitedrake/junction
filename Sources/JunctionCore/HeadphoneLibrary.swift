@@ -132,6 +132,8 @@ public struct HeadphoneLibrary: Sendable {
     public enum Source: String, Hashable, Sendable {
         /// The copy inside Junction.app.
         case bundled
+        /// A copy downloaded on request into Application Support (see `HeadphoneLibraryCache`).
+        case downloaded
     }
 
     /// What was read: where from, when the data was taken, and the counts (for the credits and the self-test).
@@ -158,6 +160,8 @@ public struct HeadphoneLibrary: Sendable {
     /// When the bundled copy was taken (see SOURCE.md).
     public static let bundledDate = DateComponents(calendar: Calendar(identifier: .gregorian),
                                                    timeZone: TimeZone(identifier: "UTC"), year: 2026, month: 11, day: 26).date!
+    /// The bundled copy's size uncompressed, in bytes (see SOURCE.md): a download must be at least half of it.
+    public static let bundledSize = 12_636_756
 
     public let summary: Summary
     /// Every model, by brand and then model.
