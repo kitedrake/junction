@@ -650,7 +650,7 @@ private struct CalibrationDetails: View {
                 Button("Choose Headphones…") { model.chooseHeadphones(node.id, effect: effect.id) }
                     .help("Picks a ready-made EQ preset for your headphone model from the headphone library")
                 Button("Load EQ Preset…") { model.loadEQPreset(into: effect.id, in: node.id) }
-                    .help("Reads a text file with a Preamp line and Filter lines (peaking and shelving filters)")
+                    .help("Reads a text file with a Preamp line and Filter lines (peaking, shelving and low-pass filters)")
             }
             .controlSize(.small)
             if let profile = effect.calibration {
