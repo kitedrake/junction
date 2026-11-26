@@ -71,8 +71,10 @@ fi
 # SwiftPM sandboxes its manifest builds; inside another sandbox (an automated check runner's, for example) that fails with
 # "sandbox_apply: Operation not permitted", so turn SwiftPM's own sandbox off there. Such a sandbox usually has no
 # network either, so use the packages SwiftPM already has cached (--skip-update) instead of fetching updates first.
-spm_flags=""
-if ! /usr/bin/sandbox-exec -p '(version 1)(allow default)' /usr/bin/true 2>/dev/null; then spm_flags="--disable-sandbox --skip-update"; fi
+# The packages are public: --disable-keychain stops SwiftPM looking for github.com passwords in the Keychain when it
+# downloads Sparkle's framework, which makes macOS ask to use whatever GitHub credentials are saved there.
+spm_flags="--disable-keychain"
+if ! /usr/bin/sandbox-exec -p '(version 1)(allow default)' /usr/bin/true 2>/dev/null; then spm_flags="$spm_flags --disable-sandbox --skip-update"; fi
 grep -q "#define kDriverVersion \"$driver_version\"" Driver/JunctionDriver.c \
   || { echo "kDriverVersion in Driver/JunctionDriver.c doesn't match Driver/VERSION ($driver_version)" >&2; exit 1; }
 
