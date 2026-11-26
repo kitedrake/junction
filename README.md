@@ -639,9 +639,10 @@ system-audio permissions and **Install Driver…** with the first one.
 - Headphone presets: most aim at a researched target curve (what listeners have been found to prefer from
   headphones) rather than flat, so they may sound warmer or brighter than neutral; and a preset is one curve for both
   ears, so differences between your two ears, or between your pair and the one measured, aren't corrected.
-- The headphone library updates only when asked: Junction never checks for a newer database by itself. Downloading
-  hasn't been tried against the real mirror in tests (they use a fake transport), so the mirror's responses, slow or
-  interrupted connections and proxies are unverified. Update Library shows that it is busy, not how far it has got.
+- The headphone library updates only when asked: Junction never checks for a newer database by itself. The tests use
+  a fake transport; downloading from the real mirror was tried by hand once (26 Nov 2026: into an empty folder and over
+  a copy, and cancelled), but slow or interrupted connections and proxies are unverified. Update Library shows that it
+  is busy, not how far it has got.
 - MIDI control hasn't been tried with real controllers yet: CoreMIDI input (plugging in, Bluetooth and network
   sessions, sources coming and going) is unverified; message handling, learn, pick-up, saving and the helper's
   side are tested with recorded MIDI bytes. Only MIDI 1.0 messages are read (a MIDI 2.0 controller works in its
