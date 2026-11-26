@@ -108,6 +108,44 @@ final class CalibrationTests: XCTestCase {
         XCTAssertEqual(shelf.gain(at: 20_000, sampleRate: 44_100), 0, accuracy: 0.01)
     }
 
+    func testLowPassMatchesTheCookbook() throws {
+        // Worked out separately from the published formulae (the first is the textbook second-order Butterworth at
+        // 1 kHz, 48 kHz).
+        let cases: [(CalibrationFilter, Double, [Double])] = [
+            (CalibrationFilter(.lowPass, frequency: 1000, gain: 0), 48_000,
+             [0.003916126661, 0.007832253321, 0.003916126661, -1.815341082705, 0.831005589347]),
+            (CalibrationFilter(.lowPass, frequency: 8000, gain: 0), 44_100,
+             [0.177245025541, 0.354490051083, 0.177245025541, -0.508717528105, 0.217697630271]),
+            (CalibrationFilter(.lowPass, frequency: 12_000, gain: 0, q: 0.5), 96_000,
+             [0.085786437627, 0.171572875254, 0.085786437627, -0.828427124746, 0.171572875254]),
+        ]
+        for (filter, sampleRate, expected) in cases {
+            let biquad = try XCTUnwrap(filter.coefficients(sampleRate: sampleRate))
+            for (value, known) in zip([biquad.b0, biquad.b1, biquad.b2, biquad.a1, biquad.a2], expected) {
+                XCTAssertEqual(value, known, accuracy: 1e-9, "\(filter.frequency) Hz at \(sampleRate) Hz")
+            }
+        }
+        // Flat below, −3 dB at the cutoff (Q 0.707), 12 dB per octave above; its gain plays no part.
+        let lowPass = try XCTUnwrap(cases[0].0.coefficients(sampleRate: 48_000))
+        XCTAssertEqual(lowPass.gain(at: 20, sampleRate: 48_000), 0, accuracy: 0.001)
+        XCTAssertEqual(lowPass.gain(at: 1000, sampleRate: 48_000), 20 * log10(1 / 2.0.squareRoot()), accuracy: 1e-9)
+        XCTAssertEqual(lowPass.gain(at: 4000, sampleRate: 48_000) - lowPass.gain(at: 2000, sampleRate: 48_000), -12, accuracy: 0.2)
+        XCTAssertEqual(CalibrationFilter(.lowPass, frequency: 1000, gain: 6).coefficients(sampleRate: 48_000), lowPass)
+        XCTAssertNil(CalibrationFilter(.lowPass, frequency: 24_000, gain: 0).coefficients(sampleRate: 48_000))
+        XCTAssertNil(CalibrationFilter(.lowPass, frequency: 1000, gain: 0, isOn: false).coefficients(sampleRate: 48_000))
+        // The response it processes is the one computed.
+        for frequency in [500.0, 1000, 3000] {
+            let input = (0..<9600).map { sin(2 * Double.pi * frequency * Double($0) / rate) }
+            let output = lowPass.process(input).suffix(4800)
+            let rms = (output.reduce(0) { $0 + $1 * $1 } / Double(output.count)).squareRoot()
+            XCTAssertEqual(20 * log10(rms * 2.0.squareRoot()), lowPass.gain(at: frequency, sampleRate: rate), accuracy: 0.05)
+        }
+        // Saved by its kind's name.
+        let json = try JSONEncoder().encode(cases[2].0)
+        XCTAssertTrue(String(decoding: json, as: UTF8.self).contains(#""kind":"lowPass""#))
+        XCTAssertEqual(try JSONDecoder().decode(CalibrationFilter.self, from: json), cases[2].0)
+    }
+
     func testFiltersAtOrAboveNyquistAreDropped() {
         let filters = [CalibrationFilter(.peaking, frequency: 1000, gain: 3, q: 1),
                        CalibrationFilter(.highShelf, frequency: 22_050, gain: 3),
@@ -527,6 +565,8 @@ final class CalibrationTests: XCTestCase {
         filter 8: on pk fc 1500 hz gain 1.5 db bw oct 1
         Filter 9: ON None
         Filter 10: OFF LP Fc 18000 Hz
+        Filter 11: OFF HP Fc 20 Hz
+        Filter 12: ON LPQ Fc 12000 Hz Q 0.5
         Filter: ON PK Fc 250 Hz Gain -1 dB Q 4
         Channel: all
         """
@@ -541,6 +581,8 @@ final class CalibrationTests: XCTestCase {
             CalibrationFilter(.highShelf, frequency: 8000, gain: -4, q: CalibrationFilter.shelfQ(slope: 0.5, gain: -4)),
             CalibrationFilter(.lowShelf, frequency: 60, gain: 2, q: CalibrationFilter.shelfQ(slope: 1, gain: 2)),
             CalibrationFilter(.peaking, frequency: 1500, gain: 1.5, q: 2.0.squareRoot()),
+            CalibrationFilter(.lowPass, frequency: 18_000, gain: 0, isOn: false),
+            CalibrationFilter(.lowPass, frequency: 12_000, gain: 0, q: 0.5),
             CalibrationFilter(.peaking, frequency: 250, gain: -1, q: 4),
         ]
         XCTAssertEqual(preset.filters.count, expected.count)
@@ -566,8 +608,17 @@ final class CalibrationTests: XCTestCase {
         XCTAssertThrowsError(try ParametricPreset(text: "Hello\nNothing: here\n", name: "Empty.txt")) {
             XCTAssertEqual($0 as? CalibrationFileError, .noData("Empty.txt"))
         }
-        XCTAssertThrowsError(try ParametricPreset(text: "Preamp: -3 dB\nFilter 1: ON LP Fc 100 Hz\n", name: "LP.txt")) {
-            XCTAssertEqual($0 as? CalibrationFileError, .unsupportedFilter("LP.txt", line: 2, type: "LP"))
+        XCTAssertThrowsError(try ParametricPreset(text: "Preamp: -3 dB\nFilter 1: ON HP Fc 100 Hz\n", name: "HP.txt")) {
+            XCTAssertEqual($0 as? CalibrationFileError, .unsupportedFilter("HP.txt", line: 2, type: "HP"))
+        }
+        // Low-passes are second order (12 dB per octave) only.
+        XCTAssertThrowsError(try ParametricPreset(text: "Filter 1: ON LP 24dB Fc 9000 Hz\n", name: "LP.txt")) {
+            XCTAssertEqual($0 as? CalibrationFileError, .unsupportedFilter("LP.txt", line: 1, type: "24 dB/octave LP"))
+        }
+        XCTAssertEqual(try ParametricPreset(text: "Filter 1: ON LP 12dB Fc 9000 Hz\n", name: "LP12.txt").filters,
+                       [CalibrationFilter(.lowPass, frequency: 9000, gain: 0)])
+        XCTAssertThrowsError(try ParametricPreset(text: "Filter 1: ON LPQ Q 0.7\n", name: "NoFc.txt")) {
+            XCTAssertEqual($0 as? CalibrationFileError, .badLine("NoFc.txt", line: 1, text: "Filter 1: ON LPQ Q 0.7"))
         }
         XCTAssertThrowsError(try ParametricPreset(text: "Filter 1: ON PK Fc 100 Hz Gain -3 dB\n", name: "NoQ.txt")) {
             XCTAssertEqual($0 as? CalibrationFileError,
@@ -587,7 +638,8 @@ final class CalibrationTests: XCTestCase {
         let filters = [CalibrationFilter(.lowShelf, frequency: 31.26, gain: 4.04, q: 0.6667),
                        CalibrationFilter(.peaking, frequency: 105.04, gain: -3.43, q: 1.414),
                        CalibrationFilter(.peaking, frequency: 3000, gain: 2, q: 4, isOn: false),
-                       CalibrationFilter(.highShelf, frequency: 12_345.6, gain: -0.04, q: 0.71)]
+                       CalibrationFilter(.highShelf, frequency: 12_345.6, gain: -0.04, q: 0.71),
+                       CalibrationFilter(.lowPass, frequency: 15_000, gain: 0)]
         let preset = ParametricPreset(preamp: -4.1, filters: filters)
         XCTAssertEqual(preset.text, """
         Preamp: -4.1 dB
@@ -595,10 +647,12 @@ final class CalibrationTests: XCTestCase {
         Filter 2: ON PK Fc 105 Hz Gain -3.4 dB Q 1.41
         Filter 3: OFF PK Fc 3000 Hz Gain 2 dB Q 4.00
         Filter 4: ON HSC Fc 12345.6 Hz Gain 0 dB Q 0.71
+        Filter 5: ON LPQ Fc 15000 Hz Q 0.71
 
         """)
         let imported = try ParametricPreset(text: preset.text, name: "Export.txt")
         XCTAssertEqual(imported.preamp, preset.preamp)
+        XCTAssertEqual(imported.filters.count, filters.count)
         for (filter, original) in zip(imported.filters, filters) {
             XCTAssertEqual(filter.kind, original.kind)
             XCTAssertEqual(filter.isOn, original.isOn)

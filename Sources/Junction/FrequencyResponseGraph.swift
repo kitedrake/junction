@@ -21,6 +21,8 @@ struct ResponseCurve: Identifiable {
 struct FrequencyResponseGraph: View {
     let curves: [ResponseCurve]
     var height: CGFloat = 150
+    /// What VoiceOver calls it; the value lists the curves.
+    var accessibilityTitle = "Frequency response"
 
     private static let ticks: [Double] = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000]
 
@@ -62,7 +64,7 @@ struct FrequencyResponseGraph: View {
         }
         .chartLegend(position: .bottom, alignment: .leading, spacing: 6)
         .frame(height: height)
-        .accessibilityLabel("Frequency response")
+        .accessibilityLabel(accessibilityTitle)
         .accessibilityValue(curves.map(\.name).joined(separator: ", "))
     }
 

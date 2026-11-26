@@ -64,6 +64,12 @@ final class AppModel {
     var pluginPicker: PluginPickerRequest?
     /// The Calibrate Speakers sheet (open while set).
     var speakerCalibration: SpeakerCalibration?
+    /// The Choose Headphones sheet (open while set).
+    var headphonePicker: HeadphonePicker?
+    /// The headphone library, read when first needed and updated only on request (a made-up one in snapshot mode).
+    let headphoneLibrary: HeadphoneLibraryStore
+    /// Settings › Acknowledgements: the headphone library's licences (open while set).
+    var showsAcknowledgements = false
     /// The installed effect Audio Units, read when the picker opens (made-up ones in snapshot mode).
     private(set) var plugins: [PluginInfo] = []
     /// Effects offered for bypass that the user chose to keep running.
@@ -176,6 +182,7 @@ final class AppModel {
     init(demo: Bool) {
         isDemo = demo
         if demo { showsMixer = false }  // snapshot mode starts on the canvas, whatever this Mac's Junction shows
+        headphoneLibrary = demo ? Demo.headphoneLibrary : HeadphoneLibraryStore()
         graph = Graph()
         history = EditHistory(read: { [unowned self] in graph }, write: { [unowned self] restored in
             // Undo puts back the canvases; whether routing is on stays as it is.
@@ -1421,6 +1428,19 @@ final class AppModel {
         }
     }
 
+    /// Choose Headphones…: opens the headphone library on an output, at the preset its Calibration effect has. An output
+    /// without the effect gets one when a preset is used (in the same undo step).
+    func chooseHeadphones(_ id: UUID, effect: UUID? = nil) {
+        guard let node = node(id), isOutputNode(node) else { return }
+        let calibration = node.effects.first { $0.id == effect && $0.kind == .calibration } ?? node.calibrationEffect
+        let device = currentDevice(node)
+        let picker = HeadphonePicker(node: id, effect: calibration?.id, deviceUID: device?.uid, deviceName: device?.name,
+                                     presetInUse: calibration?.calibration?.library?.presetID, store: headphoneLibrary,
+                                     host: self)
+        headphonePicker = picker
+        Task { await picker.load() }
+    }
+
     func setCalibration(_ profile: CalibrationProfile?, effect: UUID, in node: UUID) {
         updateNode(node, profile == nil ? "Remove Calibration" : "Load EQ Preset") { node in
             guard let index = node.effects.firstIndex(where: { $0.id == effect }) else { return }
@@ -1429,7 +1449,18 @@ final class AppModel {
         endEditing()
     }
 
-    /// Saves one channel's filters and the preamp as a parametric EQ preset (delays and levels aren't part of it).
+    /// Changes the tilt, bass and treble on top of a headphone preset (nil, or none: the preset as it came).
+    func setHeadphoneAdjustment(_ adjustment: CalibrationTarget?, effect: UUID, in node: UUID) {
+        updateNode(node, adjustment == nil ? "Reset Headphone Adjustment" : "Adjust Headphones") { node in
+            guard let index = node.effects.firstIndex(where: { $0.id == effect }),
+                  let profile = node.effects[index].calibration else { return }
+            node.effects[index].calibration = profile.adjusted(adjustment)
+        }
+        endEditing()
+    }
+
+    /// Saves one channel's filters and the preamp as a parametric EQ preset, the adjustment's filters after the
+    /// preset's (delays and levels aren't part of it).
     func exportEQPreset(_ profile: CalibrationProfile, channel: Int = 0) {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.plainText]
@@ -2075,5 +2106,13 @@ extension AppModel: SpeakerCalibrationHost {
         updateNode(node, "Calibrate Speakers") { $0.setCalibration(profile, effect: effect) }
         endEditing()
         speakerCalibration = nil
+    }
+}
+
+extension AppModel: HeadphonePickerHost {
+    func use(_ profile: CalibrationProfile, node: UUID, effect: UUID?) {
+        updateNode(node, "Use Headphone Preset") { $0.setCalibration(profile, effect: effect) }
+        endEditing()
+        headphonePicker = nil
     }
 }

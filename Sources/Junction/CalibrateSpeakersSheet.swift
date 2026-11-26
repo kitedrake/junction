@@ -406,8 +406,8 @@ private struct ResultControls: View {
 }
 
 /// A slider that shows its value as it moves and changes the setting when let go (a refit at every step of a drag
-/// would lag).
-private struct SettingSlider: View {
+/// would lag). The inspector's headphone adjustments use it too.
+struct SettingSlider: View {
     let name: String
     @Binding var value: Double
     let range: ClosedRange<Double>

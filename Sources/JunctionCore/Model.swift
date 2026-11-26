@@ -287,8 +287,12 @@ public struct Graph: Codable, Equatable, Sendable {
     /// (`midi`: each one's control, how its values are read, and the cable, node, effect, device or scene it drives;
     /// absent in older files, which means none), and headphone monitors (`monitors`: per virtual device, its output,
     /// level, mute and a level per source; absent in older files, which means none). 5: the Calibration effect keeps
-    /// its correction in `Effect.calibration` (absent until one is loaded); schema 4 files load unchanged.
-    public static let currentSchema = 5
+    /// its correction in `Effect.calibration` (absent until one is loaded); schema 4 files load unchanged. 6: a profile
+    /// loaded from the headphone library keeps its credits (`CalibrationProfile.library`: the preset's id, author,
+    /// details and link; absent for other profiles), a headphone profile keeps its tilt and shelves on top of the
+    /// preset (`CalibrationProfile.adjustment`; absent when there are none), and filters can be low-passes; schema 5
+    /// files load unchanged.
+    public static let currentSchema = 6
     public var schema = Graph.currentSchema
     public var virtualDevices: [VirtualDevice] = []
     public var nodes: [Node] = []
@@ -368,7 +372,9 @@ public struct Graph: Codable, Equatable, Sendable {
     /// are new in schema 4: older files have none, scenes naming deleted devices lose those parts, and mappings whose
     /// target is gone are dropped. So are monitors: older files have none, a deleted device's monitor goes, a device
     /// keeps one at most, and solo/listen starts off. Schema 5 adds Calibration's profiles, which a schema 4 file can't
-    /// have: any there (from a development build) are dropped and the rest of the file is kept as it is.
+    /// have: any there (from a development build) are dropped and the rest of the file is kept as it is. Schema 6 adds
+    /// library credits and adjustments to profiles, which a schema 5 file can't have either: any there are dropped the
+    /// same way.
     public mutating func upgrade() {
         if schema < 2 { moveToCanvases() }
         if schema < 4 {
@@ -380,6 +386,7 @@ public struct Graph: Codable, Equatable, Sendable {
             monitors = []
         }
         if schema < 5 { convertCalibrations() }
+        if schema < 6 { convertLibraryCredits() }
         schema = Graph.currentSchema
         tidyCanvases()
         let devices = Set(virtualDevices.map(\.id))
@@ -456,6 +463,20 @@ public struct Graph: Codable, Equatable, Sendable {
         func clear(_ nodes: inout [Node]) {
             for node in nodes.indices {
                 for effect in nodes[node].effects.indices { nodes[node].effects[effect].calibration = nil }
+            }
+        }
+        clear(&nodes)
+        for scene in scenes.indices { clear(&scenes[scene].nodes) }
+    }
+
+    /// Schema 5 profiles had no library credits or adjustments (nor did the nodes its scenes keep); the profiles stay.
+    mutating func convertLibraryCredits() {
+        func clear(_ nodes: inout [Node]) {
+            for node in nodes.indices {
+                for effect in nodes[node].effects.indices {
+                    nodes[node].effects[effect].calibration?.library = nil
+                    nodes[node].effects[effect].calibration?.adjustment = nil
+                }
             }
         }
         clear(&nodes)

@@ -17,7 +17,8 @@ enum DockIcon {
 }
 
 /// Junction › Settings…: where routing runs and how the driver installs (only in builds made for Junction Helper or
-/// Junction Driver Installer), MIDI controls, start at login, the Dock icon, crash reports and uninstalling.
+/// Junction Driver Installer), MIDI controls, start at login, the Dock icon, crash reports, the headphone library
+/// with its acknowledgements, and uninstalling.
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @AppStorage(DockIcon.key) private var showsDockIcon = true
@@ -66,12 +67,15 @@ struct SettingsView: View {
                      ? "\(crashed), Junction offers a report the next time it opens: its diagnostic report (versions, your audio devices and apps, your setup, recent routing events) and the crash log macOS wrote. You read all of it first; nothing is sent unless you click Send Report."
                      : "\(crashed), Junction offers a report the next time it opens: its diagnostic report (versions, your audio devices and apps, your setup, recent routing events) and the crash log macOS wrote. This build has no address to send it to: copy it into a bug report yourself.")
             }
+            HeadphoneLibrarySection()
             UninstallSection()
         }
         .formStyle(.grouped)
         .frame(width: 460)
         .fixedSize(horizontal: false, vertical: true)
+        .sheet(isPresented: $model.showsAcknowledgements) { AcknowledgementsSheet() }
         .onAppear { loginStatus = model.isDemo ? .notRegistered : SMAppService.mainApp.status }
+        .task { await model.headphoneLibrary.load() }
         .onChange(of: showsDockIcon) { _, shown in if !model.isDemo { DockIcon.apply(shown) } }
     }
 
@@ -163,6 +167,33 @@ private struct DriverInstallerSection: View {
         case .approved?: "Without a password"
         case .requiresApproval?: "Waiting for your approval"
         case nil, .notRegistered?, .notFound?, .failed?: "With your password"
+        }
+    }
+}
+
+/// The headphone library Choose Headphones… browses: which copy, Update Library, and the credits its licences ask for.
+private struct HeadphoneLibrarySection: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        Section {
+            LabeledContent("In use") {
+                Text(model.headphoneLibrary.status)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.trailing)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            LibraryStatus(store: model.headphoneLibrary)
+            LibraryProjectCredit()
+            HStack {
+                Text("Acknowledgements")
+                Spacer()
+                Button("Show Licences…") { model.showsAcknowledgements = true }
+            }
+        } header: {
+            Text("Headphone Library")
+        } footer: {
+            Text("Junction never checks for a newer library by itself: Update Library downloads one when you ask, and keeps the current copy if the download fails or doesn't check out. The presets' data is shared under CC BY-SA 4.0, and AutoEQ's under the MIT licence.")
         }
     }
 }

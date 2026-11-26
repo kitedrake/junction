@@ -35,12 +35,18 @@ public struct CalibrationProfile: Codable, Hashable, Identifiable, Sendable {
     /// A measured profile's arrivals and whether the channels are lined up (absent for other profiles, and in
     /// profiles saved before it was kept: refitting then lines the channels up from their delays).
     public var alignment: CalibrationAlignment?
+    /// For a preset from the headphone library: where it came from and who made it (absent for other profiles).
+    public var library: HeadphoneLibraryCredit?
+    /// A headphone profile's tilt and shelves on top of its preset, played as extra filters after the preset's (absent
+    /// when there are none; see `HeadphoneAdjustment.swift`).
+    public var adjustment: CalibrationTarget?
 
     public init(id: UUID = UUID(), name: String, kind: Kind, date: Date = Date(), deviceUID: String? = nil,
                 deviceName: String? = nil, channels: [CalibrationChannel], preamp: Double,
                 target: CalibrationTarget = .flat, limits: CalibrationLimits = CalibrationLimits(),
                 micCalibration: String? = nil, measurements: [CalibrationMeasurement] = [],
-                alignment: CalibrationAlignment? = nil) {
+                alignment: CalibrationAlignment? = nil, library: HeadphoneLibraryCredit? = nil,
+                adjustment: CalibrationTarget? = nil) {
         self.id = id
         self.name = name
         self.kind = kind
@@ -54,6 +60,8 @@ public struct CalibrationProfile: Codable, Hashable, Identifiable, Sendable {
         self.micCalibration = micCalibration
         self.measurements = measurements
         self.alignment = alignment
+        self.library = library
+        self.adjustment = adjustment
     }
 
     /// The correction for an output channel (the single entry, or the last one for channels beyond the list).
@@ -61,17 +69,17 @@ public struct CalibrationProfile: Codable, Hashable, Identifiable, Sendable {
         channels.isEmpty ? CalibrationChannel(filters: []) : channels[max(0, min(index, channels.count - 1))]
     }
 
-    /// An output channel's biquads at a sample rate (filters the rate can't carry are dropped).
+    /// An output channel's biquads at a sample rate, the adjustment's included (filters the rate can't carry are
+    /// dropped).
     public func coefficients(channel index: Int, sampleRate: Double) -> [CalibrationBiquad] {
-        channel(index).filters.compactMap { $0.coefficients(sampleRate: sampleRate) }
+        playedFilters(channel: index).compactMap { $0.coefficients(sampleRate: sampleRate) }
     }
 
-    /// An output channel's combined curve in dB: filters, preamp and level.
+    /// An output channel's combined curve in dB as it plays: filters (the adjustment's included), preamp and level.
     public func curve(channel index: Int, sampleRate: Double,
                       at frequencies: [Double] = CalibrationGrid.frequencies) -> [Double] {
-        let channel = channel(index)
-        return CalibrationFilter.response(of: channel.filters, preamp: preamp + channel.level, sampleRate: sampleRate,
-                                          at: frequencies)
+        CalibrationFilter.response(of: playedFilters(channel: index), preamp: playedPreamp + channel(index).level,
+                                   sampleRate: sampleRate, at: frequencies)
     }
 
     /// A headphone profile from a parametric EQ preset (one set of filters for every channel).
@@ -80,9 +88,10 @@ public struct CalibrationProfile: Codable, Hashable, Identifiable, Sendable {
                   preamp: min(0, preset.preamp))
     }
 
-    /// The preset for one channel's filters and the preamp (delay and level aren't part of the format).
+    /// The preset for one channel's filters and the preamp as they play, the adjustment's filters after the preset's
+    /// (delay and level aren't part of the format).
     public func preset(channel index: Int = 0) -> ParametricPreset {
-        ParametricPreset(preamp: preamp, filters: channel(index).filters)
+        ParametricPreset(preamp: playedPreamp, filters: playedFilters(channel: index))
     }
 
     /// A speaker profile from sweeps: `captures[channel][position]`, the first position being the listening position
@@ -244,7 +253,7 @@ public enum CalibrationFileError: Error, LocalizedError, Equatable {
         case .noData(let name): "“\(name)” has nothing Junction can read in it."
         case .badLine(let name, let line, let text): "Line \(line) of “\(name)” can't be read: \(text)"
         case .unsupportedFilter(let name, let line, let type):
-            "Line \(line) of “\(name)” has a \(type) filter; Junction uses peaking and shelving filters only."
+            "Line \(line) of “\(name)” has a \(type) filter; Junction uses peaking, shelving and low-pass filters only."
         }
     }
 
@@ -339,7 +348,8 @@ public struct MicCalibration: Hashable, Sendable {
 
 /// A parametric EQ preset as text: a "Preamp: -6.2 dB" line and "Filter 1: ON PK Fc 105 Hz Gain -3.4 dB Q 1.41" lines.
 /// Peaking (PK), low and high shelves with a Q (LSC, HSC, also LSQ, HSQ), a slope ("LS 6dB", or "S 0.9") or neither
-/// (LS, HS: Q 0.707) are read; switched-off (OFF) filters are kept, switched off. Other lines are ignored.
+/// (LS, HS: Q 0.707), and 12 dB per octave low-passes with a Q (LPQ) or without (LP: Q 0.707, no gain) are read;
+/// switched-off (OFF) filters are kept, switched off. Other lines are ignored.
 public struct ParametricPreset: Hashable, Sendable {
     public var preamp: Double
     public var filters: [CalibrationFilter]
@@ -389,6 +399,7 @@ public struct ParametricPreset: Hashable, Sendable {
         case "PK", "PEQ", "PEAK", "PEAKING": kind = .peaking
         case "LS", "LSC", "LSQ", "LOWSHELF": kind = .lowShelf
         case "HS", "HSC", "HSQ", "HIGHSHELF": kind = .highShelf
+        case "LP", "LPQ", "LOWPASS": kind = .lowPass
         case "NONE": return nil
         default:
             guard isOn else { return nil }
@@ -409,7 +420,11 @@ public struct ParametricPreset: Hashable, Sendable {
             values[key] = value
             i += 1
         }
-        guard let frequency = values["fc"], frequency > 0, let gain = values["gain"] else {
+        if kind == .lowPass, let slope, slope != 12 {  // "LP 24dB": not a single biquad
+            guard isOn else { return nil }
+            throw CalibrationFileError.unsupportedFilter(name, line: number, type: "\(Self.format(slope, 1)) dB/octave \(fields[1])")
+        }
+        guard let frequency = values["fc"], frequency > 0, let gain = kind == .lowPass ? 0 : values["gain"] else {
             throw CalibrationFileError.badLine(name, line: number, text: line)
         }
         let q: Double
@@ -417,6 +432,8 @@ public struct ParametricPreset: Hashable, Sendable {
             q = value
         } else if let octaves = values["bw"], octaves > 0 {
             q = pow(2, octaves / 2) / (pow(2, octaves) - 1)
+        } else if kind == .lowPass {
+            q = 1 / 2.0.squareRoot()
         } else if kind == .peaking {
             throw CalibrationFileError.badLine(name, line: number, text: line)
         } else if let s = values["s"] ?? slope.map({ $0 / 12 }), s > 0 {
@@ -428,7 +445,8 @@ public struct ParametricPreset: Hashable, Sendable {
         return CalibrationFilter(kind, frequency: frequency, gain: gain, q: q, isOn: isOn)
     }
 
-    /// The preset as text: Fc to 0.1 Hz, gains to 0.1 dB, Q to 0.01; shelves with their Q (LSC, HSC).
+    /// The preset as text: Fc to 0.1 Hz, gains to 0.1 dB, Q to 0.01; shelves and low-passes with their Q (LSC, HSC,
+    /// LPQ, which has no gain).
     public var text: String {
         var lines = ["Preamp: \(Self.format(preamp, 1)) dB"]
         for (index, filter) in filters.enumerated() {
@@ -436,9 +454,11 @@ public struct ParametricPreset: Hashable, Sendable {
             case .peaking: "PK"
             case .lowShelf: "LSC"
             case .highShelf: "HSC"
+            case .lowPass: "LPQ"
             }
+            let gain = filter.kind == .lowPass ? "" : "Gain \(Self.format(filter.gain, 1)) dB "
             lines.append("Filter \(index + 1): \(filter.isOn ? "ON" : "OFF") \(type) Fc \(Self.format(filter.frequency, 1)) Hz "
-                + "Gain \(Self.format(filter.gain, 1)) dB Q \(String(format: "%.2f", filter.q))")
+                + "\(gain)Q \(String(format: "%.2f", filter.q))")
         }
         return lines.joined(separator: "\n") + "\n"
     }

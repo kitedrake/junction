@@ -39,13 +39,26 @@ without your voice chat, step by step.
   correction range, the most boost, the number of filters and lining the speakers up (delay and level) refit at once
   from the saved measurements, and a **Before/After** switch compares with the correction off at matched loudness.
   **Save** puts the profile into the effect (undoable); **Adjust…** reopens the results later without measuring.
-  Headphones use a parametric EQ preset
-  loaded from a text file (**Load EQ Preset…**; the usual "Preamp: …" and "Filter 1: ON PK Fc … Gain … Q …" lines).
+  Headphones use a parametric EQ preset, chosen from a library of ready-made presets (**Choose Headphones…**, below) or
+  loaded from a text file (**Load EQ Preset…**; the usual "Preamp: …" and "Filter 1: ON PK Fc … Gain … Q …" lines,
+  with peaking, shelving and 12 dB/octave low-pass filters).
   The inspector shows the preset's name, what kind it is, its date and the device it was made for, and its curve on
-  a 20 Hz–20 kHz graph; **Amount** scales the correction and **Export EQ Preset…** saves it as text again. It warns
+  a 20 Hz–20 kHz graph; **Amount** scales the correction and **Export EQ Preset…** saves it as text again. A
+  headphone preset can be adjusted there with the speaker results' target controls (tilt about 1 kHz, bass and treble
+  shelves with frequency and gain), played as extra filters on top of the preset's own; the graph shows the preset,
+  the adjustment and the total, Amount scales all of it, the export includes it and **Reset** brings back the preset
+  as it came. It warns
   when the output now plays on another device than the profile's (Default Output follows Sound settings). The
-  correction is a cascade of minimum-phase filters, so it adds no delay. Everything runs inside Junction: nothing is
-  downloaded or bundled.
+  correction is a cascade of minimum-phase filters, so it adds no delay. Everything runs inside Junction: the only
+  download is the headphone library's, when you ask for it.
+- **Headphone presets**: **Choose Headphones…** (in the Calibration inspector, or an output's context menu, which adds
+  the effect if there is none) opens a library of thousands of ready-made parametric EQ presets from a bundled copy of
+  an open headphone EQ database, credited in the app. Search by brand or model and filter by type; each result shows
+  its brand, model, type and number of presets. The chosen headphones' presets show their authors first, with their
+  details and links, and are compared as curves on one graph. **Use** loads one into the effect (undoable), and the
+  sheet reopens on the preset in use; the inspector credits its author. The library updates only when you click
+  **Update Library** (in the sheet or Settings, with progress, Cancel and errors), which keeps the current copy if the
+  download fails its checks. Settings › Headphone Library shows the copy in use and the licences of its data and code.
 - **Audio Unit plugins**: **Add Effect › Audio Unit…** lists every effect Audio Unit installed on the Mac by maker,
   with a search field. A plugin opens its own window (**Open Window**) in the process that routes, runs in a process
   of its own where macOS allows it, and is saved with the setup, settings made in its window included. One that keeps
@@ -354,7 +367,9 @@ property list, restored when its unit is made; a plugin also keeps its `name` an
 missing; codes with bytes that aren't printable are written as `0x` and eight hex digits; a Calibration effect keeps
 its `calibration` profile: name, kind, date, device, per-channel filters, delay and level, preamp, target, limits,
 measured curves and, for measured speakers, `alignment` (each channel's arrival and whether the channels are lined
-up; optional, so profiles without it still load and refit from their delays); new in schema 5, so schema 4 files load unchanged with none). A schema 1 file from the
+up; optional, so profiles without it still load and refit from their delays); new in schema 5, so schema 4 files load unchanged with none).
+Schema 6 adds, both optional, a library preset's `library` credit and a headphone profile's `adjustment` (tilt and
+shelves on top of the preset); schema 5 files load unchanged, and any a development build wrote there are dropped. A schema 1 file from the
 shared-canvas versions is converted on load: each node moves to the canvas of the device it was wired to (unwired
 ones to the first device), and cables between devices are dropped. Schema 2 files load with automatic buffer sizes;
 schema 2 and 3 files get sample-rate conversion set to Automatic and start with no scenes and no effects (a schema 4
@@ -433,9 +448,49 @@ with its regularised inverse and deconvolution to an impulse response, arrival-t
 fixed 240-point log grid through a frequency-dependent window, 1/3-, 1/6- and 1/12-octave smoothing, level-matched
 power averaging of listening positions, microphone calibration files and measurement text exports, a target (flat,
 tilt, shelves), a fitter (peaking and shelving filters within boost and cut limits, narrow deep dips left alone, a
-preamp keeping the curve at or below 0 dB, per-channel delay and level), cookbook biquad coefficients for any rate,
-parametric EQ preset import and export, and `CalibrationProfile`. The tests use simulated rooms (known filters, delay,
-noise, clock drift).
+preamp keeping the curve at or below 0 dB, per-channel delay and level), cookbook biquad coefficients for any rate
+(peaking, shelves and a second-order low-pass), parametric EQ preset import and export, and `CalibrationProfile`. The
+tests use simulated rooms (known filters, delay, noise, clock drift).
+
+**Headphone library**: `HeadphoneLibrary` (JunctionCore) reads the bundled copy of an open headphone EQ database
+(`Resources/HeadphoneLibrary`, JSON Lines compressed with LZMA, credited in the app; `build.sh` copies the folder into
+`Contents/Resources`). It decompresses it with Foundation, reads brands, models and parametric EQ presets, ignores
+entry types and fields it doesn't know, and counts lines it can't read and presets whose model or brand is missing.
+A preset's bands become Calibration filters (peaking, shelves with their Q, 12 dB/octave low-passes); one with a band
+type Junction doesn't have is listed as unavailable with the reason and never half loaded. The index is built once,
+off the main thread; search ignores case, accents and spacing, ranks prefix matches first and filters by the styles
+the data has (over-ear, in-ear, earbuds…). A preset becomes a headphone `CalibrationProfile` named after the brand and
+model that keeps the preset's id, author, details and link (`library`, new in graph.json schema 6).
+`HeadphoneAdjustment.swift` adds a headphone profile's tilt and shelves on top of its preset (`adjustment`, a
+`CalibrationTarget`, also new in schema 6): extra cookbook shelves after the preset's filters (the tilt as five
+shelves two octaves apart, within about 0.3 dB per dB/octave of a straight slope from 20 Hz to 20 kHz), at most seven
+sections, played only when they fit beside the preset in the correction stage's 32, with the preamp lowered when they
+need more room. Amount scales the adjustment's gains with the preset's, and exports write its filters too. The tests use
+made-up JSON Lines fixtures and the bundled file itself, and `--self-test` checks the bundled copy loads.
+
+The library updates only on request: `HeadphoneLibraryCache` (`HeadphoneLibraryUpdate.swift`) downloads the database
+from the project's mirror through a transport protocol (URLSession in the app) into a temporary file in
+`~/Library/Application Support/Junction/HeadphoneLibrary`. It keeps the download only if it ends with a complete line,
+nearly every line parses, it lists at least 1,000 models and 1,000 presets, and it is at least half the bundled
+copy's uncompressed size. The database then goes in under its SHA-256, and `library.json` (its date, size and
+SHA-256) is replaced by a rename, so a failed or cancelled update leaves the current copy as it was.
+`HeadphoneLibrary.loadPreferred` uses the downloaded copy when its file matches its record and passes the same checks,
+otherwise the bundled one, and `summary` says which, with its date and counts. The tests use a fake transport and
+temporary folders. To refresh the bundled copy, run `sh scripts/update-headphone-library.sh`: it downloads the mirror's
+file, checks every line parses, compresses it with `compression_tool` and updates `SOURCE.md`, then lists the
+constants and test counts to update.
+
+The Choose Headphones sheet's model is in JunctionCore (`HeadphonePicker.swift`), so the tests drive it without a
+window: `HeadphoneLibraryStore` holds the library the app uses (read once when first needed, the downloaded copy or
+else the bundled one) and its update state (updating, updated, or failed with the reason, Cancel included), shared by
+the sheet and Settings. `HeadphonePicker` searches it with a style filter, chooses headphones (selecting their preset
+in use, else their first loadable one), keeps the presets compared on the graph and their curves (the profile's own
+response at full amount), and **Use** hands a credited `CalibrationProfile` for the output's current device to its
+host, which the app applies as one undo step ("Use Headphone Preset"), adding a Calibration effect when the output has
+none. `HeadphoneLibraryLicence` reads the bundled licence texts for Settings › Acknowledgements. The tests cover
+search, choosing, comparing, Use and Undo, reopening on the preset in use, and the update states through the fake
+transport. Snapshot mode uses a made-up library (made-up brands, models and authors) whose Update Library always
+fails, so it never downloads.
 
 The measurement engine (`Measurement.swift`) runs in the app's own process behind a device protocol: a noise-floor
 check, a level check with pink noise on one channel (it reports the microphone's level and refuses a clipping input,
@@ -574,12 +629,19 @@ system-audio permissions and **Install Driver…** with the first one.
   calibration file; without the file, or with another microphone, the microphone's own response is in the result.
   EQ can't fix room nulls or reflections: deep narrow dips are left alone rather than boosted, and only level is
   corrected, not timing. A profile belongs to the device it was measured on (and the room and listening spot).
-- Calibration hasn't been heard through real devices yet. Its filters are minimum phase only (peaking and shelving
-  biquads): they correct level, not timing, so a room's reflections and a speaker's phase aren't straightened. A
+- Calibration hasn't been heard through real devices yet. Its filters are minimum phase only (peaking, shelving and
+  12 dB/octave low-pass biquads): they correct level, not timing, so a room's reflections and a speaker's phase aren't straightened. A
   profile belongs to the device it was made for: on another one (or when Default Output moves) it still runs, with a
   warning. A preset's filters at or above the output's Nyquist frequency are left out, and only the first 32 per
   channel run. An EQ preset export holds one channel's filters and the preamp (delays and levels aren't part of the
-  format).
+  format). A low-pass has no gain for **Amount** to scale: it runs whole at any Amount above 0 %. Presets with other
+  filter types (steeper low-passes, high-passes, band-passes) aren't read.
+- Headphone presets: most aim at a researched target curve (what listeners have been found to prefer from
+  headphones) rather than flat, so they may sound warmer or brighter than neutral; and a preset is one curve for both
+  ears, so differences between your two ears, or between your pair and the one measured, aren't corrected.
+- The headphone library updates only when asked: Junction never checks for a newer database by itself. Downloading
+  hasn't been tried against the real mirror in tests (they use a fake transport), so the mirror's responses, slow or
+  interrupted connections and proxies are unverified. Update Library shows that it is busy, not how far it has got.
 - MIDI control hasn't been tried with real controllers yet: CoreMIDI input (plugging in, Bluetooth and network
   sessions, sources coming and going) is unverified; message handling, learn, pick-up, saving and the helper's
   side are tested with recorded MIDI bytes. Only MIDI 1.0 messages are read (a MIDI 2.0 controller works in its

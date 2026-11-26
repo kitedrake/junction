@@ -312,6 +312,9 @@ struct RootView: View {
             calibration in
             CalibrateSpeakersSheet(calibration: calibration)
         }
+        .sheet(item: $model.headphonePicker) { picker in
+            ChooseHeadphonesSheet(picker: picker)
+        }
         .sheet(isPresented: Binding(get: { model.crashOffer != nil }, set: { if !$0 { model.finishCrashOffer() } })) {
             if let offer = model.crashOffer { CrashReportSheet(offer: offer) }
         }
