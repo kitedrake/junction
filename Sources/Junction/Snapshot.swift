@@ -42,6 +42,53 @@ enum Demo {
         return effect
     }
 
+    /// A made-up headphone library (made-up brands, models and authors, in the database's format), dated like the
+    /// bundled copy. Update Library fails at once: snapshot mode never downloads.
+    @MainActor static var headphoneLibrary: HeadphoneLibraryStore {
+        var lines: [String] = []
+        func json(_ object: [String: Any]) -> String {
+            String(decoding: try! JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]), as: UTF8.self)
+        }
+        func band(_ type: String, _ frequency: Double, _ gain: Double, _ q: Double) -> [String: Any] {
+            ["type": type, "frequency": frequency, "gain_db": gain, "q": q]
+        }
+        let brands = [("ashgrove", "Ashgrove Audio"), ("northwind", "Northwind Sound"), ("tidewater", "Tidewater Labs")]
+        for (id, name) in brands { lines.append(json(["type": "vendor", "id": id, "data": ["name": name]])) }
+        // (brand, model, subtype, presets: (author, details, link, bass, presence))
+        let models: [(String, String, String, [(String, String, Bool, Double, Double)])] = [
+            ("ashgrove", "Studio 40", "over_the_ear", [("Quiet Room Tuning", "Measured on a head simulator, toward a researched over-ear target", true, 5.5, -3.5),
+                                                       ("Bench Lab", "Measured by Bench Lab, toward a flatter target", false, 3, -2)]),
+            ("ashgrove", "Studio 40 Pro", "over_the_ear", [("Bench Lab", "Measured by Bench Lab", false, 4, -2.5)]),
+            ("ashgrove", "Studio Buds", "in_ear", [("Quiet Room Tuning", "In-ear target", true, 6.5, -4.5)]),
+            ("northwind", "Studio Monitor 7", "over_the_ear", [("Bench Lab", "Measured by Bench Lab", false, 2.5, -1.5),
+                                                               ("Field Notes Audio", "Toward a warmer target", true, 6, -1)]),
+            ("northwind", "Commuter", "on_ear", [("Field Notes Audio", "On-ear target", false, 4.5, -3)]),
+            ("northwind", "Pocket Pods", "earbuds", [("Quiet Room Tuning", "Earbud target", true, 7, -2)]),
+            ("tidewater", "Open Studio", "over_the_ear", [("Bench Lab", "Measured by Bench Lab", false, 3.5, -2)]),
+            ("tidewater", "Studio Reference II", "over_the_ear", [("Quiet Room Tuning", "Over-ear target", true, 2, -4)]),
+        ]
+        for (brand, name, subtype, presets) in models {
+            let product = "\(brand)::\(name.lowercased().replacingOccurrences(of: " ", with: "_"))"
+            lines.append(json(["type": "product", "id": product,
+                               "data": ["name": name, "type": "headphones", "subtype": subtype, "vendor_id": brand]]))
+            for (author, details, linked, bass, presence) in presets {
+                var data: [String: Any] = [
+                    "author": author, "details": details, "type": "parametric_eq", "product_id": product,
+                    "parameters": ["gain_db": -(bass + 0.5), "bands": [
+                        band("low_shelf", 105, bass, 0.7), band("peak_dip", 180, -bass / 3, 1.2),
+                        band("peak_dip", 2_800, presence, 2.5), band("peak_dip", 6_200, 2.5, 4),
+                        band("high_shelf", 10_000, -2, 0.7)]],
+                ]
+                if linked { data["link"] = "https://example.com/presets/\(product)" }
+                lines.append(json(["type": "eq", "id": "\(product)::\(author.lowercased().replacingOccurrences(of: " ", with: "_"))",
+                                   "data": data]))
+            }
+        }
+        let library = HeadphoneLibrary(jsonl: Data((lines.joined(separator: "\n") + "\n").utf8), source: .bundled,
+                                       date: HeadphoneLibrary.bundledDate)
+        return HeadphoneLibraryStore(library: library, updateProblem: "snapshot mode doesn't download.")
+    }
+
     /// A made-up measurement microphone's calibration file.
     static var micCalibration: MicCalibration? {
         try? MicCalibration(name: "Measuring Mic 0012345", text: "\"Sens Factor =-1.4dB\"\n20 -1.8\n50 -0.4\n1000 0\n10000 0.8\n20000 2.1\n")
@@ -261,6 +308,38 @@ enum Snapshot {
                 await both("calibration")
                 model.graph = saved
             }
+            // Choose Headphones on the headphones (which have no Calibration yet), in the made-up library: search
+            // results, then headphones with two presets compared, also at the window's minimum size; Use adds the
+            // effect, and the inspector credits the preset (taken out again afterwards).
+            if let phones = model.canvasNodes.first(where: { model.isOutputNode($0) }) {
+                let saved = model.graph
+                model.selection = .node(phones.id)
+                model.chooseHeadphones(phones.id)
+                if let picker = model.headphonePicker {
+                    await picker.load()
+                    picker.query = "studio"
+                    try? await Task.sleep(for: .milliseconds(600))
+                    await both("headphones-search", sheet: true)
+                    picker.chosenID = "ashgrove::studio_40"
+                    if let second = picker.chosen?.presets.dropFirst().first { picker.setCompared(second.id, true) }
+                    await both("headphones-presets", sheet: true)
+                    resize(980, 560)
+                    for (appearance, suffix) in [(NSAppearance.Name.aqua, "light"), (.darkAqua, "dark")] {
+                        NSApp.appearance = NSAppearance(named: appearance)
+                        try? await Task.sleep(for: .milliseconds(800))
+                        captureWindowArea(folder, "headphones-minimum-size-\(suffix)")
+                    }
+                    resize(1440, 810)
+                    picker.use(date: Date(timeIntervalSinceReferenceDate: 815_000_000))
+                    try? await Task.sleep(for: .milliseconds(500))
+                    await both("calibration-library")
+                    resize(980, 560)
+                    await both("calibration-library-minimum-size")
+                    resize(1440, 810)
+                }
+                model.headphonePicker = nil
+                model.graph = saved
+            }
             // Calibrate Speakers on Default Output (the MacBook Pro Speakers): every page with made-up measurements,
             // then the results at the window's minimum size (the node and the effect are taken out again afterwards).
             if let canvas = model.canvas, let first = model.canvasNodes.first(where: { model.isOutputNode($0) }) {
@@ -398,6 +477,10 @@ enum Snapshot {
 
             model.setDemoMIDI(learning: nil, sources: [])
             await captureSettings(folder, "settings")
+            // Settings › Acknowledgements: the headphone library's licences.
+            await captureSettings(folder, "acknowledgements", sheet: true,
+                                  prepare: { model.showsAcknowledgements = true },
+                                  finish: { model.showsAcknowledgements = false })
 
             if let routing = NSApp.mainMenu?.items.first(where: { $0.title == "Routing" })?.submenu,
                let index = routing.items.firstIndex(where: { $0.title == "Show Routing Log" }) {
@@ -440,8 +523,10 @@ enum Snapshot {
         }
     }
 
-    /// Opens Settings, captures it in both appearances as `<name>-light.png` and `<name>-dark.png`, and closes it.
-    @MainActor static func captureSettings(_ folder: URL, _ name: String) async {
+    /// Opens Settings, captures it (or with `sheet`, the sheet `prepare` opens on it) in both appearances as
+    /// `<name>-light.png` and `<name>-dark.png`, and closes it.
+    @MainActor static func captureSettings(_ folder: URL, _ name: String, sheet: Bool = false,
+                                           prepare: () -> Void = {}, finish: () -> Void = {}) async {
         if let appMenu = NSApp.mainMenu?.items.first?.submenu,
            let index = appMenu.items.firstIndex(where: { $0.title.hasPrefix("Settings") }) {
             appMenu.performActionForItem(at: index)
@@ -449,11 +534,20 @@ enum Snapshot {
         try? await Task.sleep(for: .milliseconds(800))
         if let settings = NSApp.windows.first(where: { $0.isVisible && $0 != mainWindow && $0.contentView != nil
             && ($0.identifier?.rawValue.localizedCaseInsensitiveContains("settings") ?? false) }) {
+            prepare()
+            if sheet { try? await Task.sleep(for: .milliseconds(600)) }
             for (appearance, suffix) in [(NSAppearance.Name.aqua, "light"), (.darkAqua, "dark")] {
                 NSApp.appearance = NSAppearance(named: appearance)
                 try? await Task.sleep(for: .milliseconds(600))
-                screencapture(["-x", "-o", "-l", "\(settings.windowNumber)"], folder, "\(name)-\(suffix)")
+                let window = sheet ? settings.attachedSheet : settings
+                if let window {
+                    screencapture(["-x", "-o", "-l", "\(window.windowNumber)"], folder, "\(name)-\(suffix)")
+                } else {
+                    FileHandle.standardError.write(Data("Couldn't open the sheet for \(name).\n".utf8))
+                }
             }
+            finish()
+            if sheet { try? await Task.sleep(for: .milliseconds(500)) }
             settings.close()
         } else {
             let windows = NSApp.windows.map { "\($0.title)|\($0.identifier?.rawValue ?? "-")|\($0.isVisible)" }

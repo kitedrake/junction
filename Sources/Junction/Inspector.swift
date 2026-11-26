@@ -620,6 +620,7 @@ private struct CalibrationDetails: View {
                     Text(details(profile)).font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                if let credit = profile.library { LibraryCredit(credit: credit) }
                 let current = model.currentDevice(node)
                 if profile.isForAnotherDevice(than: current?.uid) {
                     Label(mismatch(profile, current: current?.name), systemImage: "exclamationmark.triangle.fill")
@@ -629,7 +630,7 @@ private struct CalibrationDetails: View {
                 }
                 FrequencyResponseGraph(curves: curves(profile))
             } else {
-                Text("No correction loaded, so the audio passes through. Measure your speakers, or load a parametric EQ preset for your headphones.")
+                Text("No correction loaded, so the audio passes through. Measure your speakers, or choose your headphones for a ready-made EQ preset.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -645,9 +646,14 @@ private struct CalibrationDetails: View {
             }
             .controlSize(.small)
             HStack {
+                Button("Choose Headphones…") { model.chooseHeadphones(node.id, effect: effect.id) }
+                    .help("Picks a ready-made EQ preset for your headphone model from the headphone library")
                 Button("Load EQ Preset…") { model.loadEQPreset(into: effect.id, in: node.id) }
                     .help("Reads a text file with a Preamp line and Filter lines (peaking and shelving filters)")
-                if let profile = effect.calibration {
+            }
+            .controlSize(.small)
+            if let profile = effect.calibration {
+                HStack {
                     if profile.channels.count > 1 {
                         Menu("Export EQ Preset…") {
                             ForEach(profile.channels.indices, id: \.self) { channel in
@@ -659,8 +665,8 @@ private struct CalibrationDetails: View {
                         Button("Export EQ Preset…") { model.exportEQPreset(profile) }
                     }
                 }
+                .controlSize(.small)
             }
-            .controlSize(.small)
         }
     }
 
@@ -668,7 +674,7 @@ private struct CalibrationDetails: View {
     private func details(_ profile: CalibrationProfile) -> String {
         let kind = switch profile.kind {
         case .speakers: "Speakers, measured in the room"
-        case .headphones: "Headphones, from an EQ preset"
+        case .headphones: profile.library == nil ? "Headphones, from an EQ preset" : "Headphones, from the headphone library"
         case .imported: "From an imported measurement"
         }
         var parts = [kind, profile.date.formatted(date: .abbreviated, time: .omitted)]
@@ -716,6 +722,35 @@ private struct CalibrationDetails: View {
         let midrange = zip(CalibrationGrid.frequencies, levels).filter { CalibrationAnalysis.midrange.contains($0.0) }.map(\.1)
         let offset = midrange.isEmpty ? 0 : midrange.reduce(0, +) / Double(midrange.count)
         return levels.map { $0 - offset }
+    }
+}
+
+/// A library preset's credit: its author first, then its details and page, then (quieter) the database it came from.
+private struct LibraryCredit: View {
+    let credit: HeadphoneLibraryCredit
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text("Preset by \(credit.author.isEmpty ? "an unknown author" : credit.author)")
+                .font(.callout.weight(.semibold))
+                .lineLimit(1)
+            if !credit.details.isEmpty {
+                Text(credit.details).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 8) {
+                if let link = credit.link.flatMap(URL.init(string:)), link.scheme?.hasPrefix("http") == true {
+                    Link("Author's page", destination: link)
+                        .help(link.absoluteString)
+                }
+                Link("from \(HeadphoneLibrary.projectName)", destination: HeadphoneLibrary.projectURL)
+                    .foregroundStyle(.secondary)
+                    .help("Presets from \(HeadphoneLibrary.projectName): \(HeadphoneLibrary.projectDescription)")
+            }
+            .font(.caption)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Preset by \(credit.author)")
     }
 }
 

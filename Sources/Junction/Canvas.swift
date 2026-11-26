@@ -867,6 +867,7 @@ struct NodeCard: View {
             if model.isOutputNode(node) {
                 Button("Calibrate Speakers…") { model.calibrateSpeakers(node.id) }
                     .disabled(model.currentDevice(node) == nil)
+                Button("Choose Headphones…") { model.chooseHeadphones(node.id) }
             }
             Divider()
             if !model.isDeviceNode(node) {

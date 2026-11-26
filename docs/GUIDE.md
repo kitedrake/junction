@@ -303,8 +303,9 @@ the delay it adds, and "own process" for a plugin macOS runs on its own.
 
 **Calibration** makes speakers or headphones sound flat, or follow a curve you prefer. It is offered under **Add
 Effect** on outputs only: headphones, speakers, an interface's playback channels and **Default Output**. Speakers are
-measured in your room with a measurement microphone; headphones use a parametric EQ preset for your model. Everything
-happens inside Junction: nothing is downloaded.
+measured in your room with a measurement microphone; headphones use a parametric EQ preset for your model, chosen
+from the headphone library that comes with Junction or loaded from a file. Everything happens inside Junction: the
+only download is the headphone library's, and only when you ask for it.
 
 #### Speakers
 
@@ -364,7 +365,7 @@ them). A correction belongs to the speakers, room and listening spot it was meas
 
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="screenshots/calibration-light.png">
-  <img src="screenshots/calibration-dark.png" alt="Calibration on the headphones: an EQ preset's name and curve, Amount at 80 %, and the Load and Export EQ Preset buttons">
+  <img src="screenshots/calibration-dark.png" alt="Calibration on the headphones: an EQ preset's name and curve, Amount at 80 %, and the Choose Headphones, Load EQ Preset and Export EQ Preset buttons">
 </picture>
 
 1. Select the output in the canvas and choose **Add Effect › Calibration**. Until a correction is loaded it lets the
@@ -386,6 +387,48 @@ speaker correction with different filters per channel asks which channel to expo
 
 Calibration adds no delay, works on every channel of the output (a correction made per channel works on those
 channels and leaves the others alone), and is switched off, moved and controlled by MIDI like any other effect.
+
+#### Headphone presets
+
+Junction comes with a library of ready-made parametric EQ presets for thousands of headphones, from an open headphone
+EQ database (credited in the app). Each preset was made by someone who measured those headphones, and the library
+names them.
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="screenshots/headphones-presets-light.png">
+  <img src="screenshots/headphones-presets-dark.png" alt="Choose Headphones: the search results on the left, and on the right one model's two presets with their authors, both drawn on the graph">
+</picture>
+
+1. Click **Choose Headphones…** in the Calibration box, or right-click an output on the canvas and choose **Choose
+   Headphones…** (an output without Calibration gets the effect when you use a preset).
+2. Type your headphones' brand or model in the search field (case, accents and spaces don't matter: "studio40"
+   finds "Studio 40"), and narrow the list with the type menu (over-ear, in-ear, earbuds…) if you like. Each result shows the
+   brand, the model, its type and how many presets it has.
+3. Click your headphones. Their presets are listed with their **authors** first, then what each was made from or
+   for, and a link to the author's page when there is one. The selected preset's correction is drawn on the graph;
+   tick others to draw them too (dashed) and compare them. A preset Junction can't run (one with a filter type it
+   doesn't have) says why and can't be used.
+4. Pick a preset and click **Use**. It goes into the output's Calibration effect, named after the headphones; **Edit ›
+   Undo** takes it back out. **Amount** works as for any other preset.
+
+The Calibration box then shows who made the preset, its details, a link to the author's page and where it came from.
+Open **Choose Headphones…** again and it starts on the preset in use, marked **In use**.
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="screenshots/calibration-library-light.png">
+  <img src="screenshots/calibration-library-dark.png" alt="Calibration on the headphones with a library preset: the headphones' name, the preset's author, details and links, and its curve">
+</picture>
+
+Most presets aim at a researched target curve (what listeners have been found to prefer from headphones) rather than
+flat, so a preset can sound warmer or brighter than "neutral"; comparing two authors' presets shows how much they
+differ. A preset has one curve for both ears.
+
+**The library updates only when you ask.** The sheet's bottom line, and **Settings › Headphone Library**, show which
+copy is in use (the one that came with Junction, or the one you downloaded, with its date) and how many headphones and
+presets it has. **Update Library** downloads the latest copy and uses it once Junction has checked it is complete; it
+shows its progress and can be cancelled, and if the download fails or doesn't check out, Junction says why and keeps
+the copy it had. **Settings › Headphone Library › Show Licences…** shows the licences the library's data and code come
+with.
 
 ### Audio Unit plugins
 
