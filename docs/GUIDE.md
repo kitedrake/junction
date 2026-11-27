@@ -30,7 +30,7 @@ videos, and the people you're talking to on Discord don't hear themselves on str
 
 ## 1. Install Junction
 
-Junction needs **macOS 26** or newer on a Mac with Apple silicon.
+Junction needs **macOS 26** or newer and runs on both Apple silicon and Intel Macs.
 
 Download the newest preview from the [Releases page](https://github.com/kitedrake/junction/releases) (the
 `Junction-<version>.zip` file under **Assets**), unzip it and move Junction to your Applications folder. The preview

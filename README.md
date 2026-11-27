@@ -206,7 +206,8 @@ Junction is open source under the GNU General Public License, version 3 or later
 ## Download
 
 Download the newest preview from the [Releases page](https://github.com/kitedrake/junction/releases): the
-`Junction-<version>.zip` file under **Assets**. It needs macOS 26 or later on a Mac with Apple silicon.
+`Junction-<version>.zip` file under **Assets**. It needs macOS 26 or later and runs on
+both Apple silicon and Intel Macs.
 
 **Preview build.** Junction isn't signed or notarized by Apple yet, so macOS warns about it the first time you open
 it. To open it anyway:
@@ -225,7 +226,7 @@ Then press **Install Driver…** in the sidebar to add Junction's audio driver (
 ## Install and run
 
 ```sh
-./build.sh                       # builds build/Junction.app (ad-hoc signed) with the driver inside
+./build.sh                       # builds build/Junction.app (universal, ad-hoc signed) with the driver inside
 open build/Junction.app
 ```
 

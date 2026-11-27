@@ -1,7 +1,7 @@
 #!/bin/sh
-# Builds build/Junction.app with the audio driver inside it (Contents/Resources/JunctionDriver.driver), plus a
-# standalone build/JunctionDriver.driver. Uses Xcode's toolchain when Xcode is installed (the Command Line Tools
-# don't include the macOS 26 SDK that SwiftUI's Liquid Glass needs).
+# Builds build/Junction.app, universal (Apple silicon and Intel), with the audio driver inside it
+# (Contents/Resources/JunctionDriver.driver), plus a standalone build/JunctionDriver.driver. Uses Xcode's toolchain when
+# Xcode is installed (the Command Line Tools don't include the macOS 26 SDK that SwiftUI's Liquid Glass needs).
 #
 # Signing is ad-hoc unless SIGN_IDENTITY (or JUNCTION_SIGN_IDENTITY) names a code-signing identity (for example an
 # "Apple Development" certificate). With a stable identity macOS keeps Junction's microphone and system-audio
@@ -108,10 +108,13 @@ sed -e "s/__VERSION__/$driver_version/" -e "s/__BUILD__/$build_number/" Driver/I
 sign_code "$driver"
 
 # 2. The app, its routing helper and its driver installer.
-xcrun swift build $spm_flags -c release --product Junction
-xcrun swift build $spm_flags -c release --product JunctionHelper
-xcrun swift build $spm_flags -c release --product JunctionDriverDaemon
-bindir="$(xcrun swift build $spm_flags -c release --show-bin-path)"
+# Universal: Apple silicon (arm64) and Intel (x86_64). With more than one --arch, SwiftPM builds with its Xcode-style
+# build system, which puts the products in another folder; --show-bin-path with the same flags names it.
+arch_flags="--arch arm64 --arch x86_64"
+xcrun swift build $spm_flags $arch_flags -c release --product Junction
+xcrun swift build $spm_flags $arch_flags -c release --product JunctionHelper
+xcrun swift build $spm_flags $arch_flags -c release --product JunctionDriverDaemon
+bindir="$(xcrun swift build $spm_flags $arch_flags -c release --show-bin-path)"
 app="build/Junction.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/Frameworks"
@@ -201,4 +204,13 @@ sign_code "$framework/Versions/B/Autoupdate"
 sign_code "$framework/Versions/B/Updater.app"
 sign_code "$framework"
 sign_code "$app" Resources/Junction.entitlements
+# Every binary in the bundle must run on Apple silicon and Intel: each Mach-O file needs both architectures.
+binaries="$(find "$app" -type f -exec file {} + | sed -n -e '/(for architecture/d' -e 's/:[[:space:]]*Mach-O .*//p')"
+[ -n "$binaries" ] || { echo "Found no binaries to check in $app" >&2; exit 1; }
+echo "$binaries" | while IFS= read -r binary; do
+  archs="$(lipo -archs "$binary")"
+  for arch in arm64 x86_64; do
+    case " $archs " in *" $arch "*) ;; *) echo "$binary isn't universal (it has $archs)" >&2; exit 1 ;; esac
+  done
+done
 echo "Built $(pwd)/$app (routing in the helper: $([ "$routing_helper" = 1 ] && echo on || echo off); driver installer: $([ "$driver_daemon" = 1 ] && echo on || echo off); crash reports: $([ -n "$crash_url" ] && echo "sent to $crash_url" || echo copy only))"
