@@ -112,16 +112,21 @@ struct JunctionApp: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// Routing starts with the app, not with the window (which a menu-bar-only setup may never show), and before the
+    /// window first draws, so the sidebar's first layout already has the devices and apps. Started from the window, they
+    /// arrived while macOS was still restoring it and the sidebar had no size yet, and AppKit warned of a reentrant
+    /// table update.
     func applicationWillFinishLaunching(_ notification: Notification) {
         if !DockIcon.isShown { NSApp.setActivationPolicy(.accessory) }
-        MainActor.assumeIsolated { LoginLaunch.detect() }
+        MainActor.assumeIsolated {
+            LoginLaunch.detect()
+            AppModel.shared.start()
+        }
     }
 
-    /// Routing starts with the app, not with the window (which a menu-bar-only setup may never show). Opened at login,
-    /// Junction stays in the menu bar: its window is closed straight away.
+    /// Opened at login, Junction stays in the menu bar: its window is closed straight away.
     func applicationDidFinishLaunching(_ notification: Notification) {
         MainActor.assumeIsolated {
-            AppModel.shared.start()
             guard LoginLaunch.isActive, !AppModel.shared.isDemo else { return }
             DispatchQueue.main.async {
                 for window in NSApp.windows where window.identifier?.rawValue.hasPrefix("main") ?? false { window.close() }
