@@ -30,8 +30,21 @@ videos, and the people you're talking to on Discord don't hear themselves on str
 
 ## 1. Install Junction
 
-Junction needs **macOS 26** or newer. There is no download yet: you build it from this repository with
-**Xcode 26** installed.
+Junction needs **macOS 26** or newer on a Mac with Apple silicon.
+
+Download the newest preview from the [Releases page](https://github.com/kitedrake/junction/releases) (the
+`Junction-<version>.zip` file under **Assets**), unzip it and move Junction to your Applications folder. The preview
+isn't signed or notarized by Apple yet, so macOS warns about it the first time you open it:
+
+1. Open Junction. When macOS says it can't verify the app, click **Done**.
+2. Open **System Settings › Privacy & Security**, scroll down to **Security** and click **Open Anyway** next to the
+   message about Junction. The button shows for about an hour after you tried to open the app.
+3. Confirm with **Open Anyway** and your password or Touch ID when macOS asks. From then on, Junction opens normally.
+
+On current macOS, right-clicking the app and choosing **Open** no longer skips this warning. If you prefer Terminal:
+`xattr -dr com.apple.quarantine /Applications/Junction.app`
+
+Or build it yourself from this repository with **Xcode 26** installed:
 
 1. Download or clone the repository.
 2. In Terminal, inside the repository folder, run `./build.sh`.
