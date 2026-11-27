@@ -18,13 +18,13 @@
 #   UPDATE_PUBLIC_KEY  the EdDSA public key (base64) whose private half signs the updates
 #
 # Every build carries Junction Helper (Contents/Library/LoginItems/JunctionHelper.app), which can run routing in the
-# background, and its launch agent (Contents/Library/LaunchAgents/local.junction.helper.plist). Whether the app
+# background, and its launch agent (Contents/Library/LaunchAgents/com.kitedrake.junction.helper.plist). Whether the app
 # registers and uses it is ROUTING_HELPER: 1 routes in the helper, 0 (the default, release builds included) inside the
 # app. It stays off by default until the helper has been tried on a real Mac.
 #
 # Every build also carries Junction Driver Installer (Contents/Library/HelperTools/JunctionDriverDaemon), a launch
 # daemon that installs and removes the driver without a password once the user approves it, and its plist
-# (Contents/Library/LaunchDaemons/local.junction.driverd.plist). DRIVER_DAEMON decides whether the app registers and
+# (Contents/Library/LaunchDaemons/com.kitedrake.junction.driverd.plist). DRIVER_DAEMON decides whether the app registers and
 # uses it: 1 or 0, defaulting to 0 like ROUTING_HELPER. It only works when signed by a developer team: an ad-hoc
 # signed daemon accepts no connections.
 #
@@ -143,7 +143,7 @@ cat > "$helper/Contents/Info.plist" <<PLIST
 <dict>
   <key>CFBundleName</key><string>Junction Helper</string>
   <key>CFBundleDisplayName</key><string>Junction Helper</string>
-  <key>CFBundleIdentifier</key><string>local.junction.helper</string>
+  <key>CFBundleIdentifier</key><string>com.kitedrake.junction.helper</string>
   <key>CFBundleExecutable</key><string>JunctionHelper</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
@@ -157,11 +157,11 @@ cat > "$helper/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
-cp Resources/local.junction.helper.plist "$app/Contents/Library/LaunchAgents/local.junction.helper.plist"
+cp Resources/com.kitedrake.junction.helper.plist "$app/Contents/Library/LaunchAgents/com.kitedrake.junction.helper.plist"
 # Junction Driver Installer: a bare executable launchd runs as root (BundleProgram in its plist).
 mkdir -p "$app/Contents/Library/HelperTools" "$app/Contents/Library/LaunchDaemons"
 cp "$bindir/JunctionDriverDaemon" "$app/Contents/Library/HelperTools/JunctionDriverDaemon"
-cp Resources/local.junction.driverd.plist "$app/Contents/Library/LaunchDaemons/local.junction.driverd.plist"
+cp Resources/com.kitedrake.junction.driverd.plist "$app/Contents/Library/LaunchDaemons/com.kitedrake.junction.driverd.plist"
 crash=""
 if [ -n "$crash_url" ]; then crash="<key>JunctionCrashReportURL</key><string>$crash_url</string>"; fi
 cp scripts/install-driver.sh scripts/uninstall-driver.sh "$app/Contents/Resources/"
@@ -174,7 +174,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <dict>
   <key>CFBundleName</key><string>Junction</string>
   <key>CFBundleDisplayName</key><string>Junction</string>
-  <key>CFBundleIdentifier</key><string>local.junction.app</string>
+  <key>CFBundleIdentifier</key><string>com.kitedrake.junction</string>
   <key>CFBundleExecutable</key><string>Junction</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
@@ -196,7 +196,7 @@ PLIST
 # Sign from the inside out.
 sign_code "$app/Contents/Resources/JunctionDriver.driver"
 sign_code "$helper" Resources/Junction.entitlements
-sign_code "$app/Contents/Library/HelperTools/JunctionDriverDaemon" "" local.junction.driverd
+sign_code "$app/Contents/Library/HelperTools/JunctionDriverDaemon" "" com.kitedrake.junction.driverd
 sign_code "$framework/Versions/B/Autoupdate"
 sign_code "$framework/Versions/B/Updater.app"
 sign_code "$framework"

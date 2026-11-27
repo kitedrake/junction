@@ -3,16 +3,16 @@
 <!-- Junction Driver Installer's launch daemon, registered by Junction with SMAppService.daemon (build.sh copies it into
      Junction.app/Contents/Library/LaunchDaemons). It runs as root while Junction asks it to install or remove the
      driver: launchd starts it when Junction connects to its XPC service, and it quits after a minute without requests.
-     It also keeps the driver's per-app capture region for Junction (local.junction.driverd.capture): launchd starts it
+     It also keeps the driver's per-app capture region for Junction (com.kitedrake.junction.driverd.capture): launchd starts it
      when the driver sends the region, and it stays while it holds one. -->
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>local.junction.driverd</string>
+  <key>Label</key><string>com.kitedrake.junction.driverd</string>
   <key>BundleProgram</key><string>Contents/Library/HelperTools/JunctionDriverDaemon</string>
-  <key>AssociatedBundleIdentifiers</key><array><string>local.junction.app</string></array>
+  <key>AssociatedBundleIdentifiers</key><array><string>com.kitedrake.junction</string></array>
   <key>MachServices</key><dict>
-    <key>local.junction.driverd</key><true/>
-    <key>local.junction.driverd.capture</key><true/>
+    <key>com.kitedrake.junction.driverd</key><true/>
+    <key>com.kitedrake.junction.driverd.capture</key><true/>
   </dict>
 </dict>
 </plist>

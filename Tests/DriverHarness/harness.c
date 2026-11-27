@@ -841,16 +841,23 @@ static void TestPerAppCapture(void) {
     int clientNotes = Announced(kSelectorClients);
     CHECK(AddClient(device, 7, 1001, "com.example.music") == noErr, "add a client");
     CHECK(AddClient(device, 8, 1002, "com.example.call") == noErr, "add a second client");
-    CHECK(AddClient(device, 9, 1003, "local.junction.helper") == noErr, "add Junction's own client");
+    CHECK(AddClient(device, 9, 1003, "com.kitedrake.junction.helper") == noErr, "add Junction's own client");
+    CHECK(AddClient(device, 13, 1007, "com.kitedrake.junction") == noErr, "add Junction itself as a client");
+    CHECK(AddClient(device, 14, 1008, "com.kitedrake.junctionist") == noErr, "add a client whose ID only starts alike");
     CHECK(AddClient(device, 10, 1004, NULL) == noErr, "add a client without a bundle ID");
     CHECK(WaitForAnnouncement(kSelectorClients, clientNotes), "new clients are announced");
-    CHECK(CountClients() == 2, "two clients captured (not Junction's own, not one without a bundle ID), got %d",
+    CHECK(CountClients() == 3, "three clients captured (not Junction's own, not one without a bundle ID), got %d",
           CountClients());
     JCapClient music, call, own;
     UInt32 musicSlot = SlotOf(region, "com.example.music", &music);
     UInt32 callSlot = SlotOf(region, "com.example.call", &call);
     CHECK(musicSlot < JCAP_SLOTS && callSlot < JCAP_SLOTS && musicSlot != callSlot, "each client has its own slot");
-    CHECK(SlotOf(region, "local.junction.helper", &own) == JCAP_SLOTS, "Junction's own processes aren't captured");
+    CHECK(SlotOf(region, "com.kitedrake.junction.helper", &own) == JCAP_SLOTS
+          && SlotOf(region, "com.kitedrake.junction", &own) == JCAP_SLOTS, "Junction's own processes aren't captured");
+    CHECK(SlotOf(region, "com.kitedrake.junctionist", &own) < JCAP_SLOTS, "an app whose ID only starts alike is captured");
+    RemoveClient(device, 13, 1007);
+    CHECK(RemoveClient(device, 14, 1008) == noErr && CountClients() == 2, "back to two captured clients, got %d",
+          CountClients());
     CHECK(music.pid == 1001 && strcmp(music.deviceUID, "junction.test.capture") == 0 && music.channels == 2,
           "a slot names its client's pid, device and channels");
 

@@ -3,10 +3,10 @@ import JunctionCore
 
 // Junction Driver Installer: a launch daemon inside Junction.app (Contents/Library/HelperTools), registered by the app
 // with SMAppService.daemon once a build is made for it (build.sh's DRIVER_DAEMON). It runs as root, started by launchd
-// when Junction connects to `local.junction.driverd`, installs or removes the driver inside its own Junction.app after
+// when Junction connects to `com.kitedrake.junction.driverd`, installs or removes the driver inside its own Junction.app after
 // checking its signature (see DriverDaemonService), restarts Core Audio, and quits after a minute without requests.
 // It also keeps the driver's per-app capture region and hands it to Junction (CaptureBroker, Mach service
-// `local.junction.driverd.capture`); while it holds one it stays, since the driver sends it only when it loads or
+// `com.kitedrake.junction.driverd.capture`); while it holds one it stays, since the driver sends it only when it loads or
 // when the daemon goes away.
 
 let executable = Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])

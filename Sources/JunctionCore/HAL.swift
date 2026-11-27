@@ -93,8 +93,8 @@ public enum HAL {
 
     // MARK: Inventory
 
-    static let junctionModelUID = "local.junction.virtual-device"
-    static let aggregateUIDPrefix = "local.junction.aggregate."
+    static let junctionModelUID = "com.kitedrake.junction.virtual-device"
+    static let aggregateUIDPrefix = "com.kitedrake.junction.aggregate."
 
     static func deviceInfo(_ id: AudioObjectID, uid: String) -> DeviceInfo {
         DeviceInfo(

@@ -19,10 +19,10 @@ public enum DriverDaemon {
     /// Bumped when a message changes shape.
     public static let protocolVersion = 1
     /// The launchd label and the Mach service the daemon listens on.
-    public static let label = "local.junction.driverd"
+    public static let label = "com.kitedrake.junction.driverd"
     public static let machServiceName = label
     /// In Junction.app/Contents/Library/LaunchDaemons, for `SMAppService.daemon(plistName:)`.
-    public static let plistName = "local.junction.driverd.plist"
+    public static let plistName = "com.kitedrake.junction.driverd.plist"
     /// The daemon inside Junction.app (signed with `label` as its identifier).
     public static let executablePath = "Contents/Library/HelperTools/JunctionDriverDaemon"
     /// The driver it installs: only ever this copy, inside the same Junction.app.
@@ -198,7 +198,7 @@ public final class DriverDaemonService: NSObject, NSXPCListenerDelegate, @unchec
     public let clientRequirement: String?
     /// False only for tests and the self-test, which talk to an anonymous listener in their own process.
     public let checksClients: Bool
-    public let queue = DispatchQueue(label: "local.junction.driverd.service")
+    public let queue = DispatchQueue(label: "com.kitedrake.junction.driverd.service")
     /// When the last request finished (the daemon quits after a while without any).
     public private(set) var lastActivity = Date()
 

@@ -159,10 +159,10 @@ final class DriverDaemonTests: XCTestCase {
         XCTAssertNil(DriverDaemon.clientRequirement(teamID: nil), "an ad-hoc signed daemon accepts nobody")
         XCTAssertNil(DriverDaemon.clientRequirement(teamID: ""))
         let requirement = DriverDaemon.clientRequirement(teamID: "TEAM123456") ?? ""
-        XCTAssertTrue(requirement.contains("identifier \"local.junction.app\""), requirement)
+        XCTAssertTrue(requirement.contains("identifier \"com.kitedrake.junction\""), requirement)
         XCTAssertTrue(requirement.contains("certificate leaf[subject.OU] = \"TEAM123456\""), requirement)
         XCTAssertTrue(requirement.contains("anchor apple generic"), requirement)
-        XCTAssertEqual(DriverDaemon.daemonRequirement(teamID: nil), "identifier \"local.junction.driverd\"")
+        XCTAssertEqual(DriverDaemon.daemonRequirement(teamID: nil), "identifier \"com.kitedrake.junction.driverd\"")
     }
 
     // MARK: Over XPC

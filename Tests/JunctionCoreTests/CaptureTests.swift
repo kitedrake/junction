@@ -150,8 +150,8 @@ final class CaptureTests: XCTestCase {
 
         XCTAssertNil(CaptureBroker.peerRequirement(teamID: nil), "an ad-hoc signed daemon accepts nobody")
         let requirement = try XCTUnwrap(CaptureBroker.peerRequirement(teamID: "TEAM123456"))
-        XCTAssertTrue(requirement.contains("com.apple.audio.coreaudiod") && requirement.contains("local.junction.app")
-                      && requirement.contains("local.junction.helper") && requirement.contains("TEAM123456"))
+        XCTAssertTrue(requirement.contains("com.apple.audio.coreaudiod") && requirement.contains("com.kitedrake.junction")
+                      && requirement.contains("com.kitedrake.junction.helper") && requirement.contains("TEAM123456"))
     }
 
     func testTheDriversClientListNamesEachClientsApp() {

@@ -3,7 +3,7 @@ import Foundation
 
 /// Talks to the Junction driver inside coreaudiod through the custom properties on its plug-in object.
 public enum DriverClient {
-    public static let bundleID = "local.junction.driver"
+    public static let bundleID = "com.kitedrake.junction.driver"
     public static let installPath = "/Library/Audio/Plug-Ins/HAL/JunctionDriver.driver"
     static let configSelector: AudioObjectPropertySelector = 0x6A63_6667  // 'jcfg'
     static let versionSelector: AudioObjectPropertySelector = 0x6A76_6572 // 'jver'

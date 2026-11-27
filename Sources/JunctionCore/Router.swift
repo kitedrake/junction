@@ -61,7 +61,7 @@ public struct PortKey: Codable, Hashable, Sendable {
 public final class Router: @unchecked Sendable {
     public typealias StatusHandler = @Sendable ([UUID: SinkStatus]) -> Void
 
-    private let queue = DispatchQueue(label: "local.junction.router", qos: .userInitiated)
+    private let queue = DispatchQueue(label: "com.kitedrake.junction.router", qos: .userInitiated)
     private let lock = NSLock()
     private var runners: [UUID: SinkRunner] = [:]  // mutated on `queue`, under `lock`
     private var statuses: [UUID: SinkStatus] = [:]  // `queue` only
@@ -75,7 +75,7 @@ public final class Router: @unchecked Sendable {
     /// in a row one of them didn't move.
     private var progress: [UUID: (cycles: [UInt64], still: Int)] = [:]
     private var healthTimer: DispatchSourceTimer?
-    static let log = Logger(subsystem: "local.junction", category: "routing")
+    static let log = Logger(subsystem: "com.kitedrake.junction", category: "routing")
     private let events: EventLog
     /// Audio Units by effect, kept across sink rebuilds (`queue` only).
     private let effects = EffectPool()

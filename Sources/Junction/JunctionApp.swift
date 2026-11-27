@@ -10,6 +10,7 @@ enum Main {
         if ["--list", "--diagnose", "--self-test", "--loopback-test", "--device-test", "--help"].contains(arguments.first ?? "") {
             exit(CommandLineTool.run(arguments))
         }
+        PreferencesMigration.carryOver()   // settings saved under the earlier bundle ID
         JunctionApp.main()
     }
 }

@@ -5,7 +5,7 @@ import XPC
 
 // Per-app capture through a virtual device: the driver keeps what each app plays into one of Junction's devices in a
 // ring of its own (JunctionCaptureRing.h), in one shared memory region. Junction Driver Installer (the privileged
-// daemon) takes the region from the driver over its Mach service `local.junction.driverd.capture` and hands it only to
+// daemon) takes the region from the driver over its Mach service `com.kitedrake.junction.driverd.capture` and hands it only to
 // Junction and Junction Helper signed by its own team. The canvas offers "<app> through <device>" for apps playing
 // into a virtual device right now (the driver's 'jcli' list); the router reads their rings.
 
@@ -173,7 +173,7 @@ public final class CaptureBroker: @unchecked Sendable {
     /// Who is on the other end of a connection, as the daemon's code-signing checks establish it.
     public enum Peer: Sendable { case driver, junction }
 
-    public static let machServiceName = "local.junction.driverd.capture"
+    public static let machServiceName = "com.kitedrake.junction.driverd.capture"
     /// The processes the driver runs in: coreaudiod, or its driver service.
     public static let driverHostRequirement =
         "anchor apple and (identifier \"com.apple.audio.coreaudiod\" or identifier \"com.apple.audio.Core-Audio-Driver-Service\")"
@@ -186,7 +186,7 @@ public final class CaptureBroker: @unchecked Sendable {
     /// Set while it holds a region: the daemon doesn't quit then (it is the only way Junction gets it).
     public var holdsRegion: Bool { queue.sync { region != nil } }
 
-    public init(queue: DispatchQueue = DispatchQueue(label: "local.junction.driverd.capture")) {
+    public init(queue: DispatchQueue = DispatchQueue(label: "com.kitedrake.junction.driverd.capture")) {
         self.queue = queue
     }
 

@@ -189,9 +189,9 @@ final class RoutingServiceTests: XCTestCase {
     }
 
     func testRequirementsNameTheBundleAndTeam() {
-        XCTAssertEqual(RoutingXPC.peerRequirement(identifier: "local.junction.app", teamID: nil), "identifier \"local.junction.app\"")
-        XCTAssertEqual(RoutingXPC.peerRequirement(identifier: "local.junction.helper", teamID: "ABCDE12345"),
-                       "identifier \"local.junction.helper\" and anchor apple generic and certificate leaf[subject.OU] = \"ABCDE12345\"")
+        XCTAssertEqual(RoutingXPC.peerRequirement(identifier: "com.kitedrake.junction", teamID: nil), "identifier \"com.kitedrake.junction\"")
+        XCTAssertEqual(RoutingXPC.peerRequirement(identifier: "com.kitedrake.junction.helper", teamID: "ABCDE12345"),
+                       "identifier \"com.kitedrake.junction.helper\" and anchor apple generic and certificate leaf[subject.OU] = \"ABCDE12345\"")
         XCTAssertEqual(RoutingXPC.helperExecutablePath, "Contents/Library/LoginItems/JunctionHelper.app/Contents/MacOS/JunctionHelper")
     }
 
@@ -444,7 +444,7 @@ final class RoutingServiceTests: XCTestCase {
 
     func testAHelperThatCantBeReachedIsReportedUnavailable() {
         let heard = Heard()
-        let client = RoutingClient(machServiceName: "local.junction.test.no-such-service-\(UUID().uuidString)", requirement: nil,
+        let client = RoutingClient(machServiceName: "com.kitedrake.junction.test.no-such-service-\(UUID().uuidString)", requirement: nil,
                                    keepRouting: false, callbackQueue: DispatchQueue(label: "test.unavailable")) { heard.add($0) }
         client.helloTimeout = 2
         client.connect()

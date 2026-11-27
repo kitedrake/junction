@@ -440,7 +440,7 @@ enum CommandLineTool {
         let environment = RoutingService.Environment(readInventory: { inventory }, permission: { .allowed },
                                                      requestMicrophone: { $0() }, processName: "Self-Test")
         let service = RoutingService(graph: Graph(), keepRouting: false, events: EventLog(file: nil),
-                                     queue: DispatchQueue(label: "local.junction.self-test.service"),
+                                     queue: DispatchQueue(label: "com.kitedrake.junction.self-test.service"),
                                      environment: environment) { _ in standIn }
         let listener = NSXPCListener.anonymous()
         listener.delegate = service
@@ -448,7 +448,7 @@ enum CommandLineTool {
         defer { listener.invalidate() }
         let welcomed = DispatchSemaphore(value: 0)
         let client = RoutingClient(endpoint: listener.endpoint, keepRouting: false,
-                                   callbackQueue: DispatchQueue(label: "local.junction.self-test.client")) { event in
+                                   callbackQueue: DispatchQueue(label: "com.kitedrake.junction.self-test.client")) { event in
             if case .connected = event { welcomed.signal() }
         }
         client.connect()
@@ -511,7 +511,7 @@ enum CommandLineTool {
         let answered = DispatchSemaphore(value: 0)
         nonisolated(unsafe) var outcome: DriverDaemonClient.Outcome?
         DriverDaemonClient(endpoint: listener.endpoint).send(.installDriver(allowOlder: false), timeout: 5,
-                                                             queue: DispatchQueue(label: "local.junction.self-test.daemon")) {
+                                                             queue: DispatchQueue(label: "com.kitedrake.junction.self-test.daemon")) {
             outcome = $0
             answered.signal()
         }
@@ -563,7 +563,7 @@ enum CommandLineTool {
         defer { captured.deallocate() }
         nonisolated(unsafe) var written = 0
         nonisolated(unsafe) var phase = 0.0
-        let queue = DispatchQueue(label: "local.junction.loopback-test")
+        let queue = DispatchQueue(label: "com.kitedrake.junction.loopback-test")
         var procID: AudioDeviceIOProcID?
         var status = AudioDeviceCreateIOProcIDWithBlock(&procID, device, queue) { _, input, _, output, _ in
             let outs = UnsafeMutableAudioBufferListPointer(output)

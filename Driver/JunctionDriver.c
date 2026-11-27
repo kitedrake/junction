@@ -49,18 +49,19 @@
 
 #pragma mark - Constants
 
-#define kDriverVersion "0.2.0"
-#define kBundleID "local.junction.driver"
+#define kDriverVersion "0.3.0"
+#define kBundleID "com.kitedrake.junction.driver"
 #define kManufacturer "omso"
-#define kModelUID "local.junction.virtual-device"
-#define kConfigurationApp "local.junction.app"
+#define kModelUID "com.kitedrake.junction.virtual-device"
+#define kConfigurationApp "com.kitedrake.junction"
 #define kStorageKey "devices"
 #define kCompanionSuffix ".routing"
 #define kDefaultIcon "junction"
 /// Junction Driver Installer's service that takes the capture region (see the daemon's launchd plist).
-#define kCaptureService "local.junction.driverd.capture"
-/// Clients whose bundle ID starts with this are Junction's own and are never captured.
-#define kOwnBundlePrefix "local.junction."
+#define kCaptureService "com.kitedrake.junction.driverd.capture"
+/// Junction's bundle ID. Clients with this ID or one under it (Junction Helper's) are Junction's own and are never
+/// captured.
+#define kOwnBundleID "com.kitedrake.junction"
 
 enum {
     kMaxDevices = 32,
@@ -168,8 +169,8 @@ static void OneTimeSetup(void) {
     mach_timebase_info(&timebase);
     gHostTicksPerSecond = 1.0e9 * (Float64)timebase.denom / (Float64)timebase.numer;
     gAnchorHostTime = mach_absolute_time();
-    gNotifyQueue = dispatch_queue_create("local.junction.driver.notify", DISPATCH_QUEUE_SERIAL);
-    gCaptureQueue = dispatch_queue_create("local.junction.driver.capture", DISPATCH_QUEUE_SERIAL);
+    gNotifyQueue = dispatch_queue_create("com.kitedrake.junction.driver.notify", DISPATCH_QUEUE_SERIAL);
+    gCaptureQueue = dispatch_queue_create("com.kitedrake.junction.driver.capture", DISPATCH_QUEUE_SERIAL);
     mach_vm_address_t address = 0;
     if (mach_vm_allocate(mach_task_self(), &address, JCAP_REGION_BYTES, VM_FLAGS_ANYWHERE) == KERN_SUCCESS) {
         gCaptureRegion = (void *)address;
@@ -879,7 +880,8 @@ static OSStatus AddDeviceClient(AudioServerPlugInDriverRef d, AudioObjectID devi
     if (!c || !gCaptureRegion || !IsDeviceKind(Resolve(device, &slot))) return noErr;
     char bundleID[JCAP_TEXT], deviceUID[JCAP_TEXT];
     if (!CStringFrom(c->mBundleID, bundleID, sizeof bundleID) || bundleID[0] == 0) return noErr;
-    if (strncmp(bundleID, kOwnBundlePrefix, strlen(kOwnBundlePrefix)) == 0) return noErr;
+    size_t own = strlen(kOwnBundleID);
+    if (strncmp(bundleID, kOwnBundleID, own) == 0 && (bundleID[own] == 0 || bundleID[own] == '.')) return noErr;
     pthread_mutex_lock(&gStateMutex);
     bool named = gSlots[slot].uid && CStringFrom(gSlots[slot].uid, deviceUID, sizeof deviceUID);
     UInt32 channels = gSlots[slot].channels;

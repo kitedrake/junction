@@ -5,10 +5,10 @@
      to its XPC service; it restarts it after a crash, not after it quits by itself. -->
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>local.junction.helper</string>
+  <key>Label</key><string>com.kitedrake.junction.helper</string>
   <key>BundleProgram</key><string>Contents/Library/LoginItems/JunctionHelper.app/Contents/MacOS/JunctionHelper</string>
-  <key>AssociatedBundleIdentifiers</key><array><string>local.junction.app</string></array>
-  <key>MachServices</key><dict><key>local.junction.helper</key><true/></dict>
+  <key>AssociatedBundleIdentifiers</key><array><string>com.kitedrake.junction</string></array>
+  <key>MachServices</key><dict><key>com.kitedrake.junction.helper</key><true/></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
   <key>LimitLoadToSessionType</key><string>Aqua</string>

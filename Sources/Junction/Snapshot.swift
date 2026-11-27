@@ -261,7 +261,7 @@ enum Demo {
 extension Demo {
     /// A made-up crash of Junction Helper, offered as a released build would (with a report address).
     @MainActor static func crashOffer(_ model: AppModel) -> CrashOffer {
-        let header = #"{"app_name":"JunctionHelper","timestamp":"2026-11-20 10:15:02.00 +0100","app_version":"0.9.0","bundleID":"local.junction.helper","bug_type":"309","os_version":"macOS 26.1 (25B78)","name":"JunctionHelper"}"#
+        let header = #"{"app_name":"JunctionHelper","timestamp":"2026-11-20 10:15:02.00 +0100","app_version":"0.9.0","bundleID":"com.kitedrake.junction.helper","bug_type":"309","os_version":"macOS 26.1 (25B78)","name":"JunctionHelper"}"#
         let body = """
         {
           "procName" : "JunctionHelper",

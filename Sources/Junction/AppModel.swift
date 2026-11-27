@@ -177,7 +177,7 @@ final class AppModel {
     @ObservationIgnored private var driverChangeDone: ((Bool) -> Void)?
     /// Junction uninstalled itself: nothing is saved any more.
     @ObservationIgnored private var isUninstalled = false
-    private static let log = Logger(subsystem: "local.junction", category: "routing")
+    private static let log = Logger(subsystem: "com.kitedrake.junction", category: "routing")
 
     init(demo: Bool) {
         isDemo = demo
@@ -1287,7 +1287,7 @@ final class AppModel {
         Self.controlsQueue.async { try? DriverClient.publish(devices) }
     }
 
-    private nonisolated static let controlsQueue = DispatchQueue(label: "local.junction.controls")
+    private nonisolated static let controlsQueue = DispatchQueue(label: "com.kitedrake.junction.controls")
 
     func moveLevel(cable id: UUID, to dB: Double, undoable: Bool = true) {
         moveFader(Self.levelKey(cable: id), "Change Level", value: dB, undoable: undoable) { graph in

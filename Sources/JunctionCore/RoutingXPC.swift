@@ -22,12 +22,12 @@ import Security
 public enum RoutingXPC {
     /// Bumped when a message changes shape; an app and a helper that disagree don't talk (the app routes itself).
     public static let protocolVersion = 4
-    public static let appBundleIdentifier = "local.junction.app"
-    public static let helperBundleIdentifier = "local.junction.helper"
+    public static let appBundleIdentifier = "com.kitedrake.junction"
+    public static let helperBundleIdentifier = "com.kitedrake.junction.helper"
     /// The launchd label and the Mach service the helper listens on.
-    public static let machServiceName = "local.junction.helper"
+    public static let machServiceName = "com.kitedrake.junction.helper"
     /// In Junction.app/Contents/Library/LaunchAgents, for `SMAppService.agent(plistName:)`.
-    public static let agentPlistName = "local.junction.helper.plist"
+    public static let agentPlistName = "com.kitedrake.junction.helper.plist"
     /// The helper inside Junction.app, and its executable.
     public static let helperBundlePath = "Contents/Library/LoginItems/JunctionHelper.app"
     public static let helperExecutablePath = helperBundlePath + "/Contents/MacOS/JunctionHelper"

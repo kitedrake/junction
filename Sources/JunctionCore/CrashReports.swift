@@ -178,6 +178,7 @@ public enum CleanUninstall {
         return steps + [.quit]
     }
 
-    /// The preference domains a full uninstall removes.
+    /// The preference domains a full uninstall removes, including the ones builds before 0.1.1 used.
     public static let preferenceDomains = [RoutingXPC.appBundleIdentifier, RoutingXPC.helperBundleIdentifier]
+        + PreferencesMigration.earlierDomains
 }

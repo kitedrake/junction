@@ -85,7 +85,7 @@ public struct Clipboard: Codable, Equatable, Sendable {
     /// The device node the cables to and from the canvas's device used.
     public var device: UUID?
 
-    public static let pasteboardType = "local.junction.nodes"
+    public static let pasteboardType = "com.kitedrake.junction.nodes"
 
     public init(nodes: [Node], cables: [Cable], device: UUID?) {
         self.nodes = nodes

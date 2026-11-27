@@ -260,6 +260,10 @@ again after every rebuild; build with `SIGN_IDENTITY="Apple Development: …" ./
 `JUNCTION_SIGN_IDENTITY`) to keep them. A Developer ID identity also turns on the hardened runtime with
 `Resources/Junction.entitlements` (audio input), as notarization requires.
 
+Junction's bundle ID is `com.kitedrake.junction`, and its helper, driver installer and driver use
+`com.kitedrake.junction.*`. Builds before 0.1.1 used `local.junction.*`: the first launch of a newer build copies
+their settings across, and it offers **Install Driver…** again, which replaces the older driver.
+
 Requires macOS 26 (Liquid Glass and app capture by bundle ID) and Xcode 26 or newer; the scripts use Xcode's toolchain.
 
 ## How it works
@@ -279,7 +283,7 @@ Three parts (five with the helpers):
    cycle longer than the ring keeps its end). Junction's own processes and clients without a bundle ID aren't
    captured. The plug-in's `jcli` property lists the captured clients and announces changes. The region reaches
    Junction only through Junction Driver Installer: the driver sends it (an XPC shared memory object) to the daemon's
-   second Mach service, `local.junction.driverd.capture`, which `AudioServerPlugIn_MachServices` in the driver's
+   second Mach service, `com.kitedrake.junction.driverd.capture`, which `AudioServerPlugIn_MachServices` in the driver's
    Info.plist lets it reach from coreaudiod's sandbox; the daemon accepts it only from Apple's Core Audio processes
    (code-signing requirement, user `_coreaudiod`) and maps it only for Junction and Junction Helper signed by its own
    team. The router's IOProc reads an app's rings (all its processes on that device, mixed) into a sample-rate
@@ -345,8 +349,8 @@ Three parts (five with the helpers):
 4. **Junction Helper** (`Sources/JunctionHelper`, `RoutingService.swift`, `RoutingClient.swift`, `RoutingXPC.swift`):
    in builds made for it, the planner and router run in a UI-element app (no Dock icon) at
    `Junction.app/Contents/Library/LoginItems/JunctionHelper.app`, which Junction registers with
-   `SMAppService.agent` (launch agent `Contents/Library/LaunchAgents/local.junction.helper.plist`). launchd starts it
-   at login and when the app connects to its XPC service, `local.junction.helper`. The helper reads `graph.json` at
+   `SMAppService.agent` (launch agent `Contents/Library/LaunchAgents/com.kitedrake.junction.helper.plist`). launchd starts it
+   at login and when the app connects to its XPC service, `com.kitedrake.junction.helper`. The helper reads `graph.json` at
    launch, plans and routes, and follows Core Audio restarts, wake and device changes itself. The app stays the
    editor: it saves `graph.json`, sends every change to the helper, and receives statuses, meters, routing events
    (the helper writes them to `events.log` too) and the helper's Microphone permission; it can also ask for a
@@ -366,14 +370,14 @@ Three parts (five with the helpers):
    the helper over XPC (protocol 3).
 5. **Junction Driver Installer** (`Sources/JunctionDriverDaemon`, `DriverDaemon.swift`): in builds made for it, a
    launch daemon at `Junction.app/Contents/Library/HelperTools/JunctionDriverDaemon` (plist
-   `Contents/Library/LaunchDaemons/local.junction.driverd.plist`), registered with `SMAppService.daemon` when the app
+   `Contents/Library/LaunchDaemons/com.kitedrake.junction.driverd.plist`), registered with `SMAppService.daemon` when the app
    starts. Once the user approves it, **Install Driver…**, **Update Driver…** and **Uninstall Driver…** go to it over
-   XPC (`local.junction.driverd`) instead of the administrator prompt. It runs as root, started on demand, and quits
+   XPC (`com.kitedrake.junction.driverd`) instead of the administrator prompt. It runs as root, started on demand, and quits
    after a minute without requests. Requests name no paths: it installs only the driver inside its own Junction.app,
    copies it into a root-owned staging folder first, and installs that copy only when its signature is intact, has
    the driver's identifier and the daemon's own team (so the app's); then it restarts Core Audio. It keeps a newer
    installed driver unless the user picked **Install Older Driver…**. It accepts connections only from
-   `local.junction.app` signed by the same team; an ad-hoc signed daemon accepts none. The app falls back to the
+   `com.kitedrake.junction` signed by the same team; an ad-hoc signed daemon accepts none. The app falls back to the
    administrator prompt when the daemon isn't approved or can't be reached, but not when it refuses (a driver whose
    signature doesn't check out is reported, not installed another way).
 
@@ -546,7 +550,7 @@ tests drive the helper's XPC protocol through an in-process listener with a stan
 helper bundle, its signature and launch agent, and the same XPC round trip.
 
 `build.sh` likewise always puts Junction Driver Installer and its launch daemon plist into Junction.app (signed with
-the identifier `local.junction.driverd`); `DRIVER_DAEMON` (`1` or `0`, written to `JunctionDriverDaemon` in
+the identifier `com.kitedrake.junction.driverd`); `DRIVER_DAEMON` (`1` or `0`, written to `JunctionDriverDaemon` in
 Info.plist) decides whether the app registers and uses it, and defaults to `0` like `ROUTING_HELPER`: builds without
 it keep the administrator prompt and register nothing. The tests put the daemon's root actions (stage, check a
 signature, install, remove, restart Core Audio) behind the `PrivilegedActions` protocol and check which copy it

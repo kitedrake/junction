@@ -40,7 +40,7 @@ final class CrashReportTests: XCTestCase {
         try write("JunctionHelper-2026-11-20-120000.ips", sample
             .replacingOccurrences(of: "\"app_name\":\"Junction\"", with: "\"app_name\":\"JunctionHelper\"")
             .replacingOccurrences(of: "\"name\":\"Junction\"", with: "\"name\":\"JunctionHelper\"")
-            .replacingOccurrences(of: "local.junction.app", with: "local.junction.helper")
+            .replacingOccurrences(of: "com.kitedrake.junction", with: "com.kitedrake.junction.helper")
             .replacingOccurrences(of: "10:15:02.00 +0100", with: "12:00:00.00 +0100"))
         // Already offered: before the last look.
         try write("Junction-2026-11-10-080000.ips", sample.replacingOccurrences(of: "2026-11-20 10:15:02.00", with: "2026-11-10 08:00:00.00"),
@@ -50,7 +50,7 @@ final class CrashReportTests: XCTestCase {
         // Another app whose name starts the same way.
         try write("JunctionBox-2026-11-20-110000.ips", sample.replacingOccurrences(of: "\"app_name\":\"Junction\"", with: "\"app_name\":\"JunctionBox\"")
             .replacingOccurrences(of: "\"name\":\"Junction\"", with: "\"name\":\"JunctionBox\"")
-            .replacingOccurrences(of: "local.junction.app", with: "com.example.box"))
+            .replacingOccurrences(of: "com.kitedrake.junction", with: "com.example.box"))
         try write("Junction-notes.txt", "not a crash log")
         // An older text crash log of the helper, written after the sample.
         try write("JunctionHelper_2026-11-20-130000_Mac.crash", "Process:               JunctionHelper [812]\nVersion:               0.9.0 (0.9.0)\n",
@@ -68,7 +68,7 @@ final class CrashReportTests: XCTestCase {
         let text = """
         Process:               JunctionHelper [812]
         Path:                  /Applications/Junction.app/Contents/Library/LoginItems/JunctionHelper.app/Contents/MacOS/JunctionHelper
-        Identifier:            local.junction.helper
+        Identifier:            com.kitedrake.junction.helper
         Version:               0.9.0 (0.9.0)
         Exception Type:        EXC_BAD_ACCESS (SIGSEGV)
         """
@@ -137,6 +137,7 @@ final class CrashReportTests: XCTestCase {
         XCTAssertEqual(CleanUninstall.steps(driverInstalled: false, removeSettings: true),
                        [.stopRouting, .unregisterRoutingHelper, .unregisterDriverInstaller, .unregisterLoginItem,
                         .removeSavedSetup, .removePreferences, .quit])
-        XCTAssertEqual(CleanUninstall.preferenceDomains, ["local.junction.app", "local.junction.helper"])
+        XCTAssertEqual(CleanUninstall.preferenceDomains, ["com.kitedrake.junction", "com.kitedrake.junction.helper",
+                                                          "local.junction.app", "local.junction.helper"])
     }
 }
