@@ -33,13 +33,8 @@ struct FrequencyResponseGraph: View {
                 .foregroundStyle(.secondary.opacity(0.5))
                 .lineStyle(StrokeStyle(lineWidth: 0.5))
             ForEach(curves) { curve in
-                ForEach(Array(zip(curve.frequencies, curve.levels).enumerated()), id: \.offset) { _, point in
-                    LineMark(x: .value("Frequency", point.0), y: .value("Level", min(max(point.1, range.lowerBound), range.upperBound)),
-                             series: .value("Curve", curve.name))
-                        .foregroundStyle(by: .value("Curve", curve.name))
-                        .lineStyle(StrokeStyle(lineWidth: curve.isFaint ? 0.75 : 1.5, dash: curve.isDashed ? [4, 3] : []))
-                        .opacity(curve.isFaint ? 0.45 : 1)
-                        .interpolationMethod(.monotone)
+                ForEach(Self.points(of: curve, in: range)) { point in
+                    Self.mark(point, of: curve)
                 }
             }
         }
@@ -66,6 +61,39 @@ struct FrequencyResponseGraph: View {
         .frame(height: height)
         .accessibilityLabel(accessibilityTitle)
         .accessibilityValue(curves.map(\.name).joined(separator: ", "))
+    }
+
+    /// One point of a curve, its level clamped to the graph's range.
+    private struct Point: Identifiable {
+        let id: Int
+        let frequency: Double
+        let level: Double
+    }
+
+    // Built in small typed steps: as one expression inside the Chart, older compilers time out type-checking it.
+    private static func points(of curve: ResponseCurve, in range: ClosedRange<Double>) -> [Point] {
+        let pairs: [(Double, Double)] = Array(zip(curve.frequencies, curve.levels))
+        var points: [Point] = []
+        points.reserveCapacity(pairs.count)
+        for (index, pair) in pairs.enumerated() {
+            let level: Double = min(max(pair.1, range.lowerBound), range.upperBound)
+            points.append(Point(id: index, frequency: pair.0, level: level))
+        }
+        return points
+    }
+
+    private static func mark(_ point: Point, of curve: ResponseCurve) -> some ChartContent {
+        let width: CGFloat = curve.isFaint ? 0.75 : 1.5
+        let dash: [CGFloat] = curve.isDashed ? [4, 3] : []
+        let opacity: Double = curve.isFaint ? 0.45 : 1
+        let x: PlottableValue<Double> = .value("Frequency", point.frequency)
+        let y: PlottableValue<Double> = .value("Level", point.level)
+        let series: PlottableValue<String> = .value("Curve", curve.name)
+        return LineMark(x: x, y: y, series: series)
+            .foregroundStyle(by: series)
+            .lineStyle(StrokeStyle(lineWidth: width, dash: dash))
+            .opacity(opacity)
+            .interpolationMethod(.monotone)
     }
 
     /// The curves' extent, rounded out to 3 dB and at least ±6 dB.
